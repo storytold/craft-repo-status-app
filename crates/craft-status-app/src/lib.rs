@@ -309,9 +309,13 @@ fn run_cycle(app: &AppHandle) -> i64 {
 }
 
 /// When the cached data is younger than one interval, wait out the rest of it
-/// instead of polling right at launch (relaunching shouldn't cost a poll).
+/// instead of polling right at launch (relaunching shouldn't cost a poll),
+/// unless an older build wrote it and it lacks data the UI shows.
 fn first_due(snap: &Snapshot, poll_secs: i64) -> DateTime<Utc> {
     let now = Utc::now();
+    if !snap.is_complete() {
+        return now;
+    }
     match snap.oldest_data_at() {
         Some(t) if (now - t).num_seconds() < poll_secs => t + chrono::Duration::seconds(poll_secs),
         _ => now,
@@ -707,9 +711,12 @@ mod tests {
     #[test]
     fn first_poll_waits_for_fresh_cache_only() {
         let now = Utc::now();
-        let fresh = snap_with(&[1, 2], now);
+        let mut fresh = snap_with(&[1, 2], now);
         let due = first_due(&fresh, 300);
         assert!(due > now + CDuration::seconds(150) && due <= now + CDuration::seconds(181));
+        // Stats written by a build that predates the activity windows.
+        fresh.repos[0].stats = Some(Default::default());
+        assert!(first_due(&fresh, 300) <= Utc::now());
         let old = snap_with(&[1, 20], now);
         assert!(first_due(&old, 300) <= Utc::now());
         assert!(first_due(&Snapshot::default(), 300) <= Utc::now());

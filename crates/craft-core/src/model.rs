@@ -1,10 +1,37 @@
 //! The data the UI renders. Everything here is serialized to the frontend
 //! and to the cache file, so field names are part of both contracts.
 
+use std::collections::BTreeMap;
+
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 pub type Time = DateTime<Utc>;
+
+/// The "recent activity" windows, as `(id, minutes)`, shortest first. Every
+/// poll fetches all of them; the UI's dropdown picks one by id (`ui/model.js`
+/// lists the same ids).
+pub const WINDOWS: &[(&str, i64)] = &[
+    ("10m", 10),
+    ("30m", 30),
+    ("1h", 60),
+    ("4h", 4 * 60),
+    ("12h", 12 * 60),
+    ("1d", 24 * 60),
+    ("7d", 7 * 24 * 60),
+];
+
+/// What happened in one recent window.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct Activity {
+    /// Commits to the default branch (`main`).
+    pub commits: u64,
+    pub prs_opened: u64,
+    /// PRs merged in the window, whenever they were opened.
+    pub prs_merged: u64,
+    pub issues_opened: u64,
+}
 
 /// One poll's worth of numbers for a repository.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
@@ -20,9 +47,8 @@ pub struct RepoStats {
     pub oldest_open_pr_at: Option<Time>,
     /// Newest PR, any state.
     pub newest_pr_at: Option<Time>,
-    pub commits_4h: u64,
-    pub prs_4h: u64,
-    pub issues_4h: u64,
+    /// Activity per window, keyed by the ids in [`WINDOWS`].
+    pub recent: BTreeMap<String, Activity>,
     pub commits_total: u64,
     pub contributors: u64,
     pub issues_total: u64,
@@ -121,6 +147,16 @@ impl Snapshot {
             .flatten()
     }
 
+    /// False when some repo's stats predate a field the UI needs: today, a
+    /// recent-activity window. Such a cache (from an older build) shouldn't
+    /// delay the launch poll.
+    pub fn is_complete(&self) -> bool {
+        self.repos
+            .iter()
+            .filter_map(|r| r.stats.as_ref())
+            .all(|s| WINDOWS.iter().all(|(id, _)| s.recent.contains_key(*id)))
+    }
+
     pub fn is_stale(&self, now: Time) -> bool {
         self.repos.is_empty()
             || self
@@ -172,6 +208,21 @@ mod tests {
         assert!(!s.repos[0].is_stale(now, s.stale_after_secs));
         s.repos[1].fetched_at = None;
         assert_eq!(s.oldest_data_at(), None);
+    }
+
+    #[test]
+    fn cache_without_every_window_is_incomplete() {
+        let mut s = Snapshot::default();
+        s.sync_repos(&["o/a".into(), "o/b".into()]);
+        assert!(s.is_complete(), "no stats yet is not a reason to refetch");
+        let mut stats = RepoStats::default();
+        s.repos[0].stats = Some(stats.clone());
+        assert!(!s.is_complete(), "cache from before the windows existed");
+        for (id, _) in WINDOWS {
+            stats.recent.insert(id.to_string(), Activity::default());
+        }
+        s.repos[0].stats = Some(stats);
+        assert!(s.is_complete());
     }
 
     #[test]

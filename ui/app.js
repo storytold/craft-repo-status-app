@@ -2,7 +2,7 @@
 // Outside Tauri (plain browser) it loads ./dev-snapshot.json, written by
 // `make snapshot`, so the UI can be iterated on without the app.
 
-import { COLUMNS, value, sortEntries, defaultDir, freshness, ago, totals, urgentAcross } from './model.js';
+import { COLUMNS, RECENT, WINDOWS, windowById, value, sortEntries, defaultDir, freshness, ago, totals, urgentAcross } from './model.js';
 
 const $ = (id) => document.getElementById(id);
 const TAURI = window.__TAURI__;
@@ -38,6 +38,7 @@ const state = {
   meta: {},
   view: new URLSearchParams(location.search).get('view') ?? load('view', 'repos'),
   sort: load('sort', { key: 'urgency', dir: 'desc' }),
+  window: windowById(load('window', '')).id,
   urgentRepo: '',
   criticalOnly: load('criticalOnly', false),
 };
@@ -72,7 +73,7 @@ const link = (text, url, cls = '') => el('span', { class: `link ${cls}`, onclick
 
 /** Cell content for a column. */
 function cell(entry, col) {
-  const v = value(entry, col.key);
+  const v = value(entry, col.key, state.window);
   const s = entry.stats;
   if (col.key === 'name') {
     const tip = entry.error
@@ -89,7 +90,8 @@ function cell(entry, col) {
     case 'critical_issues': return el('span', { class: v ? 'crit' : 'zero' }, num(v));
     case 'open_prs': return link(num(v), gh(entry.repo, '/pulls'));
     case 'open_issues': return link(num(v), gh(entry.repo, '/issues'));
-    case 'commits_4h': case 'prs_4h': case 'issues_4h':
+    case 'recent_commits': case 'recent_prs': case 'recent_merged': case 'recent_issues':
+      if (v === null) return el('span', { class: 'muted', title: 'Not fetched yet for this window' }, '—');
       return el('span', { class: v ? 'active' : 'zero' }, num(v));
     case 'latest_build':
       if (!v) return el('span', { class: 'muted' }, '—');
@@ -112,14 +114,14 @@ function renderHead() {
   for (const c of COLUMNS) {
     if (c.group === prev) { groups.lastChild.colSpan += 1; continue; }
     prev = c.group;
-    groups.append(el('th', { class: c.group ? 'group-start' : '' }, c.group));
+    groups.append(el('th', { class: c.group ? 'group-start' : '' }, c.group === RECENT ? windowPicker() : c.group));
   }
   const cols = el('tr', { class: 'cols' });
   COLUMNS.forEach((c, i) => {
     const sorted = state.sort.key === c.key;
     const start = i > 0 && COLUMNS[i - 1].group !== c.group;
     cols.append(el('th', {
-      title: c.title ?? `Sort by ${c.label}`,
+      title: c.title?.replace('{span}', windowById(state.window).span) ?? `Sort by ${c.label}`,
       class: [sorted && 'sorted', sorted && state.sort.dir === 'asc' && 'asc', start && 'group-start'].filter(Boolean).join(' '),
       onclick: () => {
         state.sort = state.sort.key === c.key
@@ -133,6 +135,18 @@ function renderHead() {
   $('thead').replaceChildren(groups, cols);
 }
 
+/** The dropdown that heads the recent-activity columns. */
+function windowPicker() {
+  const sel = el('select', {
+    class: 'window-picker',
+    'aria-label': 'Time window for recent activity',
+    title: 'Time window for the activity columns',
+    onchange: (e) => { state.window = e.target.value; save('window', state.window); render(); },
+  }, WINDOWS.map((w) => el('option', { value: w.id }, w.label)));
+  sel.value = state.window;
+  return sel;
+}
+
 function groupStart(i) {
   return i > 0 && COLUMNS[i - 1].group !== COLUMNS[i].group ? 'group-start' : '';
 }
@@ -140,7 +154,7 @@ function groupStart(i) {
 function renderTable() {
   renderHead();
   const snap = state.snap;
-  const rows = sortEntries(snap.repos, state.sort.key, state.sort.dir);
+  const rows = sortEntries(snap.repos, state.sort.key, state.sort.dir, state.window);
   const now = Date.now();
   $('tbody').replaceChildren(...rows.map((e) => {
     const stale = !e.fetched_at || now - Date.parse(e.fetched_at) > snap.stale_after_secs * 1000;
@@ -153,7 +167,7 @@ function renderTable() {
   if (!rows.length) {
     $('tbody').replaceChildren(el('tr', {}, el('td', { colspan: COLUMNS.length, class: 'empty' }, 'No repositories configured — Edit config.')));
   }
-  const t = totals(snap.repos);
+  const t = totals(snap.repos, state.window);
   $('tfoot').replaceChildren(el('tr', {}, COLUMNS.map((c, i) =>
     el('td', { class: groupStart(i) }, i === 0 ? `${snap.repos.length} repos` : c.kind === 'num' ? num(Math.round(t[c.key])) : ''))));
 }

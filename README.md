@@ -26,10 +26,15 @@ with no data always sort last.
 | Fix first | **Urgency** (the sum of the top five open-issue scores) · **Critical** (open issues naming a crash, hang, freeze, data loss, launch failure or security problem) |
 | Open | open PRs · open issues · oldest open PR |
 | Latest | last commit to `main` · newest issue · newest PR |
-| Last 4 h | commits to `main` · PRs opened · issues opened |
+| Recent (dropdown) | commits to `main` · PRs opened · PRs merged · issues opened |
 | All time | commits on `main` · contributors · issues (open + closed) · PRs (open + closed + merged) |
 | Builds | most recent release tag · its publish date · its downloads · downloads across all releases |
 
+- **Recent** activity covers the window picked in that group's header: the
+  last 10 min, 30 min, hour, 4 h (the default), 12 h, day or week. Every poll
+  fetches all seven windows, so switching is instant; the choice is remembered.
+  The numbers are as of the last poll, so short windows lag by up to
+  `poll_minutes`.
 - **Builds** are GitHub releases. Drafts are ignored. Prereleases count, and
   they carry a `PRE` tag.
 - **Downloads** add up every OS and package type: dmg, msi, AppImage, deb,

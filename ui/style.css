@@ -83,6 +83,9 @@ thead tr.cols th.sorted { color: var(--accent); }
 thead tr.cols th.sorted::after { content: ' ↓'; }
 thead tr.cols th.sorted.asc::after { content: ' ↑'; }
 th.group-start, td.group-start { border-left: 1px solid var(--border); }
+.window-picker { appearance: none; -webkit-appearance: none; border: 0; background: none; padding: 0 12px 0 2px; color: var(--accent); font-size: 10px; font-weight: 600; text-transform: uppercase; letter-spacing: .06em; text-align: center; text-align-last: center;
+  background-image: linear-gradient(45deg, transparent 50%, currentColor 50%), linear-gradient(135deg, currentColor 50%, transparent 50%); background-position: right 4px top 55%, right 1px top 55%; background-size: 3px 3px; background-repeat: no-repeat; }
+.window-picker option { text-transform: none; color: var(--fg); background: rgb(var(--bg)); }
 tbody tr { cursor: pointer; }
 tbody tr:hover td { background-color: var(--row-hover); }
 tbody tr:hover td:first-child { background-image: linear-gradient(var(--row-hover), var(--row-hover)); }

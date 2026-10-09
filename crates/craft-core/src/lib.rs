@@ -10,7 +10,7 @@ pub mod urgency;
 
 pub use cache::Cache;
 pub use config::{Config, WindowState};
-pub use model::{RepoEntry, RepoStats, Snapshot, UrgentIssue};
+pub use model::{Activity, RepoEntry, RepoStats, Snapshot, UrgentIssue, WINDOWS};
 pub use releases::{summarize_releases, Asset, Release, ReleaseSummary};
 pub use urgency::{rank_issues, score_issue, IssueInput, Scored};
 

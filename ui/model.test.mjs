@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { sortEntries, versionKey, freshness, ago, compact, totals, urgentAcross, defaultDir } from './model.js';
+import { sortEntries, versionKey, freshness, ago, compact, totals, urgentAcross, defaultDir, value, windowById, WINDOWS } from './model.js';
 
 const entry = (repo, stats, fetched_at = '2026-10-08T12:00:00Z') => ({ repo: `o/${repo}`, stats, fetched_at });
 
@@ -60,4 +60,22 @@ test('totals and urgent merge', () => {
   assert.deepEqual(urgentAcross(e).map((u) => u.number), [2, 3, 1]);
   assert.deepEqual(urgentAcross(e, { criticalOnly: true }).map((u) => u.repo), ['o/a', 'o/b']);
   assert.deepEqual(urgentAcross(e, { repo: 'o/b' }).map((u) => u.number), [3]);
+});
+
+test('recent-activity columns follow the selected window', () => {
+  const act = (commits, prs_merged) => ({ commits, prs_opened: 0, prs_merged, issues_opened: 0 });
+  const e = [
+    entry('a', { recent: { '4h': act(5, 1), '7d': act(9, 40) } }),
+    entry('b', { recent: { '4h': act(8, 2), '7d': act(8, 10) } }),
+    entry('old', { commits_4h: 99 }),
+  ];
+  assert.equal(value(e[0], 'recent_commits'), 5, 'defaults to 4 h');
+  assert.equal(value(e[0], 'recent_merged', '7d'), 40);
+  assert.equal(value(e[0], 'recent_commits', '10m'), null, 'window not fetched yet');
+  assert.equal(value(e[2], 'recent_commits'), null, 'cache from before windows');
+  assert.equal(names(sortEntries(e, 'recent_commits', 'desc', '4h')), 'baold');
+  assert.equal(names(sortEntries(e, 'recent_commits', 'desc', '7d')), 'abold');
+  assert.equal(totals(e, '7d').recent_merged, 50);
+  assert.equal(windowById('bogus').id, '4h');
+  assert.deepEqual(WINDOWS.map((w) => w.id), ['10m', '30m', '1h', '4h', '12h', '1d', '7d']);
 });

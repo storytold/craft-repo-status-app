@@ -1,7 +1,7 @@
 //! Fetches one repository's [`RepoStats`] from GitHub.
 //!
-//! Per repo: one GraphQL query for counts, dates, the 4-hour windows and the
-//! open issues to rank; one (usually) GraphQL query for releases + asset
+//! Per repo: one GraphQL query for counts, dates, every recent-activity window
+//! ([`WINDOWS`]) and the open issues to rank; one (usually) GraphQL query for releases + asset
 //! download counts; one REST call for the contributor count (GraphQL has no
 //! such field — we ask for one per page and read the last page number from
 //! the `Link` header). Blocking I/O: callers run this on worker threads.
@@ -10,14 +10,14 @@ use std::process::Command;
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
-use craft_core::{rank_issues, summarize_releases, Asset, IssueInput, Release, RepoStats};
+use craft_core::{
+    rank_issues, summarize_releases, Activity, Asset, IssueInput, Release, RepoStats, WINDOWS,
+};
 use reqwest::blocking::Client;
 use reqwest::header::{HeaderMap, ACCEPT, AUTHORIZATION, USER_AGENT};
 use serde_json::{json, Value};
 
 const API: &str = "https://api.github.com";
-/// The "last N hours" window the UI reports.
-pub const RECENT_HOURS: i64 = 4;
 /// How many ranked issues each repo keeps for the Urgent view.
 const KEEP_URGENT: usize = 20;
 
@@ -163,17 +163,9 @@ impl GitHub {
         let (owner, name) = repo
             .split_once('/')
             .ok_or_else(|| Error::GraphQl(format!("bad repo {repo:?}")))?;
-        let since = now - chrono::Duration::hours(RECENT_HOURS);
-        let since_s = since.to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
         let main = self.graphql(
-            MAIN_QUERY,
-            json!({
-                "owner": owner,
-                "name": name,
-                "since": since_s,
-                "prs4h": format!("repo:{repo} is:pr created:>={since_s}"),
-                "issues4h": format!("repo:{repo} is:issue created:>={since_s}"),
-            }),
+            &main_query(repo, now),
+            json!({ "owner": owner, "name": name }),
         )?;
         let releases = self.releases(owner, name)?;
         let contributors = self.contributors(repo)?;
@@ -315,6 +307,57 @@ fn parse_issues(conn: &Value) -> Vec<IssueInput> {
         .unwrap_or_default()
 }
 
+fn search_count(main: &Value, alias: &str) -> u64 {
+    main[alias]["issueCount"].as_u64().unwrap_or(0)
+}
+
+/// Reads the per-window aliases [`main_query`] asked for. A repo with no
+/// default branch still gets every window (with zero commits).
+fn recent_activity(main: &Value) -> std::collections::BTreeMap<String, Activity> {
+    if main["repository"].is_null() {
+        return Default::default();
+    }
+    let head = &main["repository"]["defaultBranchRef"]["target"];
+    WINDOWS
+        .iter()
+        .enumerate()
+        .map(|(i, (id, _))| {
+            let a = Activity {
+                commits: count(&head[format!("c{i}")]),
+                prs_opened: search_count(main, &format!("p{i}")),
+                prs_merged: search_count(main, &format!("m{i}")),
+                issues_opened: search_count(main, &format!("i{i}")),
+            };
+            (id.to_string(), a)
+        })
+        .collect()
+}
+
+/// [`MAIN_QUERY`] with one commit-history count and three searches per
+/// window, aliased by window index (`c0`, `p0`, `m0`, `i0`…). GitHub charges
+/// the whole query one rate-limit point however many windows it holds.
+pub fn main_query(repo: &str, now: DateTime<Utc>) -> String {
+    let mut history = String::new();
+    let mut searches = String::new();
+    for (i, (_, minutes)) in WINDOWS.iter().enumerate() {
+        let since = (now - chrono::Duration::minutes(*minutes))
+            .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        history += &format!("c{i}: history(since: \"{since}\") {{ totalCount }}\n");
+        for (alias, filter) in [
+            ("p", format!("is:pr created:>={since}")),
+            ("m", format!("is:pr merged:>={since}")),
+            ("i", format!("is:issue created:>={since}")),
+        ] {
+            let q = Value::from(format!("repo:{repo} {filter}"));
+            searches +=
+                &format!("  {alias}{i}: search(query: {q}, type: ISSUE) {{ issueCount }}\n");
+        }
+    }
+    MAIN_QUERY
+        .replace("{HISTORY}", &history)
+        .replace("{SEARCHES}", &searches)
+}
+
 /// Pure: turn the GraphQL payloads into the model (unit-tested below).
 pub fn build_stats(
     main: &Value,
@@ -336,9 +379,7 @@ pub fn build_stats(
         last_issue_at: first_time(&r["newestIssue"], "createdAt"),
         oldest_open_pr_at: first_time(&r["oldestOpenPr"], "createdAt"),
         newest_pr_at: first_time(&r["newestPr"], "createdAt"),
-        commits_4h: count(&head["recent"]),
-        prs_4h: main["prs4h"]["issueCount"].as_u64().unwrap_or(0),
-        issues_4h: main["issues4h"]["issueCount"].as_u64().unwrap_or(0),
+        recent: recent_activity(main),
         commits_total: count(&head["all"]),
         contributors,
         issues_total: count(&r["allIssues"]),
@@ -355,7 +396,7 @@ pub fn build_stats(
 }
 
 const MAIN_QUERY: &str = r#"
-query($owner: String!, $name: String!, $since: GitTimestamp!, $prs4h: String!, $issues4h: String!) {
+query($owner: String!, $name: String!) {
   repository(owner: $owner, name: $name) {
     openPrs: pullRequests(states: OPEN) { totalCount }
     allPrs: pullRequests { totalCount }
@@ -370,14 +411,12 @@ query($owner: String!, $name: String!, $since: GitTimestamp!, $prs4h: String!, $
       target {
         ... on Commit {
           all: history(first: 1) { totalCount nodes { committedDate } }
-          recent: history(since: $since) { totalCount }
+          {HISTORY}
         }
       }
     }
   }
-  prs4h: search(query: $prs4h, type: ISSUE) { issueCount }
-  issues4h: search(query: $issues4h, type: ISSUE) { issueCount }
-  rateLimit { remaining resetAt }
+{SEARCHES}  rateLimit { remaining resetAt }
 }
 fragment I on Issue {
   number title url createdAt updatedAt authorAssociation
@@ -429,9 +468,9 @@ mod tests {
             "hotOpen": {"nodes": []},
             "defaultBranchRef": {"target": {
               "all": {"totalCount": 1234, "nodes": [{"committedDate": "2026-10-08T03:00:00Z"}]},
-              "recent": {"totalCount": 9}}}
+              "c0": {"totalCount": 1}, "c3": {"totalCount": 9}}}
           },
-          "prs4h": {"issueCount": 2}, "issues4h": {"issueCount": 4}
+          "p3": {"issueCount": 2}, "m3": {"issueCount": 3}, "i3": {"issueCount": 4}, "m6": {"issueCount": 30}
         });
         let rel = parse_releases(&json!({"nodes": [
           {"tagName": "v1.1.0", "isDraft": true, "isPrerelease": false, "publishedAt": null, "createdAt": "2026-10-08T00:00:00Z",
@@ -445,10 +484,19 @@ mod tests {
             (s.open_prs, s.prs_total, s.open_issues, s.issues_total),
             (3, 40, 7, 90)
         );
+        assert_eq!(s.commits_total, 1234);
+        assert_eq!(s.recent.len(), WINDOWS.len());
+        let a = |id: &str| s.recent[id];
         assert_eq!(
-            (s.commits_total, s.commits_4h, s.prs_4h, s.issues_4h),
-            (1234, 9, 2, 4)
+            a("4h"),
+            Activity {
+                commits: 9,
+                prs_opened: 2,
+                prs_merged: 3,
+                issues_opened: 4
+            }
         );
+        assert_eq!((a("10m").commits, a("7d").prs_merged), (1, 30));
         assert_eq!(s.contributors, 12);
         assert_eq!(s.latest_build.as_deref(), Some("v1.0.0"));
         assert_eq!((s.latest_build_downloads, s.downloads_total), (10, 10));
@@ -462,13 +510,25 @@ mod tests {
     }
 
     #[test]
+    fn query_asks_for_every_window() {
+        let now: DateTime<Utc> = "2026-10-08T04:00:00Z".parse().unwrap();
+        let q = main_query("o/r", now);
+        assert!(q.contains(r#"c3: history(since: "2026-10-08T00:00:00Z")"#));
+        assert!(q.contains(r#"m6: search(query: "repo:o/r is:pr merged:>=2026-10-01T04:00:00Z""#));
+        assert!(!q.contains("{HISTORY}") && !q.contains("{SEARCHES}"));
+    }
+
+    #[test]
     fn empty_repository_is_all_zero() {
-        let s = build_stats(
+        let mut s = build_stats(
             &json!({"repository": {"defaultBranchRef": null}}),
             &[],
             0,
             Utc::now(),
         );
+        assert_eq!(s.recent.len(), WINDOWS.len());
+        assert!(s.recent.values().all(|a| *a == Activity::default()));
+        s.recent.clear();
         assert_eq!(s, RepoStats::default());
     }
 }

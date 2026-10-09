@@ -32,8 +32,8 @@ fn main() {
         ..Default::default()
     };
     println!(
-        "{:<12} {:>5} {:>6} {:>4} {:>4} {:>4} {:>7} {:>5} {:>7} {:>7} {:<12} {:>7} {:>8} {:>6} {:>4}",
-        "repo", "oPR", "oIss", "c4h", "p4h", "i4h", "commits", "ctrb", "issues", "prs", "build", "bld dl",
+        "{:<12} {:>5} {:>6} {:>4} {:>4} {:>4} {:>4} {:>7} {:>5} {:>7} {:>7} {:<12} {:>7} {:>8} {:>6} {:>4}",
+        "repo", "oPR", "oIss", "c4h", "p4h", "m4h", "i4h", "commits", "ctrb", "issues", "prs", "build", "bld dl",
         "total dl", "urg", "crit"
     );
     for repo in &repos {
@@ -41,9 +41,11 @@ fn main() {
         entry.last_attempt_at = Some(now);
         match gh.fetch_repo(repo, now) {
             Ok((s, budget)) => {
+                // The table shows the 4-hour window; the snapshot carries them all.
+                let r4 = s.recent.get("4h").copied().unwrap_or_default();
                 println!(
-                    "{:<12} {:>5} {:>6} {:>4} {:>4} {:>4} {:>7} {:>5} {:>7} {:>7} {:<12} {:>7} {:>8} {:>6} {:>4}",
-                    entry.name(), s.open_prs, s.open_issues, s.commits_4h, s.prs_4h, s.issues_4h,
+                    "{:<12} {:>5} {:>6} {:>4} {:>4} {:>4} {:>4} {:>7} {:>5} {:>7} {:>7} {:<12} {:>7} {:>8} {:>6} {:>4}",
+                    entry.name(), s.open_prs, s.open_issues, r4.commits, r4.prs_opened, r4.prs_merged, r4.issues_opened,
                     s.commits_total, s.contributors, s.issues_total, s.prs_total,
                     s.latest_build.clone().unwrap_or_default(), s.latest_build_downloads,
                     s.downloads_total, s.urgency, s.critical_issues
