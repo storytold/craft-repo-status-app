@@ -24,6 +24,18 @@ test('versions sort semantically, prereleases below their release', () => {
   assert.deepEqual(versionKey('nightly'), [-1]);
 });
 
+test('commits since the build read through to since_build', () => {
+  const lagged = [
+    entry('a', { since_build: { commits: 3, basis: 'exact', from_sha: 'x' } }),
+    entry('b', { since_build: { commits: 40, basis: 'branched', from_sha: null } }),
+    entry('c', { since_build: null }),
+    entry('d', null, null),
+  ];
+  assert.equal(names(sortEntries(lagged, 'commits_since_build', 'desc')), 'bacd');
+  assert.equal(value(lagged[2], 'commits_since_build'), null);
+  assert.equal(totals(lagged).commits_since_build, 43);
+});
+
 test('dates and names', () => {
   assert.equal(names(sortEntries(rows, 'last_commit_at', 'desc')), 'abcd');
   assert.equal(names(sortEntries(rows, 'name', 'asc')), 'abcd');
@@ -63,9 +75,9 @@ test('totals and urgent merge', () => {
 });
 
 test('recent-activity columns follow the selected window', () => {
-  const act = (commits, prs_merged) => ({ commits, prs_opened: 0, prs_merged, issues_opened: 0 });
+  const act = (commits, prs_merged, people = 0) => ({ commits, prs_opened: 0, prs_merged, issues_opened: 0, people });
   const e = [
-    entry('a', { recent: { '4h': act(5, 1), '7d': act(9, 40) } }),
+    entry('a', { recent: { '4h': act(5, 1, 2), '7d': act(9, 40), all: act(1234, 300, 12) } }),
     entry('b', { recent: { '4h': act(8, 2), '7d': act(8, 10) } }),
     entry('old', { commits_4h: 99 }),
   ];
@@ -77,5 +89,9 @@ test('recent-activity columns follow the selected window', () => {
   assert.equal(names(sortEntries(e, 'recent_commits', 'desc', '7d')), 'abold');
   assert.equal(totals(e, '7d').recent_merged, 50);
   assert.equal(windowById('bogus').id, '4h');
-  assert.deepEqual(WINDOWS.map((w) => w.id), ['10m', '30m', '1h', '4h', '12h', '1d', '7d']);
+  assert.equal(value(e[0], 'recent_people'), 2);
+  assert.equal(value(e[0], 'recent_people', 'all'), 12, 'all time is just another window');
+  assert.equal(value(e[1], 'recent_commits', 'all'), null, 'cache from before all time');
+  assert.equal(names(sortEntries(e, 'recent_merged', 'desc', 'all')), 'abold');
+  assert.deepEqual(WINDOWS.map((w) => w.id), ['10m', '30m', '1h', '4h', '12h', '1d', '7d', 'all']);
 });

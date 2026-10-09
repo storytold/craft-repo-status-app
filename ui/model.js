@@ -4,17 +4,19 @@
 /** @typedef {'text'|'num'|'date'|'version'} Kind */
 
 /**
- * The recent-activity windows the dropdown offers, shortest first. The ids
- * match `WINDOWS` in crates/craft-core/src/model.rs; every poll fetches all of them.
+ * The activity windows the dropdown offers, shortest first, then all time. The
+ * ids match `WINDOWS` and `ALL_TIME` in crates/craft-core/src/model.rs; every
+ * poll fetches all of them.
  */
 export const WINDOWS = [
-  { id: '10m', label: 'Last 10 min', span: '10 minutes' },
-  { id: '30m', label: 'Last 30 min', span: '30 minutes' },
-  { id: '1h', label: 'Last hour', span: 'hour' },
-  { id: '4h', label: 'Last 4 h', span: '4 hours' },
-  { id: '12h', label: 'Last 12 h', span: '12 hours' },
-  { id: '1d', label: 'Last day', span: 'day' },
-  { id: '7d', label: 'Last week', span: 'week' },
+  { id: '10m', label: 'Last 10 min', span: 'in the last 10 minutes' },
+  { id: '30m', label: 'Last 30 min', span: 'in the last 30 minutes' },
+  { id: '1h', label: 'Last hour', span: 'in the last hour' },
+  { id: '4h', label: 'Last 4 h', span: 'in the last 4 hours' },
+  { id: '12h', label: 'Last 12 h', span: 'in the last 12 hours' },
+  { id: '1d', label: 'Last day', span: 'in the last day' },
+  { id: '7d', label: 'Last week', span: 'in the last week' },
+  { id: 'all', label: 'All time', span: 'over all time' },
 ];
 export const DEFAULT_WINDOW = '4h';
 export const windowById = (id) => WINDOWS.find((w) => w.id === id) ?? windowById(DEFAULT_WINDOW);
@@ -38,16 +40,14 @@ export const COLUMNS = [
   { key: 'last_commit_at', label: 'Last commit', kind: 'date', group: 'Latest', title: 'Last commit on main' },
   { key: 'last_issue_at', label: 'Last issue', kind: 'date', group: 'Latest', title: 'Newest issue (any state)' },
   { key: 'newest_pr_at', label: 'Newest PR', kind: 'date', group: 'Latest', title: 'Newest pull request (any state)' },
-  { key: 'recent_commits', recent: 'commits', label: 'Commits', kind: 'num', group: RECENT, title: 'Commits to main in the last {span}' },
-  { key: 'recent_prs', recent: 'prs_opened', label: 'PRs', kind: 'num', group: RECENT, title: 'Pull requests opened in the last {span}' },
-  { key: 'recent_merged', recent: 'prs_merged', label: 'Merged', kind: 'num', group: RECENT, title: 'Pull requests merged in the last {span}' },
-  { key: 'recent_issues', recent: 'issues_opened', label: 'Issues', kind: 'num', group: RECENT, title: 'Issues opened in the last {span}' },
-  { key: 'commits_total', label: 'Commits', kind: 'num', group: 'All time', title: 'Commits on main, all time' },
-  { key: 'contributors', label: 'People', kind: 'num', group: 'All time', title: 'Contributors' },
-  { key: 'issues_total', label: 'Issues', kind: 'num', group: 'All time', title: 'Issues, all time, open + closed' },
-  { key: 'prs_total', label: 'PRs', kind: 'num', group: 'All time', title: 'Pull requests, all time, open + closed + merged' },
+  { key: 'recent_commits', recent: 'commits', label: 'Commits', kind: 'num', group: RECENT, title: 'Commits to main {span}' },
+  { key: 'recent_prs', recent: 'prs_opened', label: 'PRs', kind: 'num', group: RECENT, title: 'Pull requests opened {span}' },
+  { key: 'recent_merged', recent: 'prs_merged', label: 'Merged', kind: 'num', group: RECENT, title: 'Pull requests merged {span}' },
+  { key: 'recent_issues', recent: 'issues_opened', label: 'Issues', kind: 'num', group: RECENT, title: 'Issues opened {span}' },
+  { key: 'recent_people', recent: 'people', label: 'People', kind: 'num', group: RECENT, title: 'People who committed to main {span} (all time: GitHub’s contributor count)' },
   { key: 'latest_build', label: 'Build', kind: 'version', group: 'Builds', title: 'Most recent published release' },
   { key: 'latest_build_at', label: 'Built', kind: 'date', group: 'Builds', title: 'When the most recent release was published' },
+  { key: 'commits_since_build', label: 'Unreleased', kind: 'num', group: 'Builds', title: 'Commits on main since the most recent release (~ means estimated: the release’s commit isn’t on main)', get: (e) => e.stats?.since_build?.commits ?? null },
   { key: 'latest_build_downloads', label: 'Build DLs', kind: 'num', group: 'Builds', title: 'Downloads of the most recent release, all OSes and package types (checksums and update deltas excluded)' },
   { key: 'downloads_total', label: 'Total DLs', kind: 'num', group: 'Builds', title: 'Downloads across every published release' },
 ];

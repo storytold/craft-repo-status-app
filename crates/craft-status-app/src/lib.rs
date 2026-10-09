@@ -255,6 +255,22 @@ fn run_cycle(app: &AppHandle) -> i64 {
                 };
                 let now = Utc::now();
                 let result = gh.fetch_repo(&repo, now);
+                // The icon only changes with its blob, so most polls skip the download.
+                let held_icon = {
+                    let snap = state.snapshot.lock().unwrap();
+                    snap.repos
+                        .iter()
+                        .find(|e| e.repo == repo)
+                        .and_then(|e| e.icon_oid.clone())
+                };
+                let icon = match &result {
+                    Ok((stats, _)) => stats
+                        .icon_oid
+                        .as_ref()
+                        .filter(|oid| Some(*oid) != held_icon.as_ref())
+                        .map(|oid| (oid.clone(), gh.icon(&repo, oid))),
+                    Err(_) => None,
+                };
                 {
                     let mut snap = state.snapshot.lock().unwrap();
                     let Some(entry) = snap.repos.iter_mut().find(|e| e.repo == repo) else {
@@ -263,6 +279,18 @@ fn run_cycle(app: &AppHandle) -> i64 {
                     entry.last_attempt_at = Some(now);
                     match result {
                         Ok((stats, budget)) => {
+                            match icon {
+                                Some((oid, Ok(uri))) => {
+                                    entry.icon = Some(uri);
+                                    entry.icon_oid = Some(oid);
+                                }
+                                Some((_, Err(e))) => eprintln!("{repo}: icon: {e}"),
+                                None if stats.icon_oid.is_none() => {
+                                    entry.icon = None;
+                                    entry.icon_oid = None;
+                                }
+                                None => {}
+                            }
                             entry.stats = Some(stats);
                             entry.fetched_at = Some(now);
                             entry.error = None;

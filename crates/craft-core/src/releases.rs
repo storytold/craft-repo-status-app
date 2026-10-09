@@ -19,6 +19,9 @@ pub struct Release {
     pub prerelease: bool,
     pub published_at: Option<DateTime<Utc>>,
     pub created_at: Option<DateTime<Utc>>,
+    /// The commit the release's tag points at.
+    pub commit_sha: Option<String>,
+    pub commit_at: Option<DateTime<Utc>>,
     pub assets: Vec<Asset>,
 }
 
@@ -27,8 +30,35 @@ pub struct ReleaseSummary {
     pub latest_tag: Option<String>,
     pub latest_at: Option<DateTime<Utc>>,
     pub latest_prerelease: bool,
+    pub latest_sha: Option<String>,
+    pub latest_commit_at: Option<DateTime<Utc>>,
     pub latest_downloads: u64,
     pub total_downloads: u64,
+}
+
+/// How [`BuildLag::commits`] was measured.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LagBasis {
+    /// The build's commit is on `main`: commits after it, exactly.
+    Exact,
+    /// The build's commit is off `main` (say, a release branch with a version
+    /// bump): commits on `main` since the two split.
+    Branched,
+    /// No common history with `main`: commits on `main` newer than the
+    /// build's commit date.
+    ByDate,
+}
+
+/// Commits that have landed on `main` since the latest build.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct BuildLag {
+    pub commits: u64,
+    pub basis: LagBasis,
+    /// The `main` commit the count starts after, when known: the build's own
+    /// commit ([`LagBasis::Exact`]) or the newest `main` commit at or before
+    /// the build's commit date ([`LagBasis::ByDate`]).
+    pub from_sha: Option<String>,
 }
 
 /// Assets that are not something a person downloads to run the app.
@@ -73,6 +103,8 @@ pub fn summarize_releases(releases: &[Release]) -> ReleaseSummary {
         latest_tag: latest.map(|r| r.tag.clone()),
         latest_at: latest.and_then(|r| r.published_at.or(r.created_at)),
         latest_prerelease: latest.is_some_and(|r| r.prerelease),
+        latest_sha: latest.and_then(|r| r.commit_sha.clone()),
+        latest_commit_at: latest.and_then(|r| r.commit_at),
         latest_downloads: latest.map_or(0, |r| downloads(r)),
         total_downloads: published.iter().map(|r| downloads(r)).sum(),
     }
@@ -89,6 +121,8 @@ mod tests {
             prerelease: tag.contains("rc"),
             published_at: (!draft).then(|| format!("2026-10-{day:02}T00:00:00Z").parse().unwrap()),
             created_at: Some(format!("2026-10-{day:02}T00:00:00Z").parse().unwrap()),
+            commit_sha: Some(format!("{tag}-sha")),
+            commit_at: None,
             assets: assets
                 .iter()
                 .map(|(n, c)| Asset {
@@ -131,6 +165,7 @@ mod tests {
         assert_eq!(s.latest_tag.as_deref(), Some("v0.5.0"));
         assert_eq!(s.latest_downloads, 15);
         assert_eq!(s.total_downloads, 115);
+        assert_eq!(s.latest_sha.as_deref(), Some("v0.5.0-sha"));
         assert!(!s.latest_prerelease);
     }
 

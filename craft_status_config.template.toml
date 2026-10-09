@@ -16,10 +16,11 @@ repos = [
   "storytold/gridcraft",
   "storytold/cadcraft",
   "storytold/soundcraft",
+  "storytold/craft-libs",
 ]
 
 # How often to poll GitHub (minutes, at least 1). Each poll costs roughly
-# 3 GraphQL requests + 1 REST request per repo, far below GitHub's 5000/hour.
+# 5 GraphQL requests + 1 REST request per repo, far below GitHub's 5000/hour.
 poll_minutes = 5.0
 
 # Data older than this is flagged STALE in the window (never less than poll_minutes).

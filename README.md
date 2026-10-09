@@ -28,17 +28,24 @@ with no data always sort last.
 | Fix first | **Urgency** (the sum of the top five open-issue scores) · **Critical** (open issues naming a crash, hang, freeze, data loss, launch failure or security problem) |
 | Open | open PRs · open issues · oldest open PR |
 | Latest | last commit to `main` · newest issue · newest PR |
-| Recent (dropdown) | commits to `main` · PRs opened · PRs merged · issues opened |
-| All time | commits on `main` · contributors · issues (open + closed) · PRs (open + closed + merged) |
-| Builds | most recent release tag · its publish date · its downloads · downloads across all releases |
+| Activity (dropdown) | commits to `main` · PRs opened · PRs merged · issues opened · people committing to `main` |
+| Builds | most recent release tag · its publish date · **Unreleased** (commits on `main` since it) · its downloads · downloads across all releases |
 
-- **Recent** activity covers the window picked in that group's header: the
-  last 10 min, 30 min, hour, 4 h (the default), 12 h, day or week. Every poll
-  fetches all seven windows, so switching is instant; the choice is remembered.
+- **Activity** covers the window picked in that group's header: the last
+  10 min, 30 min, hour, 4 h (the default), 12 h, day or week, or all time.
+  Every poll fetches all eight, so switching is instant; the choice is
+  remembered. People are distinct commit authors in the window; all time, it
+  is GitHub's contributor count.
   The numbers are as of the last poll, so short windows lag by up to
   `poll_minutes`.
 - **Builds** are GitHub releases. Drafts are ignored. Prereleases count, and
   they carry a `PRE` tag.
+- **Unreleased** counts the commits that have landed on `main` since the latest
+  build, by comparing its tag with `main`. When the tag's commit isn't on
+  `main` (say, a release branch with a version bump), it counts the commits
+  since the two split. When they share no history, it counts the `main`
+  commits newer than the tag's commit. Both estimates show a `~`. Click the
+  number to open the comparison on GitHub.
 - **Downloads** add up every OS and package type: dmg, msi, AppImage, deb,
   rpm, flatpak, zips and tarballs. Checksum lists, signatures, `.zsync` delta
   files and updater manifests are left out, because machines fetch them, not
@@ -77,8 +84,11 @@ scored.
 ## Polling and cache
 
 - The app polls every `poll_minutes` (default 5), four repos at a time. Each
-  repo costs about three GraphQL requests and one REST request: roughly 50 of
+  repo costs about five GraphQL requests and one REST request: roughly 65 of
   the 5,000 GraphQL points GitHub allows per hour per cycle.
+- Each repo's icon is `assets/app-icon/hicolor/64x64/apps/*.png` on its default
+  branch. It is downloaded once and again only when the file changes; it's
+  kept in the cache. Repos without one (libraries) get a lettered tile.
 - If fewer than 150 points remain, polling slows to every 30 minutes. If
   GitHub rate-limits the app, it waits three intervals. If every repo fails
   (offline, or just woke from sleep), it retries after one minute.

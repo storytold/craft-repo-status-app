@@ -3,7 +3,7 @@
 //! can load in a plain browser (`ui/dev-snapshot.json`).
 
 use chrono::Utc;
-use craft_core::{Config, RepoEntry, Snapshot};
+use craft_core::{Config, LagBasis, RepoEntry, Snapshot, ALL_TIME};
 use craft_github::{resolve_token, GitHub};
 
 fn main() {
@@ -32,8 +32,8 @@ fn main() {
         ..Default::default()
     };
     println!(
-        "{:<12} {:>5} {:>6} {:>4} {:>4} {:>4} {:>4} {:>7} {:>5} {:>7} {:>7} {:<12} {:>7} {:>8} {:>6} {:>4}",
-        "repo", "oPR", "oIss", "c4h", "p4h", "m4h", "i4h", "commits", "ctrb", "issues", "prs", "build", "bld dl",
+        "{:<12} {:>5} {:>6} {:>4} {:>4} {:>4} {:>4} {:>7} {:>5} {:>7} {:>7} {:<12} {:>5} {:>7} {:>8} {:>6} {:>4}",
+        "repo", "oPR", "oIss", "c4h", "p4h", "m4h", "i4h", "commits", "ppl", "issues", "prs", "build", "since", "bld dl",
         "total dl", "urg", "crit"
     );
     for repo in &repos {
@@ -43,11 +43,19 @@ fn main() {
             Ok((s, budget)) => {
                 // The table shows the 4-hour window; the snapshot carries them all.
                 let r4 = s.recent.get("4h").copied().unwrap_or_default();
+                let all = s.recent.get(ALL_TIME).copied().unwrap_or_default();
+                let since = s
+                    .since_build
+                    .as_ref()
+                    .map_or("-".into(), |l| match l.basis {
+                        LagBasis::Exact => l.commits.to_string(),
+                        _ => format!("~{}", l.commits),
+                    });
                 println!(
-                    "{:<12} {:>5} {:>6} {:>4} {:>4} {:>4} {:>4} {:>7} {:>5} {:>7} {:>7} {:<12} {:>7} {:>8} {:>6} {:>4}",
+                    "{:<12} {:>5} {:>6} {:>4} {:>4} {:>4} {:>4} {:>7} {:>5} {:>7} {:>7} {:<12} {:>5} {:>7} {:>8} {:>6} {:>4}",
                     entry.name(), s.open_prs, s.open_issues, r4.commits, r4.prs_opened, r4.prs_merged, r4.issues_opened,
-                    s.commits_total, s.contributors, s.issues_total, s.prs_total,
-                    s.latest_build.clone().unwrap_or_default(), s.latest_build_downloads,
+                    all.commits, all.people, all.issues_opened, all.prs_opened,
+                    s.latest_build.clone().unwrap_or_default(), since, s.latest_build_downloads,
                     s.downloads_total, s.urgency, s.critical_issues
                 );
                 for u in s.urgent.iter().take(3) {
@@ -60,6 +68,12 @@ fn main() {
                     );
                 }
                 snap.rate_limit_remaining = budget.graphql_remaining;
+                if let Some(oid) = &s.icon_oid {
+                    match gh.icon(repo, oid) {
+                        Ok(uri) => (entry.icon, entry.icon_oid) = (Some(uri), Some(oid.clone())),
+                        Err(e) => eprintln!("{repo}: icon: {e}"),
+                    }
+                }
                 entry.stats = Some(s);
                 entry.fetched_at = Some(now);
             }

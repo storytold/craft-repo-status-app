@@ -6,6 +6,8 @@ use std::collections::BTreeMap;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
+use crate::BuildLag;
+
 pub type Time = DateTime<Utc>;
 
 /// The "recent activity" windows, as `(id, minutes)`, shortest first. Every
@@ -21,6 +23,10 @@ pub const WINDOWS: &[(&str, i64)] = &[
     ("7d", 7 * 24 * 60),
 ];
 
+/// The id of the window that covers the repository's whole history. It isn't
+/// in [`WINDOWS`] (it has no length); its counts come from totals, not searches.
+pub const ALL_TIME: &str = "all";
+
 /// What happened in one recent window.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(default)]
@@ -31,6 +37,9 @@ pub struct Activity {
     /// PRs merged in the window, whenever they were opened.
     pub prs_merged: u64,
     pub issues_opened: u64,
+    /// Distinct commit authors on `main` (by GitHub login, else email); all
+    /// time, GitHub's contributor count including unlinked emails.
+    pub people: u64,
 }
 
 /// One poll's worth of numbers for a repository.
@@ -47,16 +56,16 @@ pub struct RepoStats {
     pub oldest_open_pr_at: Option<Time>,
     /// Newest PR, any state.
     pub newest_pr_at: Option<Time>,
-    /// Activity per window, keyed by the ids in [`WINDOWS`].
+    /// Activity per window, keyed by the ids in [`WINDOWS`] plus [`ALL_TIME`].
     pub recent: BTreeMap<String, Activity>,
-    pub commits_total: u64,
-    pub contributors: u64,
-    pub issues_total: u64,
-    pub prs_total: u64,
     /// Newest published (non-draft) release.
     pub latest_build: Option<String>,
     pub latest_build_at: Option<Time>,
     pub latest_build_prerelease: bool,
+    /// Commit the latest build's tag points at.
+    pub latest_build_sha: Option<String>,
+    /// Commits on `main` since the latest build.
+    pub since_build: Option<BuildLag>,
     pub latest_build_downloads: u64,
     pub downloads_total: u64,
     /// Sum of the top five urgent-issue scores; the repo-level sort key.
@@ -65,6 +74,8 @@ pub struct RepoStats {
     pub critical_issues: u64,
     /// Highest-scoring open issues, best first.
     pub urgent: Vec<UrgentIssue>,
+    /// Blob id of the app icon (`assets/app-icon/hicolor/64x64/apps/*.png`).
+    pub icon_oid: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
@@ -96,6 +107,10 @@ pub struct RepoEntry {
     pub last_attempt_at: Option<Time>,
     /// Error from the most recent attempt, cleared on success.
     pub error: Option<String>,
+    /// The app icon as a `data:` URI, downloaded once per blob id.
+    pub icon: Option<String>,
+    /// The blob `icon` was downloaded from; compared with `stats.icon_oid`.
+    pub icon_oid: Option<String>,
 }
 
 impl RepoEntry {
@@ -148,13 +163,16 @@ impl Snapshot {
     }
 
     /// False when some repo's stats predate a field the UI needs: today, a
-    /// recent-activity window. Such a cache (from an older build) shouldn't
+    /// recent-activity window (all time included). Such a cache (from an older build) shouldn't
     /// delay the launch poll.
     pub fn is_complete(&self) -> bool {
-        self.repos
-            .iter()
-            .filter_map(|r| r.stats.as_ref())
-            .all(|s| WINDOWS.iter().all(|(id, _)| s.recent.contains_key(*id)))
+        self.repos.iter().filter_map(|r| r.stats.as_ref()).all(|s| {
+            WINDOWS
+                .iter()
+                .map(|(id, _)| *id)
+                .chain([ALL_TIME])
+                .all(|id| s.recent.contains_key(id))
+        })
     }
 
     pub fn is_stale(&self, now: Time) -> bool {
@@ -221,6 +239,9 @@ mod tests {
         for (id, _) in WINDOWS {
             stats.recent.insert(id.to_string(), Activity::default());
         }
+        s.repos[0].stats = Some(stats.clone());
+        assert!(!s.is_complete(), "cache from before all time was a window");
+        stats.recent.insert(ALL_TIME.into(), Activity::default());
         s.repos[0].stats = Some(stats);
         assert!(s.is_complete());
     }

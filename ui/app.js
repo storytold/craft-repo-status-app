@@ -71,6 +71,13 @@ function openUrl(url, ev) {
 
 const link = (text, url, cls = '') => el('span', { class: `link ${cls}`, onclick: (e) => openUrl(url, e) }, text);
 
+/** The repo's app icon; repos without one (libraries) get a lettered tile, unfetched ones a blank. */
+function appIcon(entry) {
+  if (entry.icon) return el('img', { class: 'app-icon', src: entry.icon, alt: '' });
+  if (!entry.stats) return el('span', { class: 'app-icon pending', 'aria-hidden': 'true' });
+  return el('span', { class: 'app-icon none', 'aria-hidden': 'true' }, entry.repo.split('/').pop().charAt(0).toUpperCase());
+}
+
 /** Cell content for a column. */
 function cell(entry, col) {
   const v = value(entry, col.key, state.window);
@@ -79,7 +86,7 @@ function cell(entry, col) {
     const tip = entry.error
       ? `Last attempt failed: ${entry.error}`
       : entry.fetched_at ? `Fetched ${localTime(entry.fetched_at)}` : 'Not fetched yet';
-    return el('span', { class: 'repo', title: tip }, el('span', { class: 'dot' }), link(v, gh(entry.repo)));
+    return el('span', { class: 'repo', title: tip }, el('span', { class: 'dot' }), appIcon(entry), link(v, gh(entry.repo)));
   }
   if (!s) return el('span', { class: 'muted' }, '—');
   switch (col.key) {
@@ -90,9 +97,23 @@ function cell(entry, col) {
     case 'critical_issues': return el('span', { class: v ? 'crit' : 'zero' }, num(v));
     case 'open_prs': return link(num(v), gh(entry.repo, '/pulls'));
     case 'open_issues': return link(num(v), gh(entry.repo, '/issues'));
-    case 'recent_commits': case 'recent_prs': case 'recent_merged': case 'recent_issues':
+    case 'recent_commits': case 'recent_prs': case 'recent_merged': case 'recent_issues': case 'recent_people':
       if (v === null) return el('span', { class: 'muted', title: 'Not fetched yet for this window' }, '—');
       return el('span', { class: v ? 'active' : 'zero' }, num(v));
+    case 'commits_since_build': {
+      const lag = s.since_build;
+      if (!lag) return el('span', { class: 'muted' }, '—');
+      const short = (sha) => sha?.slice(0, 7);
+      const tip = {
+        exact: `${num(v)} commits on main since ${s.latest_build} (${short(lag.from_sha)})`,
+        branched: `${s.latest_build}’s commit isn’t on main: ~${num(v)} commits on main since the two split`,
+        by_date: `${s.latest_build}’s commit shares no history with main: ~${num(v)} commits on main are newer than it`
+          + (lag.from_sha ? `, counted from ${short(lag.from_sha)}` : ''),
+      }[lag.basis];
+      const from = lag.basis === 'by_date' ? lag.from_sha : s.latest_build;
+      const text = `${lag.basis === 'exact' ? '' : '~'}${num(v)}`;
+      return el('span', { title: tip }, from ? link(text, gh(entry.repo, `/compare/${encodeURIComponent(from)}...HEAD`), v ? '' : 'zero') : text);
+    }
     case 'latest_build':
       if (!v) return el('span', { class: 'muted' }, '—');
       return el('span', {}, link(v, gh(entry.repo, `/releases/tag/${encodeURIComponent(v)}`)),
@@ -185,7 +206,7 @@ function renderUrgent() {
     const a = Math.min(1, u.score / 90) * 0.5;
     return el('li', { class: `urgent-item${u.critical ? ' critical' : ''}`, onclick: () => openUrl(u.url), title: u.url },
       el('span', { class: 'score', style: `background: rgb(var(--hot-rgb) / ${a.toFixed(2)})` }, u.score),
-      el('span', { class: 'u-repo' }, u.repo.split('/').pop()),
+      el('span', { class: 'u-repo' }, appIcon(snap.repos.find((r) => r.repo === u.repo) ?? { repo: u.repo }), u.repo.split('/').pop()),
       el('div', { class: 'u-title' },
         el('span', { class: 'num' }, `#${u.number}`), el('span', { class: 'text' }, u.title),
         el('div', { class: 'reasons' }, u.reasons.map((r) => el('span', { class: `reason${SEVERE.test(r) ? ' sev' : ''}` }, r)),
