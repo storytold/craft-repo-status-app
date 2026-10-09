@@ -32,12 +32,15 @@ with no data always sort last.
 | Builds | most recent release tag · its publish date · **Unreleased** (commits on `main` since it) · its downloads · downloads across all releases |
 
 - **Activity** covers the window picked in that group's header: the last
-  10 min, 30 min, hour, 4 h (the default), 12 h, day or week, or all time.
-  Every poll fetches all eight, so switching is instant; the choice is
-  remembered. People are distinct commit authors in the window; all time, it
-  is GitHub's contributor count.
-  The numbers are as of the last poll, so short windows lag by up to
-  `poll_minutes`.
+  10 min, 30 min, hour, 4 h (the default), 12 h, day or week, since the last
+  release, or all time. Every poll fetches all nine, so switching is instant;
+  the choice is remembered. People are distinct commit authors in the window;
+  all time, it is GitHub's contributor count. The numbers are as of the last
+  poll, so short windows lag by up to `poll_minutes`.
+- **Since last release** starts at each repo's own latest build, so the span
+  differs per row (hover a number for the release and its date). Its commits
+  are the **Unreleased** count; PRs, merges, issues and people count from the
+  release's publish date. Repos with no release show `—`.
 - **Builds** are GitHub releases. Drafts are ignored. Prereleases count, and
   they carry a `PRE` tag.
 - **Unreleased** counts the commits that have landed on `main` since the latest
