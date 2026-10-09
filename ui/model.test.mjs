@@ -93,5 +93,6 @@ test('recent-activity columns follow the selected window', () => {
   assert.equal(value(e[0], 'recent_people', 'all'), 12, 'all time is just another window');
   assert.equal(value(e[1], 'recent_commits', 'all'), null, 'cache from before all time');
   assert.equal(names(sortEntries(e, 'recent_merged', 'desc', 'all')), 'abold');
-  assert.deepEqual(WINDOWS.map((w) => w.id), ['10m', '30m', '1h', '4h', '12h', '1d', '7d', 'all']);
+  assert.equal(value(e[0], 'recent_commits', 'release'), null, 'no release');
+  assert.deepEqual(WINDOWS.map((w) => w.id), ['10m', '30m', '1h', '4h', '12h', '1d', '7d', 'release', 'all']);
 });

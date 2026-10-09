@@ -4,9 +4,10 @@
 /** @typedef {'text'|'num'|'date'|'version'} Kind */
 
 /**
- * The activity windows the dropdown offers, shortest first, then all time. The
- * ids match `WINDOWS` and `ALL_TIME` in crates/craft-core/src/model.rs; every
- * poll fetches all of them.
+ * The activity windows the dropdown offers, shortest first, then since each
+ * repo's latest release (so a different span per repo; repos without a release
+ * have no data), then all time. The ids match `WINDOWS`, `SINCE_RELEASE` and
+ * `ALL_TIME` in crates/craft-core/src/model.rs; every poll fetches all of them.
  */
 export const WINDOWS = [
   { id: '10m', label: 'Last 10 min', span: 'in the last 10 minutes' },
@@ -16,6 +17,7 @@ export const WINDOWS = [
   { id: '12h', label: 'Last 12 h', span: 'in the last 12 hours' },
   { id: '1d', label: 'Last day', span: 'in the last day' },
   { id: '7d', label: 'Last week', span: 'in the last week' },
+  { id: 'release', label: 'Since last release', span: 'since each repo’s latest release' },
   { id: 'all', label: 'All time', span: 'over all time' },
 ];
 export const DEFAULT_WINDOW = '4h';

@@ -27,6 +27,11 @@ pub const WINDOWS: &[(&str, i64)] = &[
 /// in [`WINDOWS`] (it has no length); its counts come from totals, not searches.
 pub const ALL_TIME: &str = "all";
 
+/// The id of the window that starts when the repository's latest build was
+/// published, so its length differs per repository. Like [`ALL_TIME`] it isn't
+/// in [`WINDOWS`]; repos without a build don't have it.
+pub const SINCE_RELEASE: &str = "release";
+
 /// What happened in one recent window.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(default)]
@@ -56,7 +61,8 @@ pub struct RepoStats {
     pub oldest_open_pr_at: Option<Time>,
     /// Newest PR, any state.
     pub newest_pr_at: Option<Time>,
-    /// Activity per window, keyed by the ids in [`WINDOWS`] plus [`ALL_TIME`].
+    /// Activity per window, keyed by the ids in [`WINDOWS`] plus [`ALL_TIME`]
+    /// and, when there is a build, [`SINCE_RELEASE`].
     pub recent: BTreeMap<String, Activity>,
     /// Newest published (non-draft) release.
     pub latest_build: Option<String>,
@@ -163,7 +169,8 @@ impl Snapshot {
     }
 
     /// False when some repo's stats predate a field the UI needs: today, a
-    /// recent-activity window (all time included). Such a cache (from an older build) shouldn't
+    /// recent-activity window (all time included, and since the release
+    /// for repos with one). Such a cache (from an older build) shouldn't
     /// delay the launch poll.
     pub fn is_complete(&self) -> bool {
         self.repos.iter().filter_map(|r| r.stats.as_ref()).all(|s| {
@@ -171,6 +178,7 @@ impl Snapshot {
                 .iter()
                 .map(|(id, _)| *id)
                 .chain([ALL_TIME])
+                .chain(s.latest_build_at.map(|_| SINCE_RELEASE))
                 .all(|id| s.recent.contains_key(id))
         })
     }
@@ -242,6 +250,17 @@ mod tests {
         s.repos[0].stats = Some(stats.clone());
         assert!(!s.is_complete(), "cache from before all time was a window");
         stats.recent.insert(ALL_TIME.into(), Activity::default());
+        s.repos[0].stats = Some(stats.clone());
+        assert!(s.is_complete(), "no build, so no since-release window");
+        stats.latest_build_at = Some(Utc::now());
+        s.repos[0].stats = Some(stats.clone());
+        assert!(
+            !s.is_complete(),
+            "cache from before since-release was a window"
+        );
+        stats
+            .recent
+            .insert(SINCE_RELEASE.into(), Activity::default());
         s.repos[0].stats = Some(stats);
         assert!(s.is_complete());
     }

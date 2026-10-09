@@ -98,8 +98,14 @@ function cell(entry, col) {
     case 'open_prs': return link(num(v), gh(entry.repo, '/pulls'));
     case 'open_issues': return link(num(v), gh(entry.repo, '/issues'));
     case 'recent_commits': case 'recent_prs': case 'recent_merged': case 'recent_issues': case 'recent_people':
-      if (v === null) return el('span', { class: 'muted', title: 'Not fetched yet for this window' }, '—');
-      return el('span', { class: v ? 'active' : 'zero' }, num(v));
+      if (v === null) {
+        const why = state.window === 'release' && !s.latest_build ? 'No release yet' : 'Not fetched yet for this window';
+        return el('span', { class: 'muted', title: why }, '—');
+      }
+      return el('span', {
+        class: v ? 'active' : 'zero',
+        title: state.window === 'release' ? `Since ${s.latest_build}, published ${localTime(s.latest_build_at)} (${ago(s.latest_build_at)} ago)` : null,
+      }, num(v));
     case 'commits_since_build': {
       const lag = s.since_build;
       if (!lag) return el('span', { class: 'muted' }, '—');
