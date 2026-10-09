@@ -5,6 +5,8 @@ Find out the status of the craft apps: a tray dashboard ("Craft Status") that
 polls the storytold `*craft` repositories on GitHub every 5 minutes, keeps a
 cache, and tells you what to fix first. Everything runs locally: no server.
 
+![Craft Status: the Repos table, sorted by urgency](docs/screenshot.png)
+
 - **Rust workspace**
   - `craft-core`: the model, release/download accounting, the urgency
     heuristic, config, cache and window state. No network or UI dependencies,
