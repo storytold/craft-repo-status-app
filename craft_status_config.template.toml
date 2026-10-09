@@ -1,0 +1,44 @@
+# Craft Status — ~/.craft_status_config.toml
+# The app re-reads this file before every poll; changes apply without a restart
+# (window/tray/shortcut changes apply on the next poll or relaunch).
+
+# Repositories to watch: "owner/name" or full GitHub URLs.
+repos = [
+  "storytold/photocraft",
+  "storytold/lightcraft",
+  "storytold/filmcraft",
+  "storytold/designcraft",
+  "storytold/vectorcraft",
+  "storytold/pdfcraft",
+  "storytold/effectcraft",
+  "storytold/wordcraft",
+  "storytold/deckcraft",
+  "storytold/gridcraft",
+  "storytold/cadcraft",
+  "storytold/soundcraft",
+]
+
+# How often to poll GitHub (minutes, at least 1). Each poll costs roughly
+# 3 GraphQL requests + 1 REST request per repo, far below GitHub's 5000/hour.
+poll_minutes = 5.0
+
+# Data older than this is flagged STALE in the window (never less than poll_minutes).
+stale_minutes = 15.0
+
+# Leave empty to use $GITHUB_TOKEN / $GH_TOKEN, or else `gh auth token`.
+github_token = ""
+
+[window]
+width = 1340.0
+height = 560.0
+always_on_top = false
+start_hidden = false
+opacity = 0.96
+
+[tray]
+hide_dock_icon = true            # macOS: menu-bar-only app (restart to apply)
+visible_on_all_workspaces = true # summon onto the current desktop/space
+close_to_tray = true
+
+[shortcuts]
+toggle_window = "CmdOrCtrl+Shift+G"   # "" disables

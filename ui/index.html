@@ -1,0 +1,72 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Craft Status</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div class="app" id="app">
+    <header data-tauri-drag-region>
+      <div class="brand" data-tauri-drag-region>
+        <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M2 14V9M6 14V6M10 14V4M14 14V1"/></svg>
+        <span data-tauri-drag-region>Craft Status</span>
+      </div>
+      <nav class="views" role="tablist">
+        <button class="view" data-view="repos" role="tab">Repos <span class="badge" id="repo-count"></span></button>
+        <button class="view" data-view="urgent" role="tab">Fix first <span class="badge hot" id="urgent-count"></span></button>
+      </nav>
+      <div class="status" data-tauri-drag-region>
+        <span id="fresh-pill" class="pill"></span>
+        <span id="refreshed" class="refreshed" data-tauri-drag-region></span>
+      </div>
+      <div class="actions">
+        <button class="icon-button" id="refresh" title="Refresh now (⌘R)">
+          <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M13.5 8a5.5 5.5 0 1 1-1.6-3.9M13.5 2v3h-3"/></svg>
+        </button>
+        <button class="icon-button" id="pin" title="Always on top">
+          <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M6 2h4l-.5 4 2.5 2.5H4L6.5 6zM8 8.5V14"/></svg>
+        </button>
+        <button class="icon-button" id="hide" title="Hide (Esc)">
+          <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M4 4l8 8M12 4l-8 8"/></svg>
+        </button>
+      </div>
+    </header>
+    <div class="banner" id="banner" hidden></div>
+
+    <main id="repos-view">
+      <table id="table">
+        <thead id="thead"></thead>
+        <tbody id="tbody"></tbody>
+        <tfoot id="tfoot"></tfoot>
+      </table>
+    </main>
+
+    <main id="urgent-view" hidden>
+      <div class="urgent-controls">
+        <select id="urgent-repo" aria-label="Repository"></select>
+        <label class="toggle"><input type="checkbox" id="critical-only"> Critical only</label>
+        <span class="hint">Scored by severity words, labels, user reports, 👍/💬, the latest build and freshness. Click to open on GitHub.</span>
+      </div>
+      <ol class="urgent-list" id="urgent-list"></ol>
+    </main>
+
+    <footer data-tauri-drag-region>
+      <span id="next" data-tauri-drag-region></span>
+      <span id="budget" data-tauri-drag-region></span>
+      <span class="spacer" data-tauri-drag-region></span>
+      <button class="footer-link" id="edit-config">Edit config</button>
+      <span id="shortcut"></span>
+    </footer>
+    <div id="resize" title="Resize"></div>
+  </div>
+  <script>
+    // Surface load/runtime errors in the app's stderr (module errors never reach app.js).
+    const report = (m) => window.__TAURI__?.core.invoke('log', { msg: String(m) });
+    addEventListener('error', (e) => report(`${e.message} @ ${e.filename}:${e.lineno}`));
+    addEventListener('unhandledrejection', (e) => report(`unhandled: ${e.reason}`));
+  </script>
+  <script type="module" src="app.js"></script>
+</body>
+</html>

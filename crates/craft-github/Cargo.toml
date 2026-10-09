@@ -1,0 +1,14 @@
+[package]
+name = "craft-github"
+description = "GitHub GraphQL/REST fetcher that fills craft-core's RepoStats"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+craft-core = { path = "../craft-core" }
+serde.workspace = true
+serde_json.workspace = true
+chrono.workspace = true
+reqwest.workspace = true
+thiserror.workspace = true
