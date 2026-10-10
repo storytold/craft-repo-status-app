@@ -113,6 +113,9 @@ pub struct RepoEntry {
     pub last_attempt_at: Option<Time>,
     /// Error from the most recent attempt, cleared on success.
     pub error: Option<String>,
+    /// GitHub reported the repo missing (e.g. private and not visible to the
+    /// token); shown as an empty row rather than an error.
+    pub inaccessible: bool,
     /// The app icon as a `data:` URI, downloaded once per blob id.
     pub icon: Option<String>,
     /// The blob `icon` was downloaded from; compared with `stats.icon_oid`.

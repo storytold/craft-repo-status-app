@@ -4,7 +4,7 @@
 
 use chrono::Utc;
 use craft_core::{Config, LagBasis, RepoEntry, Snapshot, ALL_TIME};
-use craft_github::{resolve_token, GitHub};
+use craft_github::{resolve_token, Error, GitHub};
 
 fn main() {
     let mut args: Vec<String> = std::env::args().skip(1).collect();
@@ -76,6 +76,11 @@ fn main() {
                 }
                 entry.stats = Some(s);
                 entry.fetched_at = Some(now);
+            }
+            Err(Error::NotFound) => {
+                println!("{:<12} (not accessible)", entry.name());
+                entry.fetched_at = Some(now);
+                entry.inaccessible = true;
             }
             Err(e) => {
                 println!("{:<12} ERROR {e}", entry.name());

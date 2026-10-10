@@ -85,10 +85,11 @@ function cell(entry, col) {
   if (col.key === 'name') {
     const tip = entry.error
       ? `Last attempt failed: ${entry.error}`
+      : entry.inaccessible ? 'Not accessible (private, or not found)'
       : entry.fetched_at ? `Fetched ${localTime(entry.fetched_at)}` : 'Not fetched yet';
     return el('span', { class: 'repo', title: tip }, el('span', { class: 'dot' }), appIcon(entry), link(v, gh(entry.repo)));
   }
-  if (!s) return el('span', { class: 'muted' }, '—');
+  if (!s) return entry.inaccessible ? '' : el('span', { class: 'muted' }, '—');
   switch (col.key) {
     case 'urgency': {
       const a = Math.min(1, v / 350) * 0.45;
