@@ -35,6 +35,9 @@ pub enum Error {
     Unauthorized,
     #[error("rate limited by GitHub until {0}")]
     RateLimited(String),
+    /// The repo doesn't exist or the token can't see it (GitHub answers 404 for private repos).
+    #[error("repository not found or not accessible")]
+    NotFound,
     #[error("GitHub HTTP {0}: {1}")]
     Http(u16, String),
     #[error("network: {0}")]
@@ -114,6 +117,9 @@ impl GitHub {
         if status.as_u16() == 401 {
             return Err(Error::Unauthorized);
         }
+        if status.as_u16() == 404 {
+            return Err(Error::NotFound);
+        }
         let remaining = resp
             .headers()
             .get("x-ratelimit-remaining")
@@ -158,6 +164,9 @@ impl GitHub {
                 return Err(Error::RateLimited("the top of the hour".into()));
             }
             if v["data"]["repository"].is_null() {
+                if errs.iter().any(|e| e["type"] == "NOT_FOUND") {
+                    return Err(Error::NotFound);
+                }
                 return Err(Error::GraphQl(msg));
             }
         }

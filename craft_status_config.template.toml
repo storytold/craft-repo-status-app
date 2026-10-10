@@ -17,6 +17,8 @@ repos = [
   "storytold/cadcraft",
   "storytold/soundcraft",
   "storytold/craft-libs",
+  "storytold/craft-launcher",
+  "storytold/figcraft",
 ]
 
 # How often to poll GitHub (minutes, at least 1). Each poll costs roughly

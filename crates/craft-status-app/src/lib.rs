@@ -294,10 +294,19 @@ fn run_cycle(app: &AppHandle) -> i64 {
                             entry.stats = Some(stats);
                             entry.fetched_at = Some(now);
                             entry.error = None;
+                            entry.inaccessible = false;
                             if let Some(left) = budget.graphql_remaining {
                                 snap.rate_limit_remaining =
                                     Some(snap.rate_limit_remaining.map_or(left, |r| r.min(left)));
                             }
+                        }
+                        Err(GhError::NotFound) => {
+                            entry.stats = None;
+                            entry.icon = None;
+                            entry.icon_oid = None;
+                            entry.fetched_at = Some(now);
+                            entry.error = None;
+                            entry.inaccessible = true;
                         }
                         Err(e) => {
                             entry.error = Some(e.to_string());
