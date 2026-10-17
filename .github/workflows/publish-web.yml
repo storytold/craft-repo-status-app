@@ -1,0 +1,95 @@
+name: Publish Web Version
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    # Refresh stats every 15 minutes to keep status current
+    - cron: '*/15 * * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build Web App
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+          cache: 'npm'
+
+      - name: Install Node dependencies
+        run: npm ci
+
+      - name: Run UI tests and type check
+        run: |
+          npm test
+          npm run typecheck
+
+      - name: Build UI assets
+        run: npm run build
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+
+      - name: Run crate tests
+        run: cargo test -p craft-core -p craft-github
+
+      - name: Fetch snapshot
+        env:
+          GITHUB_TOKEN: ${{ secrets.CRAFT_STATUS_TOKEN || secrets.GITHUB_TOKEN }}
+        run: |
+          cargo run --release -p craft-github --bin craft-fetch -- --snapshot ui/dev-snapshot.json
+
+      - name: Prepare site directory
+        run: |
+          mkdir -p _site
+          cp ui/index.html ui/style.css ui/dev-snapshot.json _site/
+          cp -R ui/build _site/build
+
+      - name: Upload Pages artifact
+        if: github.event_name != 'pull_request'
+        uses: actions/upload-pages-artifact@v5
+        with:
+          path: _site
+
+      - name: Upload GitHub Actions build artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: craft-status-web
+          path: _site
+          retention-days: 14
+
+  deploy:
+    name: Deploy to GitHub Pages
+    needs: build
+    if: github.event_name != 'pull_request'
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v5
