@@ -148,6 +148,7 @@ Prerequisites:
 - Node.js 24+, then `npm ci` (the UI's TypeScript compiler and test DOM)
 - `cargo install tauri-cli --version "^2"`
 - Xcode CLT on macOS
+- On Linux: `webkit2gtk-4.1` and `libayatana-appindicator` (Arch package names)
 - `gh auth login`, or a token in the config
 
 ```sh
@@ -159,6 +160,13 @@ make check      # clippy + rustfmt + tsc type-check
 make snapshot   # fetch once, print a table, write ui/dev-snapshot.json
 make preview    # serve ui/ in a browser against that snapshot (no Tauri needed)
 ```
+
+On Linux, `make install`, `make bundle` and `make uninstall` don't apply (they
+are macOS-specific): use `make run`, or `cargo tauri build` in
+`crates/craft-status-app` for an AppImage, .deb or .rpm. The app sets
+`WEBKIT_DMABUF_RENDERER_FORCE_SHM=1` at startup, because WebKitGTK's GPU
+buffers crash or half-paint the transparent window on some Wayland setups
+(seen on NVIDIA).
 
 To start the app at login, `make install` adds
 `~/Library/LaunchAgents/ai.storyteller.craft-status.plist`.
