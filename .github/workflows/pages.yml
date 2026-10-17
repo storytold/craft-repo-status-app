@@ -1,0 +1,64 @@
+# The dashboard as a website: the compiled UI (ui/index.html, style.css, build/) from main plus
+# snapshot.json from the `data` branch, which snapshot.yml refreshes every 15 minutes. Deploys
+# when main changes and after each successful snapshot. (A push made with GITHUB_TOKEN starts no
+# workflows, hence workflow_run and not a push trigger on `data`.)
+name: Pages
+
+on:
+  push:
+    branches: [main]
+  workflow_run:
+    workflows: [Snapshot]
+    types: [completed]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# One deploy at a time; a newer snapshot never gets cancelled by an older run.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    if: github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Build the UI
+        run: npm ci && npm run build
+
+      # Before the first snapshot run there is no `data` branch: the site deploys without data.
+      - name: Assemble the site
+        run: |
+          mkdir _site
+          cp -R ui/index.html ui/style.css ui/build _site/
+          if git fetch -q --depth=1 origin data; then
+            git show FETCH_HEAD:snapshot.json > _site/snapshot.json
+          else
+            echo "::warning::no data branch yet; run the Snapshot workflow"
+          fi
+
+      - uses: actions/configure-pages@v5
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+
+      - id: deploy
+        uses: actions/deploy-pages@v4

@@ -156,9 +156,25 @@ make uninstall  # quit, remove the app and the login item (keeps config + cache)
 make run        # debug binary
 make test       # Rust + UI tests
 make check      # clippy + rustfmt + tsc type-check
-make snapshot   # fetch once, print a table, write ui/dev-snapshot.json
+make snapshot   # fetch once, print a table, write ui/snapshot.json
 make preview    # serve ui/ in a browser against that snapshot (no Tauri needed)
 ```
+
+## Website
+
+The same UI also runs as a website on GitHub Pages, without the app:
+
+- `.github/workflows/snapshot.yml` runs every 15 minutes. It fetches a fresh
+  `snapshot.json` with `craft-fetch` and force-pushes it as the only commit on
+  the `data` branch.
+- `.github/workflows/pages.yml` deploys the compiled UI from `main` with that
+  `snapshot.json`, whenever `main` changes and after each successful snapshot.
+  A failed fetch leaves the site on the last good snapshot.
+
+In a browser, ⟳ and ⌘R reload the page, which loads the newest
+`snapshot.json`; pinning, hiding, the config and the global shortcut are
+app-only and hidden. To turn it on in a repo, set **Settings → Pages →
+Source** to **GitHub Actions**.
 
 To start the app at login, `make install` adds
 `~/Library/LaunchAgents/ai.storyteller.craft-status.plist`.

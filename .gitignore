@@ -4,5 +4,5 @@
 *.log
 .DS_Store
 node_modules/
-ui/dev-snapshot.json
+ui/snapshot.json
 ui/build/

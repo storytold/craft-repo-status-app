@@ -1,0 +1,62 @@
+# Every 15 minutes, fetch a fresh snapshot.json with craft-fetch and publish it as the only commit
+# on the `data` branch (force-pushed, so the branch never grows). pages.yml deploys it when this
+# finishes; a failed fetch leaves the site on the last good snapshot.
+name: Snapshot
+
+on:
+  schedule:
+    - cron: "*/15 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: snapshot
+  cancel-in-progress: false
+
+jobs:
+  fetch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+
+      # craft-fetch's raw cache (commit authors, PRs and issues it already has), so each run
+      # fetches only what's new instead of walking every repo's history again. A cache entry can't
+      # be overwritten, so each run saves a new one and restores the newest.
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cache/craft-status
+          key: craft-status-raw-${{ github.run_id }}
+          restore-keys: craft-status-raw-
+
+      # GITHUB_TOKEN reads the public repos' data (1,000 GraphQL points an hour; a run costs
+      # about 100). The config only overrides the intervals, so the footer and STALE pill match
+      # this schedule (Actions often starts scheduled runs late); the repo list stays the default.
+      - name: Fetch the snapshot
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          printf 'poll_minutes = 15.0\nstale_minutes = 60.0\n' > ~/.craft_status_config.toml
+          mkdir "$RUNNER_TEMP/data"
+          cargo run -q -p craft-github --bin craft-fetch -- --snapshot "$RUNNER_TEMP/data/snapshot.json"
+
+      - name: Publish it on the data branch
+        working-directory: ${{ runner.temp }}/data
+        env:
+          TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          git init -q -b data
+          git add snapshot.json
+          git -c user.name='github-actions[bot]' \
+            -c user.email='41898283+github-actions[bot]@users.noreply.github.com' \
+            commit -q -m "Snapshot"
+          git push -q --force "https://x-access-token:${TOKEN}@github.com/${REPO}.git" data

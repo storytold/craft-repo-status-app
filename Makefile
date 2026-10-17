@@ -46,8 +46,8 @@ check: node_modules ## lints
 	cargo fmt --all -- --check
 	npm run --silent typecheck
 
-snapshot:       ## fetch once from GitHub into ui/dev-snapshot.json (prints a table)
-	cargo run -q -p craft-github --bin craft-fetch -- --snapshot ui/dev-snapshot.json
+snapshot:       ## fetch once from GitHub into ui/snapshot.json (prints a table)
+	cargo run -q -p craft-github --bin craft-fetch -- --snapshot ui/snapshot.json
 
 preview: snapshot ui ## open the UI in a browser against the dev snapshot
 	@echo "http://127.0.0.1:8766/index.html  (Ctrl+C to stop)"

@@ -26,4 +26,4 @@
 
 - `make test`: Rust tests + `npm test` (UI tests)
 - `make check`: clippy, rustfmt, `npm run typecheck`
-- `make preview`: the UI in a browser against `ui/dev-snapshot.json`
+- `make preview`: the UI in a browser against `ui/snapshot.json`

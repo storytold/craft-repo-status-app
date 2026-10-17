@@ -143,3 +143,6 @@ footer { display: flex; align-items: center; gap: 14px; padding: 6px 15px; borde
 ::-webkit-scrollbar { width: 6px; height: 6px; }
 ::-webkit-scrollbar-thumb { border-radius: 6px; background: var(--border); }
 ::-webkit-scrollbar-corner { background: transparent; }
+
+/* In a browser (web.ts): no window to pin, hide or resize, no config file, no global shortcut. */
+.web #pin, .web #hide, .web #edit-config, .web #shortcut, .web #resize { display: none; }

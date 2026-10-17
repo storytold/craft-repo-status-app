@@ -1,6 +1,6 @@
 //! `craft-fetch [owner/name …] [--snapshot PATH]` — fetch stats once and print
 //! a table (debugging aid). `--snapshot` also writes a Snapshot JSON the UI
-//! can load in a plain browser (`ui/dev-snapshot.json`).
+//! can load in a plain browser (`ui/snapshot.json`).
 
 use chrono::Utc;
 use craft_core::{Cache, Config, LagBasis, RepoEntry, Snapshot, ALL_TIME};
