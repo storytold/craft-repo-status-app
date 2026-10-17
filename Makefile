@@ -6,7 +6,7 @@ INSTALLED  := /Applications/$(APP_NAME).app
 AGENT_ID   := ai.storyteller.craft-status
 AGENT      := $(HOME)/Library/LaunchAgents/$(AGENT_ID).plist
 
-.PHONY: dev run build bundle install uninstall test check ui snapshot preview icons clean
+.PHONY: dev run build bundle install uninstall test check ui snapshot preview web icons clean
 
 dev: node_modules ## tauri dev, recompiling ui/src/ on change (live-reloads ui/)
 	npm run --silent watch & trap 'kill $$!' EXIT; cd $(APP_DIR) && cargo tauri dev
@@ -52,6 +52,11 @@ snapshot:       ## fetch once from GitHub into ui/dev-snapshot.json (prints a ta
 preview: snapshot ui ## open the UI in a browser against the dev snapshot
 	@echo "http://127.0.0.1:8766/index.html  (Ctrl+C to stop)"
 	python3 -m http.server 8766 --bind 127.0.0.1 --directory ui
+
+web: snapshot ui ## package static web assets into _site/
+	mkdir -p _site
+	cp ui/index.html ui/style.css ui/dev-snapshot.json _site/
+	cp -R ui/build _site/build
 
 icons:          ## regenerate icons from the SVG sources
 	cd $(APP_DIR) && cargo tauri icon icons-src/app-icon.svg -o icons && rm -rf icons/android icons/ios
