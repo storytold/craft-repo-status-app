@@ -315,6 +315,17 @@ test('status pill, failures banner and budget', async () => {
 
 // ───────────────────────────── urgent view ─────────────────────────────
 
+test('removing the selected repo resets the urgent filter to all repositories', async () => {
+  const h = await setup();
+  h.row('alpha').click();
+  h.emit('craft:snapshot', snapshot([repo('beta', { urgent: [issue(3, 50, false)] })]));
+  assert.equal(h.doc.querySelector<HTMLSelectElement>('#urgent-repo')!.value, '');
+  assert.deepEqual([...h.doc.querySelectorAll('.urgent-item .num')].map((n) => n.textContent), ['#3']);
+  h.emit('craft:snapshot', snapshot());
+  assert.equal(h.doc.querySelector<HTMLSelectElement>('#urgent-repo')!.value, '', 'the removed filter stays cleared');
+  assert.equal(h.doc.querySelectorAll('.urgent-item').length, 3);
+});
+
 test('urgent view lists every repo’s issues, filters to critical, and opens them', async () => {
   const h = await setup();
   h.doc.querySelector<HTMLElement>('[data-view="urgent"]')!.click();

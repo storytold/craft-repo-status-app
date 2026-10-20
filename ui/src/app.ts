@@ -325,6 +325,7 @@ export function start(api: Api): () => void {
   }
 
   function renderUrgent(snap: Snapshot): void {
+    if (state.urgentRepo && !snap.repos.some((r) => r.repo === state.urgentRepo)) state.urgentRepo = '';
     const sel = $<HTMLSelectElement>('urgent-repo');
     sel.replaceChildren(el('option', { value: '' }, 'All repositories'),
       ...snap.repos.map((r) => el('option', { value: r.repo }, shortName(r.repo))));
