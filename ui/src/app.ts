@@ -4,8 +4,9 @@
 import {
   COLUMNS, RECENT, WINDOWS, MANUAL, windowById, value, orderedEntries, nextSort, dropIndex,
   freshness, ago, totals, urgentAcross, tokenStatus, isRefreshing,
+  SETTING_FIELDS, getSetting, withSetting, normalizeRepo, repoProblem, settingsProblems, relaunchChanges, tokenSourceNote,
 } from './model.ts';
-import type { Column, Meta, RepoEntry, Snapshot, Sort } from './model.ts';
+import type { Column, Config, Meta, RepoEntry, SettingField, Settings, Snapshot, Sort } from './model.ts';
 
 /** What the UI needs from the host: Tauri commands and events, window chrome. */
 export interface Api {
@@ -14,7 +15,12 @@ export interface Api {
   startResize(): void;
 }
 
-type View = 'repos' | 'urgent';
+type View = 'repos' | 'urgent' | 'settings';
+
+/** A button of a row in the Settings view's repo list. */
+type RepoAction = 'up' | 'down' | 'remove';
+/** The repo-list button that takes the keyboard focus after the list is drawn again. */
+interface RepoFocus { row: number; action: RepoAction }
 
 interface State {
   snap: Snapshot | null;
@@ -252,7 +258,7 @@ export function start(api: Api): () => void {
       }, COLUMNS.map((c, i) => el('td', { class: groupStart(i) }, cell(e, c))));
     }));
     if (!rows.length) {
-      $('tbody').replaceChildren(el('tr', {}, el('td', { colspan: COLUMNS.length, class: 'empty' }, 'No repositories configured — Edit config.')));
+      $('tbody').replaceChildren(el('tr', {}, el('td', { colspan: COLUMNS.length, class: 'empty' }, 'No repositories configured. Add some in Settings.')));
     }
     const t = totals(snap.repos, state.window);
     $('tfoot').replaceChildren(el('tr', {}, COLUMNS.map((c, i) =>
@@ -394,18 +400,237 @@ export function start(api: Api): () => void {
     // Rebuilding the table mid-drag would drop the row out of the user's hand;
     // the drop renders anyway.
     const snap = state.snap;
-    if (!snap || drag?.moved) return;
-    renderStatus(snap);
+    if (drag?.moved) return;
     document.querySelectorAll<HTMLElement>('.view').forEach((b) => b.setAttribute('aria-selected', String(b.dataset.view === state.view)));
     $('repos-view').hidden = state.view !== 'repos';
     $('urgent-view').hidden = state.view !== 'urgent';
-    if (state.view === 'repos') renderTable(snap); else renderUrgent(snap);
+    $('settings-view').hidden = state.view !== 'settings';
+    if (!snap) return;
+    renderStatus(snap);
+    if (state.view === 'repos') renderTable(snap);
+    else if (state.view === 'urgent') renderUrgent(snap);
+    else showTokenSource(snap);
   }
 
   function setView(v: View): void {
+    // Leaving Settings drops its unsaved edits.
+    if (v !== 'settings') settings = null;
     state.view = v;
-    save('view', v);
+    if (v !== 'settings') save('view', v);
     render();
+  }
+
+  // ───────────────────────────── settings ─────────────────────────────
+  // The Settings view edits ~/.craft_status_config.toml through the host:
+  // `get_settings` reads it and `save_settings` checks the values again and
+  // writes them. Fields come from SETTING_FIELDS, so a new config field needs
+  // an entry there, plus its Rust field.
+
+  /** The open Settings view: the file's values as loaded, and the edits. */
+  let settings: { loaded: Settings; draft: Config } | null = null;
+  /** The view Settings goes back to when closed. */
+  let settingsBack: Exclude<View, 'settings'> = 'repos';
+  let saving = false;
+  /** Counts openings, so a load that finishes after Settings closed, or opened again, is dropped. */
+  let openings = 0;
+
+  async function openSettings(): Promise<void> {
+    if (state.view === 'settings') return;
+    settingsBack = state.view;
+    const opening = ++openings;
+    setView('settings');
+    $('settings-form').replaceChildren();
+    setSettingsStatus('Loading…');
+    checkSettings();
+    const current = (): boolean => opening === openings && state.view === 'settings';
+    try {
+      const loaded = await api.invoke<Settings | null>('get_settings');
+      if (!current()) return;
+      // The browser stand-in answers commands it lacks with null.
+      if (!loaded) { setSettingsStatus('Settings need the app.'); return; }
+      settings = { loaded, draft: loaded.config };
+      buildSettings();
+      setSettingsStatus('');
+    } catch (e) {
+      if (current()) setSettingsStatus(`Could not read the config file: ${e}`, 'error');
+    }
+  }
+
+  function closeSettings(): void {
+    setView(settingsBack);
+  }
+
+  function setSettingsStatus(text: string, kind: '' | 'ok' | 'error' = ''): void {
+    const s = $('settings-status');
+    s.textContent = text;
+    s.className = kind;
+  }
+
+  /** Changes one field of the edits and shows what keeps them from being saved. */
+  function editSetting(key: string, v: unknown): void {
+    if (!settings || saving) return;
+    settings.draft = withSetting(settings.draft, key, v);
+    setSettingsStatus('');
+    checkSettings();
+  }
+
+  /** Shows each field's problem and enables Save when there are none. A
+   * problem marks the input its message describes as invalid. The fields are
+   * disabled while a save runs, since the reload after it replaces them. */
+  function checkSettings(): void {
+    const problems = settings ? settingsProblems(settings.draft) : {};
+    document.querySelectorAll<HTMLFieldSetElement>('#settings-form fieldset').forEach((f) => { f.disabled = saving; });
+    document.querySelectorAll<HTMLElement>('#settings-form .field-error[data-for]').forEach((n) => {
+      const key = n.dataset.for ?? '';
+      n.textContent = problems[key] ?? '';
+      document.querySelector(`#settings-form [aria-describedby~="${n.id}"]`)?.setAttribute('aria-invalid', String(key in problems));
+    });
+    $<HTMLButtonElement>('settings-save').disabled = !settings || saving || Object.keys(problems).length > 0;
+  }
+
+  const settingId = (key: string): string => `setting-${key.replaceAll('.', '-')}`;
+
+  /** Says which token the last fetch used, next to the token field. */
+  function showTokenSource(snap: Snapshot): void {
+    const n = document.getElementById('settings-token-source');
+    if (n) n.textContent = tokenSourceNote(snap.token);
+  }
+
+  function buildSettings(): void {
+    if (!settings) return;
+    const sections = new Map<string, HTMLElement>();
+    const section = (name: string): HTMLElement => {
+      let s = sections.get(name);
+      if (!s) { s = el('fieldset', { class: 'settings-section' }, el('legend', {}, name)); sections.set(name, s); }
+      return s;
+    };
+    section('Repositories').append(repoEditor());
+    for (const f of SETTING_FIELDS) section(f.section).append(settingRow(f, settings));
+    $('settings-form').replaceChildren(el('p', { class: 'settings-path' }, settings.loaded.path), ...sections.values());
+    drawRepos();
+    checkSettings();
+  }
+
+  function settingRow(f: SettingField, s: { loaded: Settings; draft: Config }): HTMLElement {
+    const id = settingId(f.key);
+    const v = getSetting(s.draft, f.key);
+    let input: HTMLInputElement;
+    const extra: HTMLElement[] = [];
+    if (f.kind === 'bool') {
+      input = el('input', { type: 'checkbox', id, onchange: () => editSetting(f.key, input.checked) });
+      input.checked = Boolean(v);
+    } else if (f.kind === 'secret') {
+      // The host never sends the saved token: an empty field keeps it.
+      input = el('input', {
+        type: 'password', id, autocomplete: 'off', spellcheck: 'false',
+        placeholder: s.loaded.token_set ? 'Saved token kept unless you type a new one' : 'No token saved',
+      });
+      if (s.loaded.token_set) {
+        extra.push(el('label', { class: 'toggle' }, el('input', { type: 'checkbox', id: 'setting-token-clear' }), 'Remove the saved token'));
+      }
+      extra.push(el('span', { class: 'help', id: 'settings-token-source' }, tokenSourceNote(state.snap?.token)));
+    } else {
+      const numeric = f.kind === 'number';
+      // An empty number field is NaN, which settingsProblems reports.
+      const typed = (): number | string => {
+        if (!numeric) return input.value;
+        return input.value.trim() === '' ? Number.NaN : Number(input.value);
+      };
+      input = el('input', {
+        type: numeric ? 'number' : 'text', id, min: f.min, max: f.max, step: f.step, spellcheck: 'false', autocomplete: 'off',
+        oninput: () => editSetting(f.key, typed()),
+      });
+      input.value = typeof v === 'number' || typeof v === 'string' ? String(v) : '';
+    }
+    const errorId = `${id}-error`;
+    input.setAttribute('aria-describedby', f.kind === 'secret' ? `settings-token-source ${errorId}` : errorId);
+    return el('div', { class: 'setting' },
+      el('label', { for: id }, f.label,
+        f.relaunch && el('span', { class: 'relaunch', title: 'Applies when Craft Status is next launched' }, 'relaunch')),
+      el('div', { class: 'setting-input' }, input, ...extra,
+        f.help && el('span', { class: 'help' }, f.help),
+        el('span', { class: 'field-error', id: errorId, dataset: { for: f.key } })));
+  }
+
+  function repoEditor(): HTMLElement {
+    const input = el('input', {
+      type: 'text', id: 'settings-repo-input', placeholder: 'owner/name or a GitHub URL', spellcheck: 'false', autocomplete: 'off',
+      'aria-describedby': `settings-repo-error ${settingId('repos')}-error`,
+      oninput: () => { error.textContent = ''; },
+      onkeydown: (e: KeyboardEvent) => { if (e.key === 'Enter') { e.preventDefault(); add(); } },
+    });
+    const error = el('span', { class: 'field-error', id: 'settings-repo-error' });
+    const add = (): void => {
+      if (!settings) return;
+      const problem = repoProblem(input.value, settings.draft.repos);
+      if (problem) { error.textContent = problem; return; }
+      editSetting('repos', [...settings.draft.repos, normalizeRepo(input.value)!]);
+      input.value = '';
+      drawRepos();
+    };
+    return el('div', { class: 'repo-editor' },
+      el('ol', { class: 'repo-list', id: 'settings-repos' }),
+      el('div', { class: 'repo-add' }, input, el('button', { class: 'button', id: 'settings-repo-add', onclick: add }, 'Add')),
+      error,
+      el('span', { class: 'field-error', id: `${settingId('repos')}-error`, dataset: { for: 'repos' } }));
+  }
+
+  /** Draws the repo list. Drawing it replaces every button, the focused one
+   * included, so `focus` names the button to focus afterwards. */
+  function drawRepos(focus?: RepoFocus): void {
+    if (!settings) return;
+    const repos = settings.draft.repos;
+    const change = (next: string[], then: RepoFocus): void => { editSetting('repos', next); drawRepos(then); };
+    const move = (i: number, j: number, action: RepoAction): void => {
+      const next = [...repos];
+      [next[i], next[j]] = [next[j]!, next[i]!];
+      change(next, { row: j, action });
+    };
+    const button = (label: string, action: RepoAction, title: string, disabled: boolean, onclick: () => void): HTMLElement =>
+      el('button', { class: 'icon-button small', title, 'aria-label': title, disabled, onclick, dataset: { action } }, label);
+    $('settings-repos').replaceChildren(...repos.map((r, i) => el('li', { dataset: { repo: r } },
+      el('span', { class: 'repo-name' }, r),
+      button('↑', 'up', `Move ${r} up`, i === 0, () => move(i, i - 1, 'up')),
+      button('↓', 'down', `Move ${r} down`, i === repos.length - 1, () => move(i, i + 1, 'down')),
+      button('✕', 'remove', `Remove ${r}`, false, () => change(repos.filter((_, k) => k !== i), { row: Math.min(i, repos.length - 2), action: 'remove' })))));
+    if (!repos.length) $('settings-repos').append(el('li', { class: 'empty' }, 'No repositories: the table will be empty.'));
+    if (focus) focusRepoButton(focus);
+  }
+
+  /** Focuses `focus.action`'s button in row `focus.row` of the repo list, or
+   * the row's other move button when that one is disabled at the end of the
+   * list. With no such row, the repo input takes the focus. */
+  function focusRepoButton({ row, action }: RepoFocus): void {
+    const li = $('settings-repos').querySelectorAll('li[data-repo]')[row];
+    const pick = (a: RepoAction) => li?.querySelector<HTMLButtonElement>(`button[data-action="${a}"]`);
+    const target = [pick(action), pick(action === 'up' ? 'down' : 'up')].find((b) => b && !b.disabled);
+    (target ?? $('settings-repo-input')).focus();
+  }
+
+  async function saveSettings(): Promise<void> {
+    const s = settings;
+    if (!s || saving || Object.keys(settingsProblems(s.draft)).length) return;
+    const token = $<HTMLInputElement>(settingId('github_token')).value.trim();
+    const clear = document.querySelector<HTMLInputElement>('#setting-token-clear')?.checked ?? false;
+    const config: Config = { ...s.draft, github_token: token };
+    saving = true;
+    checkSettings();
+    setSettingsStatus('Saving…');
+    try {
+      // The host writes into the file only the values that differ from `base`.
+      await api.invoke('save_settings', { config, base: s.loaded.config, keepToken: !token && !clear });
+      const relaunch = relaunchChanges(s.loaded.config, s.draft);
+      const loaded = await api.invoke<Settings>('get_settings');
+      if (settings !== s) return;
+      settings = { loaded, draft: loaded.config };
+      buildSettings();
+      setSettingsStatus(relaunch.length ? `Saved. Relaunch Craft Status to apply: ${relaunch.join(', ')}.` : 'Saved.', 'ok');
+    } catch (e) {
+      if (settings === s) setSettingsStatus(`Not saved: ${e}`, 'error');
+    } finally {
+      saving = false;
+      checkSettings();
+    }
   }
 
   function applyMeta(m: Meta | null): void {
@@ -432,11 +657,17 @@ export function start(api: Api): () => void {
   $('refresh').addEventListener('click', () => api.invoke('refresh_now'));
   $('pin').addEventListener('click', () => api.invoke('set_always_on_top', { on: !state.meta.always_on_top }));
   $('hide').addEventListener('click', () => api.invoke('hide_window'));
-  $('edit-config').addEventListener('click', () => api.invoke('open_config'));
+  $('settings').addEventListener('click', () => { if (state.view === 'settings') closeSettings(); else void openSettings(); });
+  $('edit-config').addEventListener('click', () => void openSettings());
+  $('settings-open-file').addEventListener('click', () => api.invoke('open_config'));
+  $('settings-close').addEventListener('click', closeSettings);
+  $('settings-save').addEventListener('click', () => void saveSettings());
+  api.listen('craft:settings', () => void openSettings());
   $('resize').addEventListener('mousedown', (e) => { e.preventDefault(); api.startResize(); });
   document.addEventListener('keydown', (e) => {
     const mod = e.metaKey || e.ctrlKey;
-    if (e.key === 'Escape') api.invoke('hide_window');
+    if (e.key === 'Escape') { if (state.view === 'settings') closeSettings(); else void api.invoke('hide_window'); }
+    else if (mod && e.key === ',') { e.preventDefault(); void openSettings(); }
     else if (mod && e.key.toLowerCase() === 'r') { e.preventDefault(); api.invoke('refresh_now'); }
     else if (mod && e.key === '1') setView('repos');
     else if (mod && e.key === '2') setView('urgent');

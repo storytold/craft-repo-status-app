@@ -28,6 +28,9 @@
         <button class="icon-button" id="pin" title="Always on top">
           <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M6 2h4l-.5 4 2.5 2.5H4L6.5 6zM8 8.5V14"/></svg>
         </button>
+        <button class="icon-button" id="settings" title="Settings (⌘,)">
+          <svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="2.3"/><path d="M8 1.5v2.2M8 12.3v2.2M1.5 8h2.2M12.3 8h2.2M3.4 3.4l1.6 1.6M11 11l1.6 1.6M3.4 12.6L5 11M11 5l1.6-1.6"/></svg>
+        </button>
         <button class="icon-button" id="hide" title="Hide (Esc)">
           <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M4 4l8 8M12 4l-8 8"/></svg>
         </button>
@@ -52,12 +55,23 @@
       <ol class="urgent-list" id="urgent-list"></ol>
     </main>
 
+    <main id="settings-view" hidden>
+      <div class="settings" id="settings-form"></div>
+      <div class="settings-bar">
+        <output id="settings-status"></output>
+        <span class="spacer"></span>
+        <button class="footer-link" id="settings-open-file">Open config file</button>
+        <button class="button" id="settings-close">Close</button>
+        <button class="button primary" id="settings-save">Save</button>
+      </div>
+    </main>
+
     <footer data-tauri-drag-region>
       <span id="next" data-tauri-drag-region></span>
       <span id="budget" data-tauri-drag-region></span>
       <span id="token" data-tauri-drag-region></span>
       <span class="spacer" data-tauri-drag-region></span>
-      <button class="footer-link" id="edit-config">Edit config</button>
+      <button class="footer-link" id="edit-config">Settings</button>
       <span id="shortcut"></span>
     </footer>
     <div id="resize" title="Resize"></div>

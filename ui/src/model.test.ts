@@ -3,8 +3,9 @@ import assert from 'node:assert/strict';
 import {
   sortEntries, manualOrder, orderedEntries, nextSort, dropIndex, MANUAL, versionKey, freshness, isStale, ago, compact, tokenStatus,
   totals, urgentAcross, isRefreshing, defaultDir, value, windowById, WINDOWS, COLUMNS, COLUMN,
+  SETTING_FIELDS, getSetting, withSetting, normalizeRepo, repoProblem, settingsProblems, relaunchChanges, tokenSourceNote,
 } from './model.ts';
-import type { Activity, RepoEntry, RepoStats, UrgentIssue } from './model.ts';
+import type { Activity, Config, RepoEntry, RepoStats, UrgentIssue } from './model.ts';
 
 const entry = (repo: string, stats: Partial<RepoStats> | null, fetched_at: string | null = '2026-10-08T12:00:00Z'): RepoEntry =>
   ({ repo: `o/${repo}`, stats: stats as RepoStats | null, fetched_at });
@@ -204,6 +205,8 @@ test('a row is refreshing while its repo is being fetched or queued', () => {
   assert.equal(isRefreshing({ fetching: 'o/a', requested: ['o/b'] }, 'o/b'), true);
   assert.equal(isRefreshing({ fetching: 'o/a', requested: ['o/b'] }, 'o/c'), false);
   assert.equal(isRefreshing({}, 'o/a'), false, 'a snapshot from an older build');
+  assert.equal(isRefreshing({ fetching: 'o/b', requested: ['o/a'] }, 'O/A'), true, 'queued before a save respelled it');
+  assert.equal(isRefreshing({ fetching: 'o/b', requested: [] }, 'O/B'), true, 'fetched before a save respelled it');
 });
 
 test('token status', () => {
@@ -223,4 +226,72 @@ test('columns: unique keys, every recent column titled with its span', () => {
   assert.equal(Object.keys(COLUMN).length, COLUMNS.length);
   for (const c of COLUMNS.filter((c) => c.recent)) assert.match(c.title ?? '', /\{span\}/, c.key);
   assert.equal(COLUMNS[0]!.key, 'name', 'the sticky first column is the repo');
+});
+
+// ───────────────────────────── settings ─────────────────────────────
+
+const config = (): Config => ({
+  repos: ['o/a', 'o/b'], poll_minutes: 30, stale_minutes: 60, github_token: '',
+  window: { width: 1340, height: 560, always_on_top: false, start_hidden: false, opacity: 0.96 },
+  tray: { hide_dock_icon: true, visible_on_all_workspaces: true, close_to_tray: true },
+  shortcuts: { toggle_window: 'CmdOrCtrl+Shift+G' },
+});
+
+test('repos normalize as config.rs does', () => {
+  // The cases of config.rs's repos_are_normalized_and_deduped.
+  assert.equal(normalizeRepo('https://github.com/storytold/photocraft'), 'storytold/photocraft');
+  assert.equal(normalizeRepo('storytold/photocraft.git'), 'storytold/photocraft');
+  assert.equal(normalizeRepo('github.com/a/b/pulls'), 'a/b');
+  assert.equal(normalizeRepo(' http://github.com/a/b '), 'a/b');
+  for (const bad of ['nonsense', 'x/y z', 'a/.git', '', 'a/b?c']) assert.equal(normalizeRepo(bad), null, bad);
+  assert.equal(normalizeRepo('http://github.com/o/r'), 'o/r');
+  assert.equal(normalizeRepo('http://github.com/o/r.git/issues'), 'o/r');
+  assert.equal(normalizeRepo('https://github.com/github.com/o/r'), 'github.com/o', 'one prefix is removed');
+  for (const bad of ['HTTP://github.com/o/r', 'ftp://github.com/o/r', 'http://github.com']) assert.equal(normalizeRepo(bad), null, bad);
+  assert.equal(repoProblem('o/c', ['o/a']), null);
+  assert.match(repoProblem('O/A', ['https://github.com/o/a']) ?? '', /already listed/);
+  assert.match(repoProblem('o', []) ?? '', /owner\/name/);
+});
+
+test('settings fields read and write dotted keys without touching the original', () => {
+  const c = config();
+  const d = withSetting(c, 'window.opacity', 0.5);
+  assert.equal(getSetting(d, 'window.opacity'), 0.5);
+  assert.equal(c.window.opacity, 0.96);
+  assert.ok(d.tray === c.tray, 'untouched parts are shared');
+  assert.equal(getSetting(withSetting(c, 'poll_minutes', 4), 'poll_minutes'), 4);
+  assert.equal(getSetting(c, 'window.missing.deeper'), undefined);
+  for (const f of SETTING_FIELDS) assert.notEqual(getSetting(c, f.key), undefined, `${f.key} is a Config field`);
+});
+
+test('settingsProblems checks every field as Config::problems does', () => {
+  assert.deepEqual(settingsProblems(config()), {});
+  const bad = (key: string, v: unknown) => Object.keys(settingsProblems(withSetting(config(), key, v)));
+  assert.deepEqual(bad('poll_minutes', 0.5), ['poll_minutes']);
+  assert.deepEqual(bad('poll_minutes', 1441), ['poll_minutes']);
+  assert.deepEqual(bad('poll_minutes', 90), ['stale_minutes'], 'stale must be at least the fetch interval');
+  assert.deepEqual(bad('stale_minutes', 10081), ['stale_minutes']);
+  assert.deepEqual(bad('window.width', 519), ['window.width']);
+  assert.deepEqual(bad('window.height', NaN), ['window.height']);
+  assert.deepEqual(bad('window.opacity', 0.1), ['window.opacity']);
+  assert.deepEqual(bad('repos', ['o/a', 'x y']), ['repos']);
+  assert.deepEqual(bad('repos', ['o/a', 'https://github.com/O/A']), ['repos']);
+  assert.deepEqual(bad('shortcuts.toggle_window', 'Ctrl+'), ['shortcuts.toggle_window']);
+  assert.deepEqual(bad('shortcuts.toggle_window', ''), [], 'empty turns the shortcut off');
+  assert.deepEqual(bad('repos', []), [], 'an empty list is allowed');
+});
+
+test('relaunchChanges names the changed fields that need a relaunch', () => {
+  const c = config();
+  assert.deepEqual(relaunchChanges(c, c), []);
+  assert.deepEqual(relaunchChanges(c, withSetting(withSetting(c, 'tray.hide_dock_icon', false), 'poll_minutes', 9)), ['No Dock icon (macOS)']);
+});
+
+test('tokenSourceNote names the token the last fetch used', () => {
+  assert.equal(tokenSourceNote(null), '', 'nothing to say before the first fetch');
+  assert.equal(tokenSourceNote({ source: null, rejected: false }), 'The last fetch found no token.');
+  assert.equal(tokenSourceNote({ source: 'config', rejected: false }), 'The last fetch used the token saved here.');
+  assert.equal(tokenSourceNote({ source: 'gh CLI', rejected: false }), 'The last fetch used `gh auth token`.');
+  assert.equal(tokenSourceNote({ source: '$GH_TOKEN', rejected: true }),
+    'The last fetch used $GH_TOKEN, and GitHub rejected it. A token saved here is not used while $GH_TOKEN is set.');
 });

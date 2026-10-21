@@ -7,6 +7,7 @@
 //! Failed repositories keep their previous numbers; staleness is derived from
 //! each repository's `fetched_at`, so old data is always visibly old.
 
+use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Mutex};
 use std::time::{Duration, SystemTime};
@@ -18,13 +19,15 @@ use serde::Serialize;
 use tauri::menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::{AppHandle, Emitter, LogicalSize, Manager, State, WebviewWindow, Wry};
-use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
+use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut, ShortcutState};
 
 const MAIN: &str = "main";
 const TRAY: &str = "main";
 const EV_SNAPSHOT: &str = "craft:snapshot";
 const EV_FOCUS: &str = "craft:focus";
 const EV_META: &str = "craft:meta";
+/// Tells the window to show its Settings view.
+const EV_SETTINGS: &str = "craft:settings";
 /// How often the poll thread wakes to check the clock, the config file and
 /// the tray tooltip. Wall-clock based, so a sleeping laptop polls on wake.
 const TICK: Duration = Duration::from_secs(15);
@@ -131,6 +134,114 @@ fn open_config() -> Result<(), String> {
     open_external(&path.display().to_string())
 }
 
+/// What the Settings view edits: the config file's values, with the token
+/// left out and `token_set` saying whether the file has one. Always on top
+/// is the window's current state, which the toolbar's pin and the tray item
+/// change without writing the file.
+#[derive(Serialize)]
+struct Settings {
+    config: Config,
+    token_set: bool,
+    path: String,
+}
+
+#[tauri::command]
+fn get_settings(state: State<AppState>) -> Result<Settings, String> {
+    let path = Config::path().map_err(|e| e.to_string())?;
+    let mut config = Config::load_or_create().map_err(|e| e.to_string())?;
+    let token_set = !config.github_token.trim().is_empty();
+    config.github_token.clear();
+    config.window.always_on_top = state.config.lock().unwrap().window.always_on_top;
+    Ok(Settings {
+        config,
+        token_set,
+        path: path.display().to_string(),
+    })
+}
+
+/// Writes the Settings view's config to the file and applies it at once.
+/// `base` holds the values the view opened with: only the values the view
+/// changed from it replace the file's. With `keep_token` the file keeps its
+/// token, which the view never receives; otherwise `config.github_token`
+/// replaces it. The work runs off the main thread: applying the config waits
+/// for the main thread, and so may the poll thread's reload, which this one
+/// waits for.
+#[tauri::command]
+async fn save_settings(
+    app: AppHandle,
+    config: Config,
+    base: Config,
+    keep_token: bool,
+) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || save_and_apply(&app, config, &base, keep_token))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+fn save_and_apply(
+    app: &AppHandle,
+    config: Config,
+    base: &Config,
+    keep_token: bool,
+) -> Result<(), String> {
+    let path = Config::path().map_err(|e| e.to_string())?;
+    let state = app.state::<AppState>();
+    let live = state.config.lock().unwrap().window.always_on_top;
+    let pinned = pinned_after_save(&config, base, live);
+    let config = prepare_save(config, base, keep_token, &path)?;
+    config.save_to(&path).map_err(|e| e.to_string())?;
+    reload_config_if_changed(app, true);
+    let reloaded = state.config.lock().unwrap().window.always_on_top;
+    if reloaded != pinned {
+        set_pinned(app, pinned);
+    }
+    // A repo the save added is a hole, so it is fetched before repos that
+    // are only due, once the gap or a pause has passed. The step works out
+    // the next fetch from the new interval.
+    wake_poller(&state, Wake::Saved);
+    Ok(())
+}
+
+/// Whether the window is pinned after a save: as the view set Always on top
+/// when it changed it, otherwise as the window was before the save.
+fn pinned_after_save(view: &Config, base: &Config, live: bool) -> bool {
+    if view.window.always_on_top != base.window.always_on_top {
+        view.window.always_on_top
+    } else {
+        live
+    }
+}
+
+/// The config `save_settings` writes: `config`'s changes from `base` applied
+/// to the file's values (see [`Config::rebase`]), with the file's token when
+/// `keep_token`, and refused when its shortcut does not parse.
+fn prepare_save(
+    config: Config,
+    base: &Config,
+    keep_token: bool,
+    path: &Path,
+) -> Result<Config, String> {
+    let current = if path.exists() {
+        Config::load_from(path).map_err(|e| e.to_string())?
+    } else {
+        Config::default()
+    };
+    let mut merged = config.rebase(base, &current).map_err(|e| e.to_string())?;
+    merged.github_token = if keep_token {
+        current.github_token
+    } else {
+        config.github_token
+    };
+    let accel = merged.shortcuts.toggle_window.trim().to_string();
+    if !accel.is_empty() {
+        if let Err(e) = accel.parse::<Shortcut>() {
+            return Err(format!("shortcuts.toggle_window: {e}"));
+        }
+    }
+    merged.shortcuts.toggle_window = accel;
+    Ok(merged)
+}
+
 #[tauri::command]
 fn set_always_on_top(app: AppHandle, on: bool) {
     set_pinned(&app, on);
@@ -174,6 +285,10 @@ enum Wake {
     All,
     /// A row's refresh button queued its repo in `Snapshot::requested`.
     Repo,
+    /// A Settings save changed the config: the next step reads the new repo
+    /// list and interval at once, without a refresh and without cutting the
+    /// gap or a pause short.
+    Saved,
 }
 
 fn wake_poller(state: &AppState, why: Wake) {
@@ -194,15 +309,26 @@ fn config_mtime() -> Option<SystemTime> {
         .and_then(|m| m.modified().ok())
 }
 
-/// Re-read the config if it changed on disk. A broken file keeps the old
-/// config and surfaces the parse error in the window.
-fn reload_config_if_changed(app: &AppHandle) {
+/// Whether the config is read again: always when `force`, else when its
+/// modification time differs from the one last read.
+fn needs_reload(seen: Option<SystemTime>, now: Option<SystemTime>, force: bool) -> bool {
+    force || seen != now
+}
+
+/// Re-read the config if it changed on disk, or with `force` in any case: a
+/// Settings save can leave the file with the modification time it had, on a
+/// file system that stores coarse times. A broken file keeps the old config
+/// and surfaces the parse error in the window. The poll thread and a Settings
+/// save both call it; holding `config_mtime` throughout makes one wait for
+/// the other, so an older read never replaces a newer one.
+fn reload_config_if_changed(app: &AppHandle, force: bool) {
     let state = app.state::<AppState>();
+    let mut seen = state.config_mtime.lock().unwrap();
     let mtime = config_mtime();
-    if *state.config_mtime.lock().unwrap() == mtime {
+    if !needs_reload(*seen, mtime, force) {
         return;
     }
-    *state.config_mtime.lock().unwrap() = mtime;
+    *seen = mtime;
     match Config::load_or_create() {
         Ok(cfg) => {
             {
@@ -266,10 +392,7 @@ fn fetch_into_snapshot(app: &AppHandle, cfg: &Config, repo: &str) -> Result<(), 
     // The icon only changes with its blob, so most fetches skip the download.
     let held_icon = {
         let snap = state.snapshot.lock().unwrap();
-        snap.repos
-            .iter()
-            .find(|e| e.repo == repo)
-            .and_then(|e| e.icon_oid.clone())
+        snap.entry(repo).and_then(|e| e.icon_oid.clone())
     };
     let icon = match &result {
         Ok((stats, _)) => stats
@@ -282,7 +405,8 @@ fn fetch_into_snapshot(app: &AppHandle, cfg: &Config, repo: &str) -> Result<(), 
 
     let mut snap = state.snapshot.lock().unwrap();
     let outcome = {
-        let Some(entry) = snap.repos.iter_mut().find(|e| e.repo == repo) else {
+        // A Settings save may have respelled the entry since the fetch began.
+        let Some(entry) = snap.entry_mut(repo) else {
             return Ok(());
         };
         entry.last_attempt_at = Some(now);
@@ -466,6 +590,31 @@ fn step(app: &AppHandle, pacing: &mut Pacing) {
     emit_snapshot(app);
 }
 
+/// Applies the wakes that arrived together to the poll thread's pacing.
+fn woken(
+    pacing: &mut Pacing,
+    last_manual: &mut Option<DateTime<Utc>>,
+    wakes: &[Wake],
+    now: DateTime<Utc>,
+) {
+    let all = wakes.contains(&Wake::All);
+    let fresh = last_manual.is_none_or(|t| (now - t).num_seconds() >= MANUAL_DEBOUNCE);
+    if all && fresh {
+        *last_manual = Some(now);
+        pacing.forced_since = Some(now);
+    }
+    // A manual refresh, of everything or of one row, skips the gap or a
+    // token pause, but never a rate-limit backoff. A save skips neither.
+    let manual = if all {
+        fresh
+    } else {
+        wakes.contains(&Wake::Repo)
+    };
+    if manual && pacing.strikes == 0 {
+        pacing.not_before = None;
+    }
+}
+
 fn spawn_poller(app: AppHandle, rx: mpsc::Receiver<Wake>) {
     std::thread::Builder::new()
         .name("craft-poller".into())
@@ -473,7 +622,7 @@ fn spawn_poller(app: AppHandle, rx: mpsc::Receiver<Wake>) {
             let mut pacing = Pacing::default();
             let mut last_manual: Option<DateTime<Utc>> = None;
             loop {
-                reload_config_if_changed(&app);
+                reload_config_if_changed(&app, false);
                 step(&app, &mut pacing);
                 // Staleness changes with the clock alone.
                 update_tray(&app);
@@ -485,21 +634,9 @@ fn spawn_poller(app: AppHandle, rx: mpsc::Receiver<Wake>) {
                     .map_or(TICK, |d| d.min(TICK));
                 match rx.recv_timeout(until_next) {
                     Ok(first) => {
-                        let all = std::iter::once(first)
-                            .chain(rx.try_iter())
-                            .any(|w| w == Wake::All);
-                        let now = Utc::now();
-                        let fresh =
-                            last_manual.is_none_or(|t| (now - t).num_seconds() >= MANUAL_DEBOUNCE);
-                        if all && fresh {
-                            last_manual = Some(now);
-                            pacing.forced_since = Some(now);
-                        }
-                        // A manual refresh, of everything or of one row, skips
-                        // the gap or a token pause, but never a rate-limit backoff.
-                        if (fresh || !all) && pacing.strikes == 0 {
-                            pacing.not_before = None;
-                        }
+                        let wakes: Vec<Wake> =
+                            std::iter::once(first).chain(rx.try_iter()).collect();
+                        woken(&mut pacing, &mut last_manual, &wakes, Utc::now());
                     }
                     Err(mpsc::RecvTimeoutError::Timeout) => {}
                     Err(mpsc::RecvTimeoutError::Disconnected) => std::thread::sleep(TICK),
@@ -539,6 +676,14 @@ fn show_window(w: &WebviewWindow) {
     let _ = w.unminimize();
     let _ = w.set_focus();
     let _ = w.emit(EV_FOCUS, true);
+}
+
+/// Brings the window to front with its Settings view showing.
+fn open_settings(app: &AppHandle) {
+    if let Some(w) = app.get_webview_window(MAIN) {
+        show_window(&w);
+        let _ = w.emit(EV_SETTINGS, ());
+    }
 }
 
 /// Tray click / global hotkey: hide if focused, otherwise bring to front on
@@ -689,7 +834,8 @@ fn build_tray(app: &tauri::App, cfg: &Config) -> tauri::Result<()> {
         cfg.window.always_on_top,
         None::<&str>,
     )?;
-    let open_cfg = MenuItem::with_id(app, "open_config", "Edit Config…", true, None::<&str>)?;
+    let settings = MenuItem::with_id(app, "settings", "Settings…", true, None::<&str>)?;
+    let open_cfg = MenuItem::with_id(app, "open_config", "Open Config File", true, None::<&str>)?;
     let quit = MenuItem::with_id(app, "quit", "Quit Craft Status", true, None::<&str>)?;
     let menu = Menu::with_items(
         app,
@@ -698,6 +844,7 @@ fn build_tray(app: &tauri::App, cfg: &Config) -> tauri::Result<()> {
             &refresh,
             &on_top,
             &PredefinedMenuItem::separator(app)?,
+            &settings,
             &open_cfg,
             &PredefinedMenuItem::separator(app)?,
             &quit,
@@ -733,6 +880,7 @@ fn build_tray(app: &tauri::App, cfg: &Config) -> tauri::Result<()> {
                     .unwrap_or(false);
                 set_pinned(app, checked);
             }
+            "settings" => open_settings(app),
             "open_config" => {
                 let _ = open_config();
             }
@@ -788,6 +936,8 @@ pub fn run() {
             refresh_repo,
             open_url,
             open_config,
+            get_settings,
+            save_settings,
             set_always_on_top,
             window_ready,
             hide_window,
@@ -862,6 +1012,131 @@ mod tests {
         let hour = rate_limit_end("the top of the hour", now).unwrap();
         assert_eq!(hour.to_rfc3339(), "2026-10-18T05:00:00+00:00");
         assert!(rate_limit_end("later", now).is_none());
+    }
+
+    #[test]
+    fn a_save_wakes_the_poller_without_a_refresh() {
+        let now = "2026-10-18T04:20:00Z".parse::<DateTime<Utc>>().unwrap();
+        let gap = now + CDuration::seconds(REPO_GAP);
+        let paced = || Pacing {
+            not_before: Some(gap),
+            ..Pacing::default()
+        };
+        let mut last_manual = None;
+
+        let mut pacing = paced();
+        woken(&mut pacing, &mut last_manual, &[Wake::Saved], now);
+        assert_eq!(pacing.not_before, Some(gap), "the gap stays");
+        assert_eq!(pacing.forced_since, None, "nothing is refetched");
+        assert_eq!(last_manual, None, "and it is not a manual refresh");
+
+        let mut pacing = paced();
+        woken(
+            &mut pacing,
+            &mut last_manual,
+            &[Wake::Saved, Wake::Repo],
+            now,
+        );
+        assert_eq!(pacing.not_before, None, "a row refresh still skips the gap");
+        assert_eq!(pacing.forced_since, None);
+
+        let mut pacing = paced();
+        woken(
+            &mut pacing,
+            &mut last_manual,
+            &[Wake::Saved, Wake::All],
+            now,
+        );
+        assert_eq!(
+            (pacing.not_before, pacing.forced_since, last_manual),
+            (None, Some(now), Some(now)),
+            "a refresh still refreshes everything"
+        );
+    }
+
+    #[test]
+    fn a_save_reloads_the_config_when_its_time_did_not_change() {
+        let t = SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_790_000_000);
+        let later = t + std::time::Duration::from_secs(1);
+        assert!(!needs_reload(Some(t), Some(t), false), "the poll skips it");
+        assert!(needs_reload(Some(t), Some(t), true), "a save reads it");
+        assert!(needs_reload(Some(t), Some(later), false));
+        assert!(needs_reload(Some(t), None, false), "the file went away");
+    }
+
+    #[test]
+    fn a_save_keeps_the_pin_unless_the_view_changed_it() {
+        let pin = |on: bool| {
+            let mut c = Config::default();
+            c.window.always_on_top = on;
+            c
+        };
+        // The window was pinned from the toolbar, and the view left it as is.
+        assert!(pinned_after_save(&pin(true), &pin(true), true));
+        assert!(
+            !pinned_after_save(&pin(true), &pin(true), false),
+            "unpinned since"
+        );
+        assert!(
+            !pinned_after_save(&pin(false), &pin(true), true),
+            "unchecked in the view"
+        );
+        assert!(
+            pinned_after_save(&pin(true), &pin(false), false),
+            "checked in the view"
+        );
+    }
+
+    #[test]
+    fn a_save_keeps_the_file_token_and_checks_the_shortcut() {
+        let dir = std::env::temp_dir().join(format!("craft-app-save-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.toml");
+        let with = |token: &str, accel: &str| Config {
+            github_token: token.into(),
+            shortcuts: craft_core::config::Shortcuts {
+                toggle_window: accel.into(),
+            },
+            ..Config::default()
+        };
+        let base = Config::default();
+        // No file yet: nothing to keep.
+        assert_eq!(
+            prepare_save(with("", ""), &base, true, &path)
+                .unwrap()
+                .github_token,
+            ""
+        );
+        std::fs::write(&path, "github_token = \"secret\"\n").unwrap();
+        let kept = prepare_save(with("", " CmdOrCtrl+Shift+K "), &base, true, &path).unwrap();
+        assert_eq!(kept.github_token, "secret");
+        assert_eq!(kept.shortcuts.toggle_window, "CmdOrCtrl+Shift+K");
+        let replaced = prepare_save(with("new", ""), &base, false, &path).unwrap();
+        assert_eq!(replaced.github_token, "new");
+        let cleared = prepare_save(with("", ""), &base, false, &path).unwrap();
+        assert_eq!(cleared.github_token, "");
+        let err = prepare_save(with("", "Ctrl+Nope"), &base, true, &path).unwrap_err();
+        assert!(err.starts_with("shortcuts.toggle_window: "), "{err}");
+        // A file that does not load must not lose its token to a save.
+        std::fs::write(&path, "github_token = \"secret\"\npoll_minutes = \"x\"\n").unwrap();
+        assert!(prepare_save(with("", ""), &base, true, &path).is_err());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_save_keeps_file_edits_made_after_settings_opened() {
+        let dir = std::env::temp_dir().join(format!("craft-app-rebase-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.toml");
+        // Settings opened on the default stale threshold; the file was then
+        // edited to 90 minutes.
+        let base = Config::default();
+        std::fs::write(&path, "stale_minutes = 90\n").unwrap();
+        let mut edits = base.clone();
+        edits.window.opacity = 0.8;
+        let saved = prepare_save(edits, &base, true, &path).unwrap();
+        assert_eq!((saved.stale_minutes, saved.window.opacity), (90.0, 0.8));
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

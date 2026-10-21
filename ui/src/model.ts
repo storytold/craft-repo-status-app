@@ -102,6 +102,135 @@ export interface Meta {
   shortcut?: string;
 }
 
+// ───────────────────────────── settings ─────────────────────────────
+// ~/.craft_status_config.toml as the Settings view edits it: mirrors `Config`
+// in crates/craft-core/src/config.rs, and its limits mirror that file's
+// constants and `Config::problems`.
+
+export interface Config {
+  repos: string[];
+  poll_minutes: number;
+  stale_minutes: number;
+  github_token: string;
+  window: { width: number; height: number; always_on_top: boolean; start_hidden: boolean; opacity: number };
+  tray: { hide_dock_icon: boolean; visible_on_all_workspaces: boolean; close_to_tray: boolean };
+  shortcuts: { toggle_window: string };
+}
+
+/** `get_settings`'s answer: the config with its token left out, and whether the file has one. */
+export interface Settings {
+  config: Config;
+  token_set: boolean;
+  path: string;
+}
+
+export type SettingKind = 'number' | 'bool' | 'text' | 'secret';
+
+/** One field of the Settings view. The view draws `SETTING_FIELDS` in order, a heading before each new section. */
+export interface SettingField {
+  /** The field's place in `Config`, dotted: `window.opacity`. */
+  key: string;
+  section: string;
+  label: string;
+  kind: SettingKind;
+  min?: number;
+  max?: number;
+  step?: number;
+  help?: string;
+  /** The app applies it only when it is next launched. */
+  relaunch?: boolean;
+}
+
+/** The Settings view's fields besides the repo list, which it draws above them. */
+export const SETTING_FIELDS: readonly SettingField[] = [
+  { key: 'poll_minutes', section: 'Polling', label: 'Fetch each repo every (minutes)', kind: 'number', min: 1, max: 1440, step: 1, help: 'How old a repo’s data gets before it’s refetched. Repos are fetched one at a time, 20 s apart.' },
+  { key: 'stale_minutes', section: 'Polling', label: 'Stale after (minutes)', kind: 'number', min: 1, max: 10080, step: 1, help: 'Older data is flagged STALE. It must be at least the fetch interval.' },
+  { key: 'github_token', section: 'GitHub', label: 'Token', kind: 'secret', help: 'Used only if $CRAFT_STATUS_GITHUB_TOKEN, $GITHUB_TOKEN and $GH_TOKEN are all unset. With no token saved, the app uses `gh auth token`.' },
+  { key: 'window.width', section: 'Window', label: 'Width', kind: 'number', min: 520, max: 10000, step: 1, relaunch: true, help: 'Used when no window position is remembered.' },
+  { key: 'window.height', section: 'Window', label: 'Height', kind: 'number', min: 240, max: 10000, step: 1, relaunch: true },
+  { key: 'window.opacity', section: 'Window', label: 'Opacity', kind: 'number', min: 0.2, max: 1, step: 0.01 },
+  { key: 'window.always_on_top', section: 'Window', label: 'Always on top', kind: 'bool' },
+  { key: 'window.start_hidden', section: 'Window', label: 'Start hidden', kind: 'bool', relaunch: true },
+  { key: 'tray.hide_dock_icon', section: 'Tray', label: 'No Dock icon (macOS)', kind: 'bool', relaunch: true },
+  { key: 'tray.visible_on_all_workspaces', section: 'Tray', label: 'Show the window on every desktop', kind: 'bool' },
+  { key: 'tray.close_to_tray', section: 'Tray', label: 'Closing the window hides it', kind: 'bool' },
+  { key: 'shortcuts.toggle_window', section: 'Shortcut', label: 'Show or hide the window', kind: 'text', help: 'Keys joined by +, such as CmdOrCtrl+Shift+G. Leave it empty to turn the shortcut off.' },
+];
+
+/** The value at a dotted `key` of `cfg`. */
+export function getSetting(cfg: object, key: string): unknown {
+  return key.split('.').reduce<unknown>((o, k) => (o && typeof o === 'object' ? (o as Record<string, unknown>)[k] : undefined), cfg);
+}
+
+/** A copy of `cfg` with the value at a dotted `key` replaced; `cfg` is left alone. */
+export function withSetting<T extends object>(cfg: T, key: string, v: unknown): T {
+  const [head, ...rest] = key.split('.');
+  const o = cfg as Record<string, unknown>;
+  if (!rest.length) return { ...cfg, [head!]: v };
+  const inner = o[head!];
+  const nested = inner && typeof inner === 'object' ? inner : {};
+  return { ...cfg, [head!]: withSetting(nested, rest.join('.'), v) };
+}
+
+/** `https://github.com/o/r(.git)(/…)` or `o/r` → `o/r`, or null; as `normalize_repo` in config.rs. */
+export function normalizeRepo(s: string): string | null {
+  const t = s.trim().replace(/^(?:https?:\/\/)?github\.com\//, '');
+  const parts = t.split('/').filter(Boolean);
+  if (parts.length < 2) return null;
+  const owner = parts[0]!;
+  const name = parts[1]!.replace(/(\.git)+$/, '');
+  const ok = (p: string) => /^[A-Za-z0-9._-]+$/.test(p);
+  return ok(owner) && ok(name) ? `${owner}/${name}` : null;
+}
+
+/** Why `input` cannot be added to `repos`, or null when it can. */
+export function repoProblem(input: string, repos: readonly string[]): string | null {
+  const n = normalizeRepo(input);
+  if (!n) return 'Use owner/name or a GitHub URL.';
+  const lower = n.toLowerCase();
+  return repos.some((r) => normalizeRepo(r)?.toLowerCase() === lower) ? `${n} is already listed.` : null;
+}
+
+/** What keeps `cfg` from being saved, by field key (`repos` for the list); empty when it can be. */
+export function settingsProblems(cfg: Config): Record<string, string> {
+  const out: Record<string, string> = {};
+  const seen: string[] = [];
+  for (const r of cfg.repos) {
+    const n = normalizeRepo(r);
+    if (!n) { out.repos ??= `${r} is not owner/name or a GitHub URL.`; continue; }
+    if (seen.includes(n.toLowerCase())) out.repos ??= `${n} is listed twice.`;
+    seen.push(n.toLowerCase());
+  }
+  for (const f of SETTING_FIELDS) {
+    if (f.kind !== 'number') continue;
+    const v = getSetting(cfg, f.key);
+    if (typeof v !== 'number' || !Number.isFinite(v)) out[f.key] = 'Enter a number.';
+    else if (v < (f.min ?? -Infinity) || v > (f.max ?? Infinity)) out[f.key] = `Enter a number from ${f.min} to ${f.max}.`;
+  }
+  if (!out.stale_minutes && !out.poll_minutes && cfg.stale_minutes < cfg.poll_minutes) {
+    out.stale_minutes = 'Enter at least the fetch interval.';
+  }
+  const accel = cfg.shortcuts.toggle_window.trim();
+  if (accel !== '' && accel.split('+').some((k) => !k.trim())) out['shortcuts.toggle_window'] = 'Join the keys with single + signs, such as CmdOrCtrl+Shift+G.';
+  return out;
+}
+
+/** The labels of the relaunch-only fields whose values differ between two configs. */
+export function relaunchChanges(before: Config, after: Config): string[] {
+  return SETTING_FIELDS.filter((f) => f.relaunch && getSetting(before, f.key) !== getSetting(after, f.key)).map((f) => f.label);
+}
+
+/** The Settings view's line about the token the last fetch used; empty before the first fetch. */
+export function tokenSourceNote(token: TokenStatus | null | undefined): string {
+  if (!token) return '';
+  if (!token.source) return 'The last fetch found no token.';
+  let used = token.source;
+  if (token.source === 'config') used = 'the token saved here';
+  else if (token.source === 'gh CLI') used = '`gh auth token`';
+  const note = `The last fetch used ${used}${token.rejected ? ', and GitHub rejected it' : ''}.`;
+  return token.source.startsWith('$') ? `${note} A token saved here is not used while ${token.source} is set.` : note;
+}
+
 // ───────────────────────────── windows ─────────────────────────────
 
 export interface ActivityWindow {
@@ -296,9 +425,11 @@ export function freshness(snap: Pick<Snapshot, 'repos' | 'stale_after_secs'>, no
   return { oldest, stale };
 }
 
-/** A row's own refresh is queued or under way, so its button spins. */
+/** A row's own refresh is queued or under way, so its button spins. Names
+ * match in any letter case, as in `Snapshot::entry`. */
 export function isRefreshing(snap: Pick<Snapshot, 'fetching' | 'requested'>, repo: string): boolean {
-  return snap.fetching === repo || (snap.requested ?? []).includes(repo);
+  const same = (r: string | null | undefined) => r?.toLowerCase() === repo.toLowerCase();
+  return same(snap.fetching) || (snap.requested ?? []).some(same);
 }
 
 /** The footer's account of the GitHub token: `bad` when polling can't work. */
