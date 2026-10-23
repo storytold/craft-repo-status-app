@@ -436,8 +436,8 @@ export function start(api: Api): () => void {
   $('resize').addEventListener('mousedown', (e) => { e.preventDefault(); api.startResize(); });
   document.addEventListener('keydown', (e) => {
     const mod = e.metaKey || e.ctrlKey;
-    if (e.key === 'Escape') api.invoke('hide_window');
-    else if (mod && e.key.toLowerCase() === 'r') { e.preventDefault(); api.invoke('refresh_now'); }
+    if (e.key === 'Escape') void api.invoke('hide_window');
+    else if (mod && e.key.toLowerCase() === 'r') { e.preventDefault(); void api.invoke('refresh_now'); }
     else if (mod && e.key === '1') setView('repos');
     else if (mod && e.key === '2') setView('urgent');
   });
@@ -447,7 +447,7 @@ export function start(api: Api): () => void {
   // Relative times and staleness change with the clock alone.
   const clockTimer = setInterval(render, 15_000);
 
-  (async () => {
+  void (async () => {
     try {
       applyMeta(await api.invoke<Meta>('get_meta'));
       state.snap = await api.invoke<Snapshot>('get_snapshot');
@@ -456,7 +456,7 @@ export function start(api: Api): () => void {
       console.error(e);
     } finally {
       // Not requestAnimationFrame: WebKit never fires it while the window is hidden.
-      api.invoke('window_ready');
+      void api.invoke('window_ready');
     }
   })();
 
