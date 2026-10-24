@@ -23,7 +23,8 @@ repos = [
 
 # How old a repo's data gets before it's refetched (minutes, at least 1).
 # Repos are fetched one at a time, missing data first, then the stalest, 20 s
-# apart; each costs roughly 6 GraphQL requests + 1 REST request.
+# apart; each costs roughly 6 GraphQL requests + 1 REST request. A due repo
+# that one small probe request finds unchanged is not refetched.
 poll_minutes = 30.0
 
 # Data older than this is flagged STALE in the window (never less than poll_minutes).

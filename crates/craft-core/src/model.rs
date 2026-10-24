@@ -110,6 +110,10 @@ pub struct RepoEntry {
     pub stats: Option<RepoStats>,
     /// When `stats` was fetched. Kept across failed polls so stale data stays visible.
     pub fetched_at: Option<Time>,
+    /// When a probe last found nothing changed on GitHub since `fetched_at`,
+    /// so `stats` was measured again at this time without a fetch. A
+    /// successful fetch clears it.
+    pub checked_at: Option<Time>,
     pub last_attempt_at: Option<Time>,
     /// Error from the most recent attempt, cleared on success.
     pub error: Option<String>,
@@ -149,11 +153,18 @@ impl RepoEntry {
             })
     }
 
+    /// When `stats` was last known to be current: the fetch, or a later probe
+    /// that found nothing changed.
+    pub fn current_at(&self) -> Option<Time> {
+        self.fetched_at.max(self.checked_at)
+    }
+
     /// When this repo should next be fetched: at once if it's a hole or older
     /// than a manual refresh, else once its data is `refresh_secs` old; never
-    /// sooner than `retry_secs` after a failed attempt.
+    /// sooner than `retry_secs` after a failed attempt. The data's age counts
+    /// from [`RepoEntry::current_at`].
     pub fn due_at(&self, schedule: &Schedule) -> Time {
-        let due = match self.fetched_at {
+        let due = match self.current_at() {
             Some(t) if !self.is_hole() && schedule.forced_since.is_none_or(|f| t >= f) => {
                 t + chrono::Duration::seconds(schedule.refresh_secs)
             }
@@ -166,7 +177,7 @@ impl RepoEntry {
     }
 
     pub fn is_stale(&self, now: Time, stale_after_secs: i64) -> bool {
-        match self.fetched_at {
+        match self.current_at() {
             Some(t) => (now - t).num_seconds() > stale_after_secs,
             None => true,
         }
@@ -224,12 +235,26 @@ impl Snapshot {
     pub fn oldest_data_at(&self) -> Option<Time> {
         self.repos
             .iter()
-            .map(|r| r.fetched_at)
+            .map(|r| r.current_at())
             .try_fold(None::<Time>, |acc, t| {
                 let t = t?;
                 Some(Some(acc.map_or(t, |a| a.min(t))))
             })
             .flatten()
+    }
+
+    /// The repos due at `now` that a probe may find unchanged: each holds
+    /// stats from a successful fetch and isn't waiting for a refresh by hand.
+    /// Holes, failed and inaccessible repos are always fetched.
+    pub fn skip_candidates(&self, now: Time, schedule: &Schedule) -> Vec<String> {
+        let asked = |repo: &str| self.requested.iter().any(|r| r.eq_ignore_ascii_case(repo));
+        self.repos
+            .iter()
+            .filter(|e| e.due_at(schedule) <= now && !e.is_hole())
+            .filter(|e| e.stats.is_some() && e.error.is_none() && !e.inaccessible)
+            .filter(|e| !asked(&e.repo))
+            .map(|e| e.repo.clone())
+            .collect()
     }
 
     /// The repo to fetch next at `now`: holes first, in config order, then
@@ -238,7 +263,7 @@ impl Snapshot {
         self.repos
             .iter()
             .filter(|e| e.due_at(schedule) <= now)
-            .min_by_key(|e| (!e.is_hole(), e.fetched_at))
+            .min_by_key(|e| (!e.is_hole(), e.current_at()))
     }
 
     /// Queue `repo` to be fetched on its own, ahead of the schedule. False if
@@ -398,6 +423,94 @@ mod tests {
             "a manual refresh makes everything due, stalest first"
         );
         assert!(Snapshot::default().next_due_at(&sched).is_none());
+    }
+
+    /// Stats with every window, so the entry isn't a hole.
+    fn complete_stats() -> RepoStats {
+        let mut stats = RepoStats::default();
+        for id in WINDOWS.iter().map(|(id, _)| *id).chain([ALL_TIME]) {
+            stats.recent.insert(id.to_string(), Activity::default());
+        }
+        stats
+    }
+
+    #[test]
+    fn a_probe_that_found_nothing_new_keeps_the_data_current() {
+        let now = Utc::now();
+        let sched = Schedule {
+            refresh_secs: 30 * 60,
+            retry_secs: 10 * 60,
+            forced_since: None,
+        };
+        let mut s = Snapshot {
+            stale_after_secs: 60 * 60,
+            ..Default::default()
+        };
+        s.sync_repos(&["o/checked".into(), "o/fetched".into()]);
+        for e in &mut s.repos {
+            e.stats = Some(complete_stats());
+        }
+        s.repos[0].fetched_at = at(90, now);
+        s.repos[0].checked_at = at(10, now);
+        s.repos[1].fetched_at = at(40, now);
+        let checked = &s.repos[0];
+        assert_eq!(checked.current_at(), at(10, now));
+        assert_eq!(checked.due_at(&sched), now + Duration::minutes(20));
+        assert!(!checked.is_stale(now, s.stale_after_secs));
+        assert_eq!(s.oldest_data_at(), at(40, now));
+        assert!(!s.is_stale(now));
+        assert_eq!(
+            s.next_due(now, &sched).map(|e| e.repo.as_str()),
+            Some("o/fetched"),
+            "fetched 90 minutes ago, but checked since"
+        );
+        // A check older than the fetch does not change `current_at`.
+        s.repos[1].checked_at = at(50, now);
+        assert_eq!(s.repos[1].current_at(), at(40, now));
+        let forced = Schedule {
+            forced_since: at(5, now),
+            ..sched
+        };
+        assert_eq!(
+            s.next_due(now, &forced).map(|e| e.repo.as_str()),
+            Some("o/fetched"),
+            "a manual refresh is due first where the data is oldest"
+        );
+    }
+
+    #[test]
+    fn skip_candidates_are_due_repos_with_good_data() {
+        let now = Utc::now();
+        let sched = Schedule {
+            refresh_secs: 30 * 60,
+            retry_secs: 10 * 60,
+            forced_since: None,
+        };
+        let names = [
+            "o/due", "o/fresh", "o/hole", "o/failed", "o/gone", "o/asked",
+        ];
+        let mut s = Snapshot::default();
+        s.sync_repos(&names.map(String::from));
+        for e in &mut s.repos {
+            e.stats = Some(complete_stats());
+            e.fetched_at = at(45, now);
+        }
+        s.repos[1].fetched_at = at(5, now);
+        s.repos[2].stats = Some(RepoStats::default());
+        s.repos[3].error = Some("network".into());
+        s.repos[3].last_attempt_at = at(20, now);
+        s.repos[4].stats = None;
+        s.repos[4].inaccessible = true;
+        assert!(s.request("o/asked"));
+        assert_eq!(s.skip_candidates(now, &sched), vec!["o/due".to_string()]);
+        let forced = Schedule {
+            forced_since: Some(now),
+            ..sched
+        };
+        assert_eq!(
+            s.skip_candidates(now, &forced),
+            vec!["o/due".to_string(), "o/fresh".to_string()]
+        );
     }
 
     #[test]

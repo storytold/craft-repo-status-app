@@ -14,13 +14,18 @@
 //! one (usually) REST call for the contributor list, which GraphQL lacks.
 //! The icon itself is a REST blob fetch, made only when its blob id changes
 //! (see [`GitHub::icon`]). Blocking I/O: callers run this on worker threads.
+//!
+//! [`GitHub::probe`] asks about many repositories in one GraphQL query. When
+//! a repo's [`Probe`] matches the one taken before its last fetch,
+//! [`can_skip`] allows [`restat`] to measure that fetch again at a later time
+//! without a request.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, SubsecRound, Utc};
 use craft_core::{
     rank_issues, summarize_releases, Activity, Asset, BuildLag, IssueInput, LagBasis, Release,
     RepoStats, ALL_TIME, SINCE_RELEASE, WINDOWS,
@@ -47,6 +52,8 @@ const FULL_REFRESH_HOURS: i64 = 6;
 /// Pages of 100 each history walk may take; a busier stretch undercounts its
 /// oldest windows (photocraft opens ~2000 PRs a week).
 const MAX_PAGES: usize = 30;
+/// Repositories per [`probe_query`] request.
+const PROBE_CHUNK: usize = 50;
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -219,14 +226,39 @@ impl GitHub {
         Ok(v["data"].clone())
     }
 
+    /// A [`Probe`] of each of `repos`, in order, from one request per
+    /// [`PROBE_CHUNK`] repos. An error in any answer fails the whole probe,
+    /// as does a repository GitHub can't find or show.
+    pub fn probe(&self, repos: &[String]) -> Result<(Vec<Option<Probe>>, Budget)> {
+        let mut out = Vec::with_capacity(repos.len());
+        let mut budget = Budget::default();
+        for chunk in repos.chunks(PROBE_CHUNK) {
+            let mut vars = serde_json::Map::new();
+            for (i, repo) in chunk.iter().enumerate() {
+                let (owner, name) = repo.split_once('/').unwrap_or((repo.as_str(), ""));
+                vars.insert(format!("o{i}"), json!(owner));
+                vars.insert(format!("n{i}"), json!(name));
+            }
+            let data = self.graphql(&probe_query(chunk.len()), Value::Object(vars))?;
+            out.extend(parse_probe(&data, chunk.len()));
+            if let Some(left) = data["rateLimit"]["remaining"].as_u64() {
+                budget.graphql_remaining =
+                    Some(budget.graphql_remaining.map_or(left, |r| r.min(left)));
+            }
+        }
+        Ok((out, budget))
+    }
+
     /// Everything the UI shows for `owner/name`, measured at `now`. `raw` is
     /// the activity kept from the previous fetch; it's brought up to date
-    /// only when the whole fetch succeeds.
+    /// only when the whole fetch succeeds, and then also holds this fetch
+    /// ([`RawActivity::last`]) with `probe`, the [`Probe`] taken before it.
     pub fn fetch_repo(
         &self,
         repo: &str,
         now: DateTime<Utc>,
         raw: &mut RawActivity,
+        probe: Option<Probe>,
     ) -> Result<(RepoStats, Budget)> {
         let (owner, name) = repo
             .split_once('/')
@@ -255,19 +287,27 @@ impl GitHub {
         let authors: Vec<CommitAuthor> = fresh.commits.values().cloned().collect();
         let events = fresh.events();
         let contributors = self.contributors(repo)?;
-        *raw = fresh;
         let budget = Budget {
             graphql_remaining: main["rateLimit"]["remaining"].as_u64(),
         };
         let stats = build_stats(
             &main,
             &releases,
-            since_build,
+            since_build.clone(),
             &contributors,
             &authors,
             &events,
             now,
         );
+        fresh.last = Some(LastFetch {
+            at: now,
+            probe,
+            main,
+            releases,
+            since_build,
+            contributors,
+        });
+        *raw = fresh;
         Ok((stats, budget))
     }
 
@@ -613,6 +653,48 @@ pub struct RawActivity {
     pub prs_opened: BTreeMap<u64, DateTime<Utc>>,
     pub prs_merged: BTreeMap<u64, DateTime<Utc>>,
     pub issues_opened: BTreeMap<u64, DateTime<Utc>>,
+    /// The last successful fetch, which [`restat`] measures again at a later
+    /// time. Files written before it existed load with `None`.
+    pub last: Option<LastFetch>,
+}
+
+/// What [`build_stats`] read on the last successful fetch, apart from the
+/// activity [`RawActivity`] already holds.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct LastFetch {
+    /// When the fetch started: the `now` its windows were measured at.
+    pub at: DateTime<Utc>,
+    /// The probe taken before the fetch, if there was one.
+    pub probe: Option<Probe>,
+    /// The answer to [`main_query`].
+    pub main: Value,
+    pub releases: Vec<Release>,
+    pub since_build: Option<BuildLag>,
+    pub contributors: Vec<String>,
+}
+
+/// The values one [`probe_query`] alias reads for a repository. They change
+/// with every push to the default branch, every new, edited, commented,
+/// labeled, closed or deleted issue or PR, every merge and every new or
+/// edited latest release. Reactions and download counts do not change them.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Probe {
+    /// The commit the default branch points at.
+    pub head_oid: Option<String>,
+    /// Issues in every state.
+    pub issues: u64,
+    /// When the most recently updated issue was updated.
+    pub issue_updated_at: Option<DateTime<Utc>>,
+    /// PRs in every state.
+    pub prs: u64,
+    pub pr_updated_at: Option<DateTime<Utc>>,
+    pub releases: u64,
+    /// The newest release by creation date.
+    pub release_tag: Option<String>,
+    pub release_draft: bool,
+    pub release_published_at: Option<DateTime<Utc>>,
+    pub release_updated_at: Option<DateTime<Utc>>,
 }
 
 impl RawActivity {
@@ -675,6 +757,136 @@ impl RawActivity {
 fn activity_start(now: DateTime<Utc>, release_at: Option<DateTime<Utc>>) -> DateTime<Utc> {
     let longest = WINDOWS.iter().map(|(_, m)| *m).max().unwrap_or(0);
     (now - chrono::Duration::minutes(longest)).min(release_at.unwrap_or(now))
+}
+
+/// Whether `raw`'s last fetch can be measured again at `now` ([`restat`])
+/// instead of fetching: `probe` matches the probe taken before that fetch,
+/// the fetch from scratch every [`FULL_REFRESH_HOURS`] is not due, and the
+/// commits `raw` holds match the fetch's per-window counts (see
+/// [`commits_match_counts`]) and include the branch head (see
+/// [`holds_head`]). The probe does not see reaction and download counts, so
+/// a repo measured again keeps the counts of its last fetch until the next
+/// one, which can be [`FULL_REFRESH_HOURS`] plus one poll interval later.
+pub fn can_skip(raw: &RawActivity, probe: Option<&Probe>, now: DateTime<Utc>) -> bool {
+    let (Some(probe), Some(last)) = (probe, raw.last.as_ref()) else {
+        return false;
+    };
+    if last.probe.as_ref() != Some(probe) {
+        return false;
+    }
+    let release_at = summarize_releases(&last.releases).latest_at;
+    !raw.fetch_from(activity_start(now, release_at), now).1
+        && commits_match_counts(&last.main, &raw.commits, last.at)
+        && holds_head(last, &raw.commits, activity_start(last.at, release_at))
+}
+
+/// Whether `commits` holds the default branch's head that the probe before
+/// `last` saw, when the head's date in `last.main` is `since` or later.
+/// After a rewrite of the branch, an incremental fetch walks only the new
+/// commits dated after it started, so a head dated earlier is missing, and
+/// the commits held no longer match the branch.
+fn holds_head(
+    last: &LastFetch,
+    commits: &BTreeMap<String, CommitAuthor>,
+    since: DateTime<Utc>,
+) -> bool {
+    let head = last.probe.as_ref().and_then(|p| p.head_oid.as_deref());
+    let target = &last.main["repository"]["defaultBranchRef"]["target"];
+    match (head, first_time(&target["all"], "committedDate")) {
+        (Some(head), Some(at)) if at >= since => commits.contains_key(head),
+        _ => true,
+    }
+}
+
+/// Whether `commits` holds exactly as many commits in each [`WINDOWS`]
+/// window at `then` as GitHub counted in `main`. [`aged_window_counts`]
+/// needs that. It fails when a history walk stopped at [`MAX_PAGES`], when
+/// an incremental fetch missed a commit dated before it started, and when a
+/// rewritten default branch left commits that are no longer on it.
+fn commits_match_counts(
+    main: &Value,
+    commits: &BTreeMap<String, CommitAuthor>,
+    then: DateTime<Utc>,
+) -> bool {
+    let head = &main["repository"]["defaultBranchRef"]["target"];
+    windows(then, None).all(|(_, key, start)| {
+        let Some(n) = head[format!("c{key}")]["totalCount"].as_u64() else {
+            return true;
+        };
+        let start = start.trunc_subsecs(0);
+        commits.values().filter(|(at, _)| *at >= start).count() as u64 == n
+    })
+}
+
+/// The stats of `raw`'s last fetch measured at `now`, without a request:
+/// the windows move to `now`, and issues are ranked by their age at `now`.
+/// Valid only while nothing changed on GitHub (see [`can_skip`]). `raw` is
+/// left as it is, so the next fetch is incremental from the last real one
+/// and a later `restat` still has the commits it needs.
+pub fn restat(raw: &RawActivity, now: DateTime<Utc>) -> Option<RepoStats> {
+    let last = raw.last.as_ref()?;
+    let release_at = summarize_releases(&last.releases).latest_at;
+    let mut main = last.main.clone();
+    aged_window_counts(&mut main, &raw.commits, last.at, now, release_at);
+    // What a fetch at `now` would hold after pruning.
+    let since = activity_start(now, release_at);
+    let authors: Vec<CommitAuthor> = raw
+        .commits
+        .values()
+        .filter(|(at, _)| *at >= since)
+        .cloned()
+        .collect();
+    let mut events = raw.events();
+    for times in [
+        &mut events.prs_opened,
+        &mut events.prs_merged,
+        &mut events.issues_opened,
+    ] {
+        times.retain(|at| *at >= since);
+    }
+    Some(build_stats(
+        &main,
+        &last.releases,
+        last.since_build.clone(),
+        &last.contributors,
+        &authors,
+        &events,
+        now,
+    ))
+}
+
+/// Moves the per-window commit counts in `main`, measured at `then`, to
+/// `now`: each count loses the `commits` whose dates its window has left.
+/// Exact as long as no commit reached the default branch in between and
+/// `commits` holds every commit since the start of the longest window at
+/// `then`. The window starts are truncated to whole seconds, as
+/// [`main_query`] sends them.
+pub fn aged_window_counts(
+    main: &mut Value,
+    commits: &BTreeMap<String, CommitAuthor>,
+    then: DateTime<Utc>,
+    now: DateTime<Utc>,
+    release_at: Option<DateTime<Utc>>,
+) {
+    // Indexing a missing key mutably would insert it, so look first.
+    if !main["repository"]["defaultBranchRef"]["target"].is_object() {
+        return;
+    }
+    let head = &mut main["repository"]["defaultBranchRef"]["target"];
+    for ((_, key, start_then), (_, _, start_now)) in
+        windows(then, release_at).zip(windows(now, release_at))
+    {
+        let (start_then, start_now) = (start_then.trunc_subsecs(0), start_now.trunc_subsecs(0));
+        let alias = format!("c{key}");
+        let Some(n) = head[&alias]["totalCount"].as_u64() else {
+            continue;
+        };
+        let gone = commits
+            .values()
+            .filter(|(at, _)| start_then <= *at && *at < start_now)
+            .count() as u64;
+        head[&alias]["totalCount"] = json!(n.saturating_sub(gone));
+    }
 }
 
 /// `(number, field time)` for the nodes of one page of `conn` whose `field`
@@ -790,6 +1002,48 @@ pub fn main_query(now: DateTime<Utc>, release_at: Option<DateTime<Utc>>) -> Stri
     MAIN_QUERY.replace("{HISTORY}", &history)
 }
 
+/// [`PROBE_QUERY`] for `n` repositories, aliased `r0`, `r1`… and named by
+/// the variables `$o0`/`$n0`, `$o1`/`$n1`…
+pub fn probe_query(n: usize) -> String {
+    let mut vars = Vec::new();
+    let mut repos = String::new();
+    for i in 0..n {
+        vars.push(format!("$o{i}: String!, $n{i}: String!"));
+        repos += &format!("  r{i}: repository(owner: $o{i}, name: $n{i}) {{ ...P }}\n");
+    }
+    PROBE_QUERY
+        .replace("{VARS}", &vars.join(", "))
+        .replace("{REPOS}", &repos)
+}
+
+/// One [`Probe`] per alias of [`probe_query`]`(n)`; `None` for an alias
+/// GitHub answered with null (a missing or hidden repository).
+pub fn parse_probe(data: &Value, n: usize) -> Vec<Option<Probe>> {
+    (0..n)
+        .map(|i| {
+            let r = &data[format!("r{i}")];
+            if r.is_null() {
+                return None;
+            }
+            let release = &r["releases"]["nodes"][0];
+            Some(Probe {
+                head_oid: r["defaultBranchRef"]["target"]["oid"]
+                    .as_str()
+                    .map(str::to_string),
+                issues: count(&r["issues"]),
+                issue_updated_at: first_time(&r["lastIssue"], "updatedAt"),
+                prs: count(&r["pullRequests"]),
+                pr_updated_at: first_time(&r["lastPr"], "updatedAt"),
+                releases: count(&r["releases"]),
+                release_tag: release["tagName"].as_str().map(str::to_string),
+                release_draft: release["isDraft"].as_bool().unwrap_or(false),
+                release_published_at: time(&release["publishedAt"]),
+                release_updated_at: time(&release["updatedAt"]),
+            })
+        })
+        .collect()
+}
+
 /// Pure: turn the GraphQL payloads into the model (unit-tested below).
 pub fn build_stats(
     main: &Value,
@@ -872,6 +1126,25 @@ fragment I on Issue {
   comments { totalCount }
   reactions { totalCount }
   labels(first: 10) { nodes { name } }
+}
+"#;
+
+/// What can change a repository's stats, for many repositories at once (see
+/// [`Probe`]).
+const PROBE_QUERY: &str = r#"
+query({VARS}) {
+{REPOS}  rateLimit { cost remaining resetAt }
+}
+fragment P on Repository {
+  defaultBranchRef { target { oid } }
+  issues { totalCount }
+  lastIssue: issues(first: 1, orderBy: {field: UPDATED_AT, direction: DESC}) { nodes { updatedAt } }
+  pullRequests { totalCount }
+  lastPr: pullRequests(first: 1, orderBy: {field: UPDATED_AT, direction: DESC}) { nodes { updatedAt } }
+  releases(first: 1, orderBy: {field: CREATED_AT, direction: DESC}) {
+    totalCount
+    nodes { tagName publishedAt updatedAt isDraft }
+  }
 }
 "#;
 
@@ -983,8 +1256,19 @@ mod tests {
         assert!(env_or_config_token("", env(&[])).is_none());
     }
 
-    #[test]
-    fn builds_stats_from_payloads() {
+    /// The payloads of one fetch, shared by [`builds_stats_from_payloads`]
+    /// and [`restat_at_fetch_time_matches_build_stats`].
+    struct Payloads {
+        main: Value,
+        events: Events,
+        rel: Vec<Release>,
+        now: DateTime<Utc>,
+        lag: BuildLag,
+        commits: Vec<(String, CommitAuthor)>,
+        people: Vec<String>,
+    }
+
+    fn payloads() -> Payloads {
         let main = json!({
           "repository": {
             "openPrs": {"totalCount": 3}, "allPrs": {"totalCount": 40}, "mergedPrs": {"totalCount": 33},
@@ -1028,17 +1312,39 @@ mod tests {
             basis: LagBasis::Exact,
             from_sha: Some("abc".into()),
         };
-        let authors = parse_authors(&json!({"nodes": [
+        let commits = parse_authors(&json!({"nodes": [
           {"committedDate": "2026-10-08T03:55:00Z", "author": {"email": "A@x", "name": "A", "user": {"login": "ann"}}},
           {"committedDate": "2026-10-08T03:00:00Z", "author": {"email": "a@x", "name": "A", "user": {"login": "ann"}}},
           {"committedDate": "2026-10-08T02:00:00Z", "author": {"email": "Bo@Y", "name": "Bo", "user": null}},
           {"committedDate": "2026-10-03T00:00:00Z", "author": {"email": "", "name": "Cy", "user": null}}
         ]}));
-        let authors: Vec<CommitAuthor> = authors.into_iter().map(|(_, a)| a).collect();
-        assert_eq!(authors[2].1, "bo@y");
         let mut people =
             parse_contributors(&json!([{"login": "ann"}, {"email": "Old@Z", "type": "Anonymous"}]));
         people.extend((0..10).map(|i| format!("p{i}")));
+        Payloads {
+            main,
+            events,
+            rel,
+            now,
+            lag,
+            commits,
+            people,
+        }
+    }
+
+    #[test]
+    fn builds_stats_from_payloads() {
+        let Payloads {
+            main,
+            events,
+            rel,
+            now,
+            lag,
+            commits,
+            people,
+        } = payloads();
+        let authors: Vec<CommitAuthor> = commits.into_iter().map(|(_, a)| a).collect();
+        assert_eq!(authors[2].1, "bo@y");
         assert_eq!(people[1], "old@z");
         let s = build_stats(
             &main,
@@ -1233,5 +1539,338 @@ mod tests {
         assert!(s.recent.values().all(|a| *a == Activity::default()));
         s.recent.clear();
         assert_eq!(s, RepoStats::default());
+    }
+
+    #[test]
+    fn probe_query_aliases_every_repo() {
+        let q = probe_query(3);
+        for i in 0..3 {
+            assert!(
+                q.contains(&format!("$o{i}: String!, $n{i}: String!")),
+                "{q}"
+            );
+            let alias = format!("r{i}: repository(owner: $o{i}, name: $n{i}) {{ ...P }}");
+            assert!(q.contains(&alias), "{q}");
+        }
+        assert!(!q.contains("r3:") && !q.contains("{VARS}") && !q.contains("{REPOS}"));
+        assert!(q.contains("defaultBranchRef { target { oid } }"));
+        assert!(q.contains("issues(first: 1, orderBy: {field: UPDATED_AT, direction: DESC})"));
+        assert!(q.contains("pullRequests(first: 1, orderBy: {field: UPDATED_AT, direction: DESC})"));
+        assert!(q.contains("releases(first: 1, orderBy: {field: CREATED_AT, direction: DESC})"));
+        assert!(q.contains("rateLimit { cost remaining resetAt }"));
+        assert!(!q.contains("search(") && !q.contains("pushedAt"));
+    }
+
+    #[test]
+    fn parse_probe_reads_values_and_skips_missing() {
+        let t = |s: &str| Some(s.parse::<DateTime<Utc>>().unwrap());
+        let data = json!({
+          "r0": {
+            "defaultBranchRef": {"target": {"oid": "h1"}},
+            "issues": {"totalCount": 90},
+            "lastIssue": {"nodes": [{"updatedAt": "2026-10-08T02:00:00Z"}]},
+            "pullRequests": {"totalCount": 40},
+            "lastPr": {"nodes": [{"updatedAt": "2026-10-08T03:00:00Z"}]},
+            "releases": {"totalCount": 2, "nodes": [
+              {"tagName": "v1.1.0", "isDraft": true, "publishedAt": null, "updatedAt": "2026-10-08T00:30:00Z"}
+            ]}
+          },
+          "r1": null,
+          "r2": {
+            "defaultBranchRef": null, "issues": {"totalCount": 0}, "lastIssue": {"nodes": []},
+            "pullRequests": {"totalCount": 0}, "lastPr": {"nodes": []},
+            "releases": {"totalCount": 0, "nodes": []}
+          },
+          "rateLimit": {"cost": 1, "remaining": 4999, "resetAt": "2026-10-08T05:00:00Z"}
+        });
+        let probes = parse_probe(&data, 3);
+        assert_eq!(
+            probes[0],
+            Some(Probe {
+                head_oid: Some("h1".into()),
+                issues: 90,
+                issue_updated_at: t("2026-10-08T02:00:00Z"),
+                prs: 40,
+                pr_updated_at: t("2026-10-08T03:00:00Z"),
+                releases: 2,
+                release_tag: Some("v1.1.0".into()),
+                release_draft: true,
+                release_published_at: None,
+                release_updated_at: t("2026-10-08T00:30:00Z"),
+            })
+        );
+        assert_eq!(probes[1], None);
+        // An empty repository: no branch, no issues, no releases.
+        assert_eq!(probes[2], Some(Probe::default()));
+        assert_eq!(probes.len(), 3);
+    }
+
+    #[test]
+    fn skip_needs_a_matching_probe() {
+        let t = |s: &str| s.parse::<DateTime<Utc>>().unwrap();
+        let now = t("2026-10-08T04:00:00Z");
+        let probe = Probe {
+            head_oid: Some("h1".into()),
+            issues: 3,
+            ..Default::default()
+        };
+        let raw = RawActivity {
+            covers_from: Some(t("2026-10-01T03:25:00Z")),
+            fetched_at: Some(t("2026-10-08T03:25:00Z")),
+            full_at: Some(t("2026-10-08T01:00:00Z")),
+            last: Some(LastFetch {
+                at: t("2026-10-08T03:25:00Z"),
+                probe: Some(probe.clone()),
+                main: Value::Null,
+                releases: vec![],
+                since_build: None,
+                contributors: vec![],
+            }),
+            ..Default::default()
+        };
+        assert!(can_skip(&raw, Some(&probe), now));
+        let no_last = RawActivity {
+            last: None,
+            ..raw.clone()
+        };
+        assert!(!can_skip(&no_last, Some(&probe), now));
+        assert!(!can_skip(&raw, None, now));
+        let pushed = Probe {
+            head_oid: Some("h2".into()),
+            ..probe.clone()
+        };
+        assert!(!can_skip(&raw, Some(&pushed), now));
+        // The last fetch went without a probe: a row refresh, or a failed probe.
+        let unprobed = RawActivity {
+            last: raw.last.clone().map(|l| LastFetch { probe: None, ..l }),
+            ..raw.clone()
+        };
+        assert!(!can_skip(&unprobed, Some(&probe), now));
+        // The fetch from scratch is due six hours after the last one.
+        assert!(can_skip(&raw, Some(&probe), t("2026-10-08T06:59:00Z")));
+        assert!(!can_skip(&raw, Some(&probe), t("2026-10-08T07:00:00Z")));
+        // GitHub counted one commit in the last 10 minutes at 03:25.
+        let mut counted = raw.clone();
+        if let Some(last) = counted.last.as_mut() {
+            last.main =
+                json!({"repository": {"defaultBranchRef": {"target": {"c0": {"totalCount": 1}}}}});
+        }
+        // A history walk that stopped early doesn't hold it.
+        assert!(!can_skip(&counted, Some(&probe), now));
+        counted
+            .commits
+            .insert("a".into(), (t("2026-10-08T03:20:00Z"), "ann".into()));
+        assert!(can_skip(&counted, Some(&probe), now));
+        // The cache holds a commit that a force-push removed from the branch.
+        counted
+            .commits
+            .insert("x".into(), (t("2026-10-08T03:22:00Z"), "bo".into()));
+        assert!(!can_skip(&counted, Some(&probe), now));
+        // The head h1 is dated inside the week, and an incremental fetch after
+        // a rewrite did not walk it: the commits held miss it.
+        let head_dated = |date: &str| {
+            let mut r = raw.clone();
+            if let Some(last) = r.last.as_mut() {
+                last.main = json!({"repository": {"defaultBranchRef": {"target": {
+                    "all": {"totalCount": 9, "nodes": [{"committedDate": date}]}}}}});
+            }
+            r
+        };
+        let mut rewritten = head_dated("2026-10-06T00:00:00Z");
+        assert!(!can_skip(&rewritten, Some(&probe), now));
+        rewritten
+            .commits
+            .insert("h1".into(), (t("2026-10-06T00:00:00Z"), "ann".into()));
+        assert!(can_skip(&rewritten, Some(&probe), now));
+        // A head older than the week isn't held, and needn't be.
+        assert!(can_skip(
+            &head_dated("2026-09-01T00:00:00Z"),
+            Some(&probe),
+            now
+        ));
+    }
+
+    #[test]
+    fn restat_at_fetch_time_matches_build_stats() {
+        let p = payloads();
+        let mut raw = RawActivity {
+            commits: p.commits.iter().cloned().collect(),
+            ..Default::default()
+        };
+        for (held, times) in [
+            (&mut raw.prs_opened, &p.events.prs_opened),
+            (&mut raw.prs_merged, &p.events.prs_merged),
+            (&mut raw.issues_opened, &p.events.issues_opened),
+        ] {
+            held.extend(times.iter().enumerate().map(|(i, t)| (i as u64, *t)));
+        }
+        assert_eq!(restat(&raw, p.now), None, "no fetch to measure again");
+        raw.last = Some(LastFetch {
+            at: p.now,
+            probe: None,
+            main: p.main.clone(),
+            releases: p.rel.clone(),
+            since_build: Some(p.lag.clone()),
+            contributors: p.people.clone(),
+        });
+        let authors: Vec<CommitAuthor> = p.commits.into_iter().map(|(_, a)| a).collect();
+        let fetched = build_stats(
+            &p.main,
+            &p.rel,
+            Some(p.lag),
+            &p.people,
+            &authors,
+            &p.events,
+            p.now,
+        );
+        assert_eq!(restat(&raw, p.now), Some(fetched));
+    }
+
+    #[test]
+    fn restat_moves_windows_to_now() {
+        let t = |s: &str| s.parse::<DateTime<Utc>>().unwrap();
+        let then = t("2026-10-08T04:00:00Z");
+        let main = json!({"repository": {
+          "openPrs": {"totalCount": 1}, "openIssues": {"totalCount": 1},
+          "recentOpen": {"nodes": [
+            {"number": 5, "title": "Export loses layers", "url": "u5", "createdAt": "2026-10-07T04:10:00Z",
+             "updatedAt": "2026-10-07T04:10:00Z", "authorAssociation": "NONE",
+             "comments": {"totalCount": 0}, "reactions": {"totalCount": 0}, "labels": {"nodes": [{"name": "bug"}]}}
+          ]},
+          "hotOpen": {"nodes": []},
+          "defaultBranchRef": {"target": {
+            "all": {"totalCount": 500, "nodes": [{"committedDate": "2026-10-08T03:58:00Z"}]},
+            "c0": {"totalCount": 2}, "c1": {"totalCount": 3}, "c2": {"totalCount": 3}, "c3": {"totalCount": 3},
+            "c4": {"totalCount": 3}, "c5": {"totalCount": 3}, "c6": {"totalCount": 4}}}
+        }});
+        let mut raw = RawActivity {
+            covers_from: Some(t("2026-10-01T04:00:00Z")),
+            fetched_at: Some(then),
+            full_at: Some(then),
+            last: Some(LastFetch {
+                at: then,
+                probe: None,
+                main,
+                releases: vec![],
+                since_build: None,
+                contributors: vec![],
+            }),
+            ..Default::default()
+        };
+        for (oid, at, who) in [
+            ("a", "2026-10-08T03:55:00Z", "ann"),
+            ("b", "2026-10-08T03:40:00Z", "bo"),
+            ("c", "2026-10-01T04:10:00Z", "cy"),
+            ("d", "2026-10-08T03:58:00Z", "dee"),
+        ] {
+            raw.commits.insert(oid.into(), (t(at), who.into()));
+        }
+        // Opened inside the last 4 h at `then`; merged inside the last week.
+        raw.prs_opened.insert(1, t("2026-10-08T00:10:00Z"));
+        raw.prs_merged.insert(2, t("2026-10-01T04:10:00Z"));
+        let held = raw.clone();
+        let before = restat(&raw, then).unwrap();
+        let w = |s: &RepoStats, id: &str| s.recent[id];
+        assert_eq!(
+            ["10m", "30m", "7d"].map(|id| w(&before, id).commits),
+            [2, 3, 4]
+        );
+        assert_eq!(w(&before, "4h").prs_opened, 1);
+        assert!(before.urgent[0].reasons.contains(&"new".to_string()));
+
+        let now = t("2026-10-08T04:20:00Z");
+        let after = restat(&raw, now).unwrap();
+        // a and d left the 10-minute window, b the 30-minute one, c the week.
+        assert_eq!(w(&after, "10m").commits, 0);
+        assert_eq!(w(&after, "30m").commits, 2);
+        assert_eq!(w(&after, "1h").commits, 3);
+        assert_eq!(w(&after, "7d").commits, 3);
+        assert_eq!(w(&after, "4h").prs_opened, 0);
+        assert_eq!(w(&after, "7d").prs_merged, 0);
+        // cy's only commit is older than the week, so a fetch would drop it.
+        assert_eq!(
+            (w(&before, ALL_TIME).people, w(&after, ALL_TIME).people),
+            (4, 3)
+        );
+        // Issue #5 is now more than 24 hours old.
+        assert!(!after.urgent[0].reasons.contains(&"new".to_string()));
+        assert_eq!(after.urgent[0].score, before.urgent[0].score - 4.0);
+        assert!(after.urgency < before.urgency);
+        // Unchanged: a later restat from the same fetch still has every commit.
+        assert_eq!(raw, held);
+        let later = restat(&raw, t("2026-10-08T04:25:00Z")).unwrap();
+        assert_eq!(w(&later, "7d").commits, 3);
+        raw.last = None;
+        assert_eq!(restat(&raw, now), None);
+    }
+
+    #[test]
+    fn aged_counts_start_windows_on_whole_seconds() {
+        let t = |s: &str| s.parse::<DateTime<Utc>>().unwrap();
+        // The query sent "since: 03:50:00Z", so GitHub counted this commit.
+        let commits = BTreeMap::from([(
+            "a".to_string(),
+            (t("2026-10-08T03:50:00Z"), "ann".to_string()),
+        )]);
+        let mut main =
+            json!({"repository": {"defaultBranchRef": {"target": {"c0": {"totalCount": 1}}}}});
+        aged_window_counts(
+            &mut main,
+            &commits,
+            t("2026-10-08T04:00:00.700Z"),
+            t("2026-10-08T04:20:00.700Z"),
+            None,
+        );
+        assert_eq!(
+            main["repository"]["defaultBranchRef"]["target"]["c0"]["totalCount"],
+            0
+        );
+        let mut empty = json!({"repository": {"defaultBranchRef": null}});
+        aged_window_counts(
+            &mut empty,
+            &commits,
+            t("2026-10-08T04:00:00Z"),
+            t("2026-10-08T05:00:00Z"),
+            None,
+        );
+        assert_eq!(empty, json!({"repository": {"defaultBranchRef": null}}));
+    }
+
+    #[test]
+    fn raw_without_last_loads() {
+        let dir = std::env::temp_dir().join(format!("craft-raw-last-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("raw")).unwrap();
+        // A file written before the last fetch was kept.
+        std::fs::write(
+            RawActivity::path(&dir, "o/old"),
+            r#"{"fetched_at":"2026-10-08T03:55:00Z","prs_opened":{"7":"2026-10-08T03:00:00Z"}}"#,
+        )
+        .unwrap();
+        let old = RawActivity::load(&dir, "o/old");
+        assert_eq!(old.last, None);
+        assert_eq!(
+            old.fetched_at,
+            Some("2026-10-08T03:55:00Z".parse().unwrap())
+        );
+        assert_eq!(old.prs_opened.len(), 1);
+        let p = payloads();
+        let raw = RawActivity {
+            last: Some(LastFetch {
+                at: p.now,
+                probe: Some(Probe {
+                    head_oid: Some("h1".into()),
+                    release_published_at: Some(p.now),
+                    ..Default::default()
+                }),
+                main: p.main,
+                releases: p.rel,
+                since_build: Some(p.lag),
+                contributors: p.people,
+            }),
+            ..Default::default()
+        };
+        raw.save(&dir, "o/new").unwrap();
+        assert_eq!(RawActivity::load(&dir, "o/new"), raw);
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

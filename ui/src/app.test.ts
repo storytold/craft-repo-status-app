@@ -246,6 +246,26 @@ test('the Fetched column shows each repo’s data age and sorts by it, freshest 
   assert.deepEqual(h.rows(), ['beta', 'alpha', 'delta', 'gamma']);
 });
 
+test('a check that found nothing changed shows in the Fetched tooltip and keeps the row fresh', async () => {
+  const ago = (s: number) => new Date(Date.now() - s * 1000).toISOString();
+  const h = await setup({ snap: { ...snapshot([
+    repo('alpha', {}, { fetched_at: ago(90 * 60), checked_at: ago(5 * 60) }),
+    repo('beta', {}, { fetched_at: ago(90 * 60) }),
+    repo('gamma', {}, { fetched_at: ago(5 * 60), checked_at: ago(60 * 60) }),
+  ]), stale_after_secs: 3600 } });
+  const age = (name: string) => h.row(name).cells[1]!.querySelector('span[title]')!;
+  assert.equal(age('alpha').textContent, '1h', 'the age of the last full fetch');
+  const lines = age('alpha').getAttribute('title')!.split('\n');
+  assert.equal(lines.length, 2);
+  assert.match(lines[0]!, /^Fetched /);
+  assert.match(lines[1]!, /^Checked .+; nothing had changed since the fetch$/);
+  assert.doesNotMatch(age('beta').getAttribute('title')!, /Checked/);
+  assert.doesNotMatch(age('gamma').getAttribute('title')!, /Checked/, 'a check older than the fetch');
+  assert.ok(!h.row('alpha').classList.contains('stale'), 'checked five minutes ago');
+  assert.ok(h.row('beta').classList.contains('stale'));
+  assert.ok(!h.row('gamma').classList.contains('stale'));
+});
+
 test('a row’s refresh button refetches only that repo, and spins while it waits', async () => {
   const h = await setup();
   const button = () => h.row('gamma').querySelector<HTMLButtonElement>('.row-refresh')!;

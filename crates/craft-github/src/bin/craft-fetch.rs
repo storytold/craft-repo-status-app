@@ -47,7 +47,7 @@ fn main() {
             .as_deref()
             .map(|d| RawActivity::load(d, repo))
             .unwrap_or_default();
-        match gh.fetch_repo(repo, now, &mut raw) {
+        match gh.fetch_repo(repo, now, &mut raw, None) {
             Ok((s, budget)) => {
                 if let Some(dir) = &raw_dir {
                     if let Err(e) = raw.save(dir, repo) {
