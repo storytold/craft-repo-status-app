@@ -12,6 +12,9 @@
 //! The authors, PRs and issues are kept between polls ([`RawActivity`]), so
 //! after the first poll those queries fetch only what's new;
 //! one (usually) REST call for the contributor list, which GraphQL lacks.
+//! The counts query also reads the blob ids of the parity documents;
+//! [`GitHub::parity`] downloads their text, and callers ask for it only when
+//! a blob id changes.
 //! The icon itself is a REST blob fetch, made only when its blob id changes
 //! (see [`GitHub::icon`]). Blocking I/O: callers run this on worker threads.
 
@@ -21,9 +24,10 @@ use std::process::Command;
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
+use craft_core::parity::{Input, PARITY_DOC, ROADMAP};
 use craft_core::{
-    rank_issues, summarize_releases, Activity, Asset, BuildLag, IssueInput, LagBasis, Release,
-    RepoStats, ALL_TIME, SINCE_RELEASE, WINDOWS,
+    rank_issues, summarize_releases, Activity, Asset, BuildLag, IssueInput, LagBasis, Parity,
+    Release, RepoStats, ALL_TIME, SINCE_RELEASE, WINDOWS,
 };
 use reqwest::blocking::Client;
 use reqwest::header::{HeaderMap, ACCEPT, AUTHORIZATION, USER_AGENT};
@@ -47,6 +51,8 @@ const FULL_REFRESH_HOURS: i64 = 6;
 /// Pages of 100 each history walk may take; a busier stretch undercounts its
 /// oldest windows (photocraft opens ~2000 PRs a week).
 const MAX_PAGES: usize = 30;
+/// The parity documents, with their [`MAIN_QUERY`] aliases.
+const PARITY_FILES: &[(&str, &str)] = &[("roadmap", ROADMAP), ("parityDoc", PARITY_DOC)];
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -285,6 +291,58 @@ impl GitHub {
             .split_whitespace()
             .collect();
         Ok(format!("data:image/png;base64,{b64}"))
+    }
+
+    /// `repo`'s parity numbers from the documents in `files` (blob ids by
+    /// path, as in [`RepoStats::parity_oids`]), read at commit `head`. One
+    /// GraphQL request downloads every document; with no documents there is
+    /// no request. A document GraphQL sends truncated comes from the REST
+    /// raw blob instead.
+    pub fn parity(
+        &self,
+        repo: &str,
+        head: Option<&str>,
+        files: &BTreeMap<String, String>,
+    ) -> Result<Parity> {
+        let (owner, name) = repo
+            .split_once('/')
+            .ok_or_else(|| Error::GraphQl(format!("bad repo {repo:?}")))?;
+        let mut texts = Vec::new();
+        if !files.is_empty() {
+            let mut vars = serde_json::Map::new();
+            vars.insert("owner".into(), json!(owner));
+            vars.insert("name".into(), json!(name));
+            for (i, oid) in files.values().enumerate() {
+                vars.insert(format!("b{i}"), json!(oid));
+            }
+            let v = self.graphql(&blob_query(files.len()), Value::Object(vars))?;
+            for (text, oid) in parse_blobs(&v, files.len()).into_iter().zip(files.values()) {
+                texts.push(match text {
+                    Some(t) => t,
+                    None => self.raw_blob(repo, oid)?,
+                });
+            }
+        }
+        let input: Vec<Input> = files
+            .iter()
+            .zip(&texts)
+            .map(|((path, oid), text)| Input { path, oid, text })
+            .collect();
+        let mut parity = craft_core::parity::read(&input);
+        parity.commit = head.map(str::to_string);
+        Ok(parity)
+    }
+
+    /// The text of blob `oid` from the REST API's raw media type.
+    fn raw_blob(&self, repo: &str, oid: &str) -> Result<String> {
+        let mut headers = self.headers();
+        headers.insert(ACCEPT, "application/vnd.github.raw+json".parse().unwrap());
+        let resp = self
+            .http
+            .get(format!("{API}/repos/{repo}/git/blobs/{oid}"))
+            .headers(headers)
+            .send()?;
+        Ok(Self::check(resp)?.text()?)
     }
 
     /// `(oid, (committed, author))` for each commit on `main` since `since`.
@@ -790,6 +848,48 @@ pub fn main_query(now: DateTime<Utc>, release_at: Option<DateTime<Utc>>) -> Stri
     MAIN_QUERY.replace("{HISTORY}", &history)
 }
 
+/// A query for the text of `n` blobs of one repository, aliased `b0`, `b1`…
+/// and named by the variables `$b0`, `$b1`…
+pub fn blob_query(n: usize) -> String {
+    let vars: String = (0..n).map(|i| format!(", $b{i}: GitObjectID!")).collect();
+    let blobs: String = (0..n)
+        .map(|i| {
+            format!(
+                "    b{i}: object(oid: $b{i}) {{ ... on Blob {{ text isTruncated isBinary }} }}\n"
+            )
+        })
+        .collect();
+    format!(
+        "query($owner: String!, $name: String!{vars}) {{\n  repository(owner: $owner, name: $name) {{\n{blobs}  }}\n}}\n"
+    )
+}
+
+/// The text of each blob a [`blob_query`] for `n` blobs returned, in order:
+/// empty for a binary blob, and `None` for one GraphQL sent truncated or
+/// without text.
+pub fn parse_blobs(data: &Value, n: usize) -> Vec<Option<String>> {
+    (0..n)
+        .map(|i| {
+            let b = &data["repository"][format!("b{i}")];
+            match b["text"].as_str() {
+                Some(t) if b["isTruncated"].as_bool() != Some(true) => Some(t.to_string()),
+                _ if b["isBinary"].as_bool() == Some(true) => Some(String::new()),
+                _ => None,
+            }
+        })
+        .collect()
+}
+
+/// The blob id of each parity document [`MAIN_QUERY`] found, by path.
+fn parity_oids(r: &Value) -> BTreeMap<String, String> {
+    PARITY_FILES
+        .iter()
+        .filter_map(|(alias, path)| {
+            Some((path.to_string(), r[*alias]["oid"].as_str()?.to_string()))
+        })
+        .collect()
+}
+
 /// Pure: turn the GraphQL payloads into the model (unit-tested below).
 pub fn build_stats(
     main: &Value,
@@ -838,6 +938,8 @@ pub fn build_stats(
                 .find(|e| e["name"].as_str().is_some_and(|n| n.ends_with(".png")))
                 .and_then(|e| e["oid"].as_str().map(str::to_string))
         }),
+        head_oid: head["oid"].as_str().map(str::to_string),
+        parity_oids: parity_oids(r),
     }
 }
 
@@ -853,12 +955,15 @@ query($owner: String!, $name: String!) {
     allIssues: issues { totalCount }
     newestIssue: issues(first: 1, orderBy: {field: CREATED_AT, direction: DESC}) { nodes { createdAt } }
     icon: object(expression: "HEAD:assets/app-icon/hicolor/64x64/apps") { ... on Tree { entries { name oid } } }
+    roadmap: object(expression: "HEAD:ROADMAP.md") { ... on Blob { oid } }
+    parityDoc: object(expression: "HEAD:docs/target-app-parity.md") { ... on Blob { oid } }
     recentOpen: issues(states: OPEN, first: 100, orderBy: {field: CREATED_AT, direction: DESC}) { nodes { ...I } }
     hotOpen: issues(states: OPEN, first: 30, orderBy: {field: COMMENTS, direction: DESC}) { nodes { ...I } }
     defaultBranchRef {
       name
       target {
         ... on Commit {
+          oid
           all: history(first: 1) { totalCount nodes { committedDate } }
           {HISTORY}
         }
@@ -1146,6 +1251,68 @@ mod tests {
         assert!(!q.contains("cr:"), "no build, no since-release window");
         let q = main_query(now, Some("2026-09-20T12:00:00Z".parse().unwrap()));
         assert!(q.contains(r#"cr: history(since: "2026-09-20T12:00:00Z")"#));
+    }
+
+    #[test]
+    fn stats_carry_the_head_and_the_parity_document_blobs() {
+        let q = main_query(Utc::now(), None);
+        for (alias, path) in PARITY_FILES {
+            let field = format!(
+                r#"{alias}: object(expression: "HEAD:{path}") {{ ... on Blob {{ oid }} }}"#
+            );
+            assert!(q.contains(&field), "{q}");
+        }
+        // The counts query reads only blob ids; GitHub::parity downloads the
+        // text when a blob changes.
+        assert!(!q.contains("text"));
+        let main = json!({"repository": {
+            "roadmap": {"oid": "a1"},
+            "parityDoc": null,
+            "defaultBranchRef": {"name": "main", "target": {"oid": "h1"}}
+        }});
+        let s = build_stats(&main, &[], None, &[], &[], &Events::default(), Utc::now());
+        assert_eq!(s.head_oid.as_deref(), Some("h1"));
+        assert_eq!(
+            s.parity_oids,
+            BTreeMap::from([("ROADMAP.md".to_string(), "a1".to_string())])
+        );
+    }
+
+    #[test]
+    fn blob_queries_alias_each_blob_and_read_its_text() {
+        let q = blob_query(2);
+        assert!(q.starts_with(
+            "query($owner: String!, $name: String!, $b0: GitObjectID!, $b1: GitObjectID!)"
+        ));
+        assert!(q.contains("b1: object(oid: $b1) { ... on Blob { text isTruncated isBinary } }"));
+        assert!(!q.contains("b2:"));
+        let data = json!({"repository": {
+            "b0": {"text": "# Roadmap", "isTruncated": false, "isBinary": false},
+            "b1": {"text": "cut off", "isTruncated": true, "isBinary": false},
+            "b2": {"text": null, "isTruncated": false, "isBinary": true},
+            "b3": null
+        }});
+        assert_eq!(
+            parse_blobs(&data, 4),
+            [
+                Some("# Roadmap".to_string()),
+                None,
+                Some(String::new()),
+                None
+            ]
+        );
+    }
+
+    #[test]
+    fn a_repo_without_parity_documents_is_read_without_a_request() {
+        // Any request would fail: GitHub rejects this token.
+        let gh = GitHub::new("not-a-token".into()).unwrap();
+        let p = gh.parity("o/lib", Some("h1"), &BTreeMap::new()).unwrap();
+        assert_eq!(
+            p.na.as_deref(),
+            Some("No ROADMAP.md or docs/target-app-parity.md at HEAD")
+        );
+        assert_eq!(p.commit.as_deref(), Some("h1"));
     }
 
     #[test]

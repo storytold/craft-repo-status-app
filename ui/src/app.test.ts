@@ -25,6 +25,7 @@ const stats = (s: Partial<RepoStats>): RepoStats => ({
   open_prs: 1, open_issues: 2, last_commit_at: NOW, last_issue_at: NOW, oldest_open_pr_at: NOW, newest_pr_at: NOW,
   recent: {}, latest_build: 'v1.0.0', latest_build_at: NOW, latest_build_prerelease: false, latest_build_sha: null,
   since_build: null, latest_build_downloads: 0, downloads_total: 0, urgency: 0, critical_issues: 0, urgent: [], icon_oid: null,
+  head_oid: null, parity_oids: {},
   ...s,
 });
 
@@ -225,6 +226,66 @@ test('links in a row open on GitHub without dragging or switching views', async 
   assert.deepEqual(h.rows(), ['beta', 'gamma', 'alpha']);
   assert.equal(h.view(), 'repos');
   assert.deepEqual(h.calls.filter((c) => c.cmd === 'open_url').map((c) => c.args?.url), ['https://github.com/o/gamma']);
+});
+
+test('the parity columns show Breadth and Ready, explain dashes, sort, and open the parity document', async () => {
+  type Parity = NonNullable<RepoEntry['parity']>;
+  type Figure = Parity['breadth'];
+  const figure = (pct: number, label: string): Figure => ({
+    state: 'ok', pct, low: null, high: null, label, text: `~${pct}%`, kind: 'estimated', basis: 'estimated', path: 'ROADMAP.md', line: 12, from: null,
+  });
+  const absent = (why: string): Figure => ({ state: 'absent', why });
+  const unread = { state: 'absent', why: 'Not read yet' } as const;
+  const parity = (p: Partial<Parity>): Parity => ({
+    version: 1, commit: 'abc123', roadmap_oid: 'r1', parity_doc: true, na: null, last_reviewed: '2026-10-10',
+    breadth: figure(80, 'Feature breadth'), ready: figure(50, 'Ready for real work'), breadth_alts: [], menu_breadth: unread,
+    menu_hint: null, mainstream: unread, essentials: unread, to_alpha: unread, to_beta: unread, to_full: unread,
+    stage: unread, files: [], notes: [], ...p,
+  });
+  const none = 'No ROADMAP.md or docs/target-app-parity.md at HEAD';
+  const h = await setup({ snap: snapshot([
+    repo('alpha', { urgency: 100 }, { parity: parity({ ready: figure(61, 'Ready for real work') }) }),
+    repo('beta', { urgency: 300 }, { parity: parity({ roadmap_oid: null, parity_doc: false, na: none, breadth: absent(none), ready: absent(none) }) }),
+    repo('gamma', { urgency: 200 }, { parity: parity({
+      parity_doc: false, breadth: { state: 'unreadable', why: 'No percentage in the Value cell of Feature breadth', raw: 'most', path: 'ROADMAP.md', line: 9 },
+    }) }),
+    repo('delta', null, { fetched_at: null }),
+    repo('gone', null, { inaccessible: true }),
+  ]) });
+  const col = (label: string) => [...h.doc.querySelectorAll('thead tr.cols th')].findIndex((th) => th.textContent === label);
+  const breadth = col('Breadth');
+  const ready = col('Ready');
+  assert.equal(ready, breadth + 1);
+  const groups = [...h.doc.querySelectorAll('thead tr.groups th')].map((th) => th.textContent);
+  assert.ok(groups.includes('Parity'));
+  const cell = (name: string, i: number) => h.row(name).cells[i]!;
+  assert.equal(cell('alpha', breadth).textContent, '80%');
+  assert.equal(cell('alpha', ready).textContent, '61%');
+  assert.match(cell('alpha', ready).querySelector<HTMLElement>('.parity')!.title, /^Ready for real work: ~61%\nEstimated · estimated\nROADMAP\.md last reviewed 2026-10-10\n/);
+  // A repo without the documents shows a plain dash, and its tooltip gives the reason.
+  assert.equal(cell('beta', ready).textContent, '—');
+  assert.equal(cell('beta', ready).querySelector<HTMLElement>('.parity')!.title, none);
+  assert.ok(cell('beta', ready).querySelector('.parity .muted'));
+  assert.equal(cell('beta', ready).querySelector('.link'), null);
+  // A row that did not parse shows a dash with an amber dot and links to its line.
+  assert.ok(cell('gamma', breadth).querySelector('.warn-dot'));
+  assert.match(cell('gamma', breadth).querySelector<HTMLElement>('.parity')!.title, /ROADMAP\.md line 9: most/);
+  // A repo not read yet shows a dash, and an inaccessible repo shows nothing.
+  assert.equal(cell('delta', ready).textContent, '—');
+  assert.equal(cell('delta', ready).querySelector<HTMLElement>('.muted')!.title, 'Not read yet');
+  assert.equal(cell('gone', ready).textContent, '');
+  // Percentages have no total in the footer.
+  assert.equal(h.doc.querySelector('tfoot tr')!.querySelectorAll('td')[ready]!.textContent, '');
+
+  header(h, 'Ready').click();
+  assert.deepEqual(h.rows(), ['alpha', 'gamma', 'beta', 'delta', 'gone'], 'highest first, missing numbers last');
+  cell('alpha', breadth).querySelector<HTMLElement>('.link')!.click();
+  cell('gamma', breadth).querySelector<HTMLElement>('.link')!.click();
+  assert.deepEqual(h.calls.filter((c) => c.cmd === 'open_url').map((c) => c.args?.url), [
+    'https://github.com/o/alpha/blob/abc123/docs/target-app-parity.md',
+    'https://github.com/o/gamma/blob/abc123/ROADMAP.md?plain=1#L9',
+  ]);
+  assert.equal(h.view(), 'repos', 'a click on the number does not open the urgent view');
 });
 
 test('the Fetched column shows each repo’s data age and sorts by it, freshest first ascending', async () => {

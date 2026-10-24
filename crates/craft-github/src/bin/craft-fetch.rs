@@ -1,10 +1,37 @@
-//! `craft-fetch [owner/name …] [--snapshot PATH]` — fetch stats once and print
-//! a table (debugging aid). `--snapshot` also writes a Snapshot JSON the UI
-//! can load in a plain browser (`ui/dev-snapshot.json`).
+//! `craft-fetch [owner/name …] [--snapshot PATH] [--parity]`: fetch stats
+//! once and print a table (debugging aid). `--snapshot` also writes a
+//! Snapshot JSON the UI can load in a plain browser (`ui/dev-snapshot.json`).
+//! `--parity` also downloads each repo's parity documents and prints the
+//! numbers read from them, which the snapshot then carries too.
 
 use chrono::Utc;
-use craft_core::{Cache, Config, LagBasis, RepoEntry, Snapshot, ALL_TIME};
+use craft_core::{Cache, Config, Figure, LagBasis, RepoEntry, Snapshot, ALL_TIME};
 use craft_github::{resolve_token, Error, GitHub, RawActivity};
+
+/// A parity number as one line: the percentage and its row, or why not.
+fn figure(f: &Figure) -> String {
+    match f {
+        Figure::Ok {
+            pct,
+            label,
+            basis,
+            path,
+            line,
+            from,
+            ..
+        } => format!(
+            "{pct}% ({basis:?}, {label}, {path}:{line}{})",
+            from.as_ref().map_or(String::new(), |f| format!("; {f}"))
+        ),
+        Figure::Absent { why } => format!("- ({why})"),
+        Figure::Unreadable {
+            why,
+            raw,
+            path,
+            line,
+        } => format!("- ({why}, {path}:{line}: {raw:?})"),
+    }
+}
 
 fn main() {
     let mut args: Vec<String> = std::env::args().skip(1).collect();
@@ -12,6 +39,11 @@ fn main() {
         args.remove(i);
         args.remove(i)
     });
+    let parity = args
+        .iter()
+        .position(|a| a == "--parity")
+        .map(|i| args.remove(i))
+        .is_some();
     let cfg = Config::load_from(&Config::path().unwrap()).unwrap_or_default();
     let repos = if args.is_empty() {
         cfg.repos.clone()
@@ -87,6 +119,17 @@ fn main() {
                         Err(e) => eprintln!("{repo}: icon: {e}"),
                     }
                 }
+                if parity {
+                    match gh.parity(repo, s.head_oid.as_deref(), &s.parity_oids) {
+                        Ok(p) => {
+                            println!("    breadth  {}", figure(&p.breadth));
+                            println!("    ready    {}", figure(&p.ready));
+                            println!("    reviewed {}", p.last_reviewed.as_deref().unwrap_or("-"));
+                            entry.parity = Some(p);
+                        }
+                        Err(e) => eprintln!("{repo}: parity: {e}"),
+                    }
+                }
                 entry.stats = Some(s);
                 entry.fetched_at = Some(now);
             }
@@ -107,5 +150,33 @@ fn main() {
     if let Some(p) = snapshot_path {
         std::fs::write(&p, serde_json::to_string_pretty(&snap).unwrap()).unwrap();
         eprintln!("wrote {p}");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use craft_core::parity::{read, Input, ROADMAP};
+
+    #[test]
+    fn parity_lines_give_the_number_and_its_row_or_why_not() {
+        let p = read(&[Input {
+            path: ROADMAP,
+            oid: "a1",
+            text: "## Headline numbers\n| | Value | Kind |\n|---|---|---|\n\
+                   | **Feature breadth** | **~70%** | measured |\n| Ready for real work | soon | estimated |\n",
+        }]);
+        assert_eq!(
+            figure(&p.breadth),
+            "70% (Measured, Feature breadth, ROADMAP.md:4)"
+        );
+        assert_eq!(
+            figure(&p.ready),
+            "- (No percentage in the Value cell of Ready for real work, ROADMAP.md:5: \"soon\")"
+        );
+        assert_eq!(
+            figure(&read(&[]).breadth),
+            "- (No ROADMAP.md or docs/target-app-parity.md at HEAD)"
+        );
     }
 }

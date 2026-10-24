@@ -12,3 +12,5 @@ toml.workspace = true
 dirs.workspace = true
 thiserror.workspace = true
 chrono.workspace = true
+regex.workspace = true
+unicode-normalization.workspace = true
