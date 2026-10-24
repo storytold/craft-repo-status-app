@@ -54,6 +54,281 @@ export interface RepoStats {
   critical_issues: number;
   urgent: UrgentIssue[];
   icon_oid: string | null;
+  /** The commit at the head of the default branch. */
+  head_oid: string | null;
+  /** Blob ids of the parity documents at the head of the default branch, by path. */
+  parity_oids: Record<string, string>;
+}
+
+// Parity: mirrors crates/craft-core/src/parity/mod.rs.
+
+/** The basis a number's Kind or How cell states. */
+export type Basis = 'measured' | 'partly' | 'estimated' | 'unknown';
+
+/** A file in the repo and a line in it, from 1. */
+export interface Src { path: string; line: number }
+
+/** A parsed value: read, missing from the document, or present but not in a form the parser reads. */
+export type Cell<T> =
+  | { state: 'ok'; v: T; src: Src; from?: string | null }
+  | { state: 'absent'; why: string }
+  | { state: 'unreadable'; why: string; raw: string; src: Src };
+
+/** A percentage as written. */
+export interface Pct {
+  value: number;
+  approx: boolean;
+  low: number | null;
+  high: number | null;
+  basis: Basis;
+  raw: string;
+  note: string | null;
+  computed: boolean;
+}
+
+/** A percentage, or "ahead of" or "beyond" the target app. */
+export type Score = ({ kind: 'pct' } & Pct) | { kind: 'ahead'; text: string };
+
+export interface Hours {
+  lo: number;
+  hi: number;
+  approx: boolean;
+  basis: string | null;
+  note: string | null;
+  raw: string;
+  counted_in: string | null;
+}
+
+export interface Fraction { done: number; total: number }
+
+/** One headline percentage: read, missing from the document, or present but not in a form the parser reads. */
+export type Figure =
+  | {
+    state: 'ok';
+    pct: number;
+    low: number | null;
+    high: number | null;
+    /** The row's label and its Value and Kind cells, without markup. */
+    label: string;
+    text: string;
+    kind: string;
+    basis: Basis;
+    /** The file and its line, from 1. */
+    path: string;
+    line: number;
+    /** Where the number came from when it is not the row it names. */
+    from: string | null;
+  }
+  | { state: 'absent'; why: string }
+  | { state: 'unreadable'; why: string; raw: string; path: string; line: number };
+
+export interface StageStep { stage: string; points: number | null; hours: Hours | null; text: string }
+export interface Stage { name: string; steps: StageStep[] }
+
+/** One parity document and its dates (`YYYY-MM-DD`). */
+export interface DocFile {
+  path: string;
+  oid: string;
+  reviewed: string | null;
+  updated: string | null;
+  generated: string | null;
+  target: string | null;
+  date_lines: number;
+  line: number | null;
+  /** Set when the file has no date line. */
+  why: string | null;
+  /** The last commit to the path: its date and id. */
+  commit_date: Time | null;
+  commit: string | null;
+}
+
+/** The dimension groups the Apps table has a column for. */
+export type Canonical =
+  | 'features' | 'ui_ux' | 'file_formats' | 'type_layout' | 'hardware' | 'localization' | 'performance'
+  | 'stability' | 'platforms' | 'ecosystem' | 'ai' | 'agent_control' | 'collaboration' | 'standards' | 'other';
+
+/** A link in a document, and the in-repo path it resolves to. */
+export interface Link { text: string; url: string; path: string | null }
+
+/** One dimension of "ready for real work". */
+export interface Dim {
+  name: string;
+  group: Canonical;
+  weight: number | null;
+  weight_src: string | null;
+  ready: Cell<Score>;
+  breadth: Cell<Score>;
+  hours: Cell<Hours>;
+  kind: string;
+  doc: Link | null;
+  counted: string | null;
+  /** A `↳` row under the row above; left out of sums. */
+  child: boolean;
+  fills: 'ready' | 'breadth';
+  only_in: 'w' | 'd' | null;
+  src: Src;
+  /** Weighted points lost: weight share × (100 − ready). */
+  shortfall: number | null;
+}
+
+/** One heat cell of the Apps table: the dimension rows of one column. */
+export interface Heat { column: Canonical; value: number | null; text: string; rows: string[]; src: Src | null }
+
+/** The dimension that loses the most weighted points. */
+export interface Drag { name: string; group: Canonical; points: number }
+export interface Chip { text: string; hover: string | null }
+export interface AreaCounts { features: number | null; shipped: number | null; partial: number | null }
+
+/** One feature area. */
+export interface Area {
+  name: string;
+  full_name: string;
+  key: string;
+  weight: number | null;
+  weight_src: string | null;
+  breadth: Cell<Score>;
+  ready: Cell<Score>;
+  ready_from: string | null;
+  hours: Cell<Hours>;
+  missing: Chip[];
+  more: number;
+  chips_from: 'marker' | 'gaps_column' | 'negative_clauses' | 'none';
+  /** The gaps cell as written. */
+  raw_gaps: string;
+  gaps_header: string | null;
+  unweighted: boolean;
+  dup_lines: number[];
+  conflict: string | null;
+  kind: string;
+  doc: Link | null;
+  counts: AreaCounts | null;
+  src: Src;
+  shortfall: number | null;
+}
+
+export interface AltTotal { label: string; score: Cell<Score> }
+
+/** Whether a gap blocks a stage. */
+export type Flag = 'yes' | 'no' | 'unknown' | { partial: string };
+
+/** One gap from docs/gaps.md. */
+export interface Gap {
+  key: string;
+  id: string;
+  /** Row order in the ranked list, from 1; 0 for unranked gaps. */
+  rank: number;
+  group: string | null;
+  title: string;
+  alpha: Flag;
+  beta: Flag;
+  blocks_src: string | null;
+  scope_note: string | null;
+  priority: string | null;
+  kinds: string[];
+  hours: Cell<Hours>;
+  counted_in: string | null;
+  doc: Link | null;
+  workstream: string | null;
+  src: Src;
+  detail_src: Src | null;
+  detail: string | null;
+  closed: boolean;
+  paired_with: string[];
+  issues: number[];
+}
+
+export interface HoursSum { count: number; lo: number; hi: number; unknown: number }
+
+/** Sums over the open gaps. */
+export interface GapTotals {
+  beta: HoursSum | null;
+  partial: HoursSum | null;
+  alpha: number;
+  alpha_none: boolean;
+  stated: Cell<Hours>;
+  ids_stable: boolean;
+  form: string;
+  beta_unknown: boolean;
+}
+
+/** Status counts for one tier, group or document. */
+export interface Counts {
+  name: string;
+  done: number;
+  partial: number;
+  missing: number;
+  excluded: number;
+  ahead: number;
+  not_measured: number;
+  unrecognized: number;
+  pct: number | null;
+}
+
+export interface CheckRow { status: string; group: string; text: string; notes: string; line: number }
+export interface Group { name: string; done: number; total: number; line: number }
+
+/** A machine checklist. */
+export type Checklist =
+  | { kind: 'tiered'; path: string; tiers: Counts[]; overall: number | null; rows: CheckRow[]; more: number }
+  | { kind: 'presence'; path: string; total: Cell<Fraction>; groups: Group[]; missing: CheckRow[]; more: number }
+  | { kind: 'status'; path: string; groups: Counts[]; overall: number | null; rows: CheckRow[]; more: number };
+
+/** A hand-written docs/*-parity.md. */
+export interface DocChecklist {
+  path: string;
+  score: Cell<Pct>;
+  counts: Counts | null;
+  rows: CheckRow[];
+  pct_rows: CheckRow[];
+  why: string | null;
+}
+
+/** A note the parser adds about a document, such as two sources that disagree. */
+export interface Note { level: 'info' | 'warn'; text: string; src: Src | null }
+
+/** What the app shows from a repo's parity documents. */
+export interface Parity {
+  version: number;
+  /** The commit the files were read at. */
+  commit: string | null;
+  roadmap_oid: string | null;
+  /** Whether docs/target-app-parity.md exists at that commit. */
+  parity_doc: boolean;
+  /** Why the repo has no parity numbers. */
+  na: string | null;
+  breadth: Figure;
+  ready: Figure;
+  /** The newest Last reviewed date in ROADMAP.md, YYYY-MM-DD. */
+  last_reviewed: string | null;
+  breadth_alts: Figure[];
+  menu_breadth: Figure;
+  menu_hint: Fraction | null;
+  /** The in-repo paths the breadth rows' Kind cells link to, the shown row's first. */
+  breadth_links: string[];
+  mainstream: Figure;
+  essentials: Figure;
+  to_alpha: Cell<Hours>;
+  to_beta: Cell<Hours>;
+  to_full: Cell<Hours>;
+  stage: Cell<Stage>;
+  files: DocFile[];
+  /** The oldest Last reviewed among ROADMAP.md, the parity doc and gaps.md. */
+  reviewed: string | null;
+  dims: Dim[];
+  heat: Heat[];
+  dims_total: Cell<Score>;
+  top_drag: Cell<Drag>;
+  areas: Area[];
+  areas_total: Cell<Score>;
+  area_alts: AltTotal[];
+  area_weight_sum: number | null;
+  /** Why the areas have no weights. */
+  area_weights_why: string | null;
+  gaps: Gap[];
+  gap_totals: GapTotals;
+  checklists: Checklist[];
+  docs: DocChecklist[];
+  notes: Note[];
 }
 
 export interface RepoEntry {
@@ -63,6 +338,8 @@ export interface RepoEntry {
   last_attempt_at?: Time | null;
   error?: string | null;
   inaccessible?: boolean;
+  /** The parity numbers; null (or absent, from an older build) until read. */
+  parity?: Parity | null;
   icon?: string | null;
   icon_oid?: string | null;
 }
@@ -74,6 +351,8 @@ export interface Snapshot {
   next_refresh_at: Time | null;
   poll_secs: number;
   stale_after_secs: number;
+  /** The Parity tab marks documents last reviewed more than this many days ago (absent from older builds). */
+  parity_warn_days?: number;
   rate_limit_remaining: number | null;
   error: string | null;
   /** The token the last poll used; null (or absent, from an older build) before the first poll. */
@@ -133,8 +412,11 @@ export const windowById = (id: string): ActivityWindow =>
 
 // ───────────────────────────── columns ─────────────────────────────
 
-/** `age` is a timestamp shown and sorted by how long ago it was: ascending puts the newest first. */
-export type Kind = 'text' | 'num' | 'date' | 'age' | 'version';
+/**
+ * `age` is a timestamp shown and sorted by how long ago it was: ascending puts the newest first.
+ * `pct` sorts as a number but has no footer total.
+ */
+export type Kind = 'text' | 'num' | 'pct' | 'date' | 'age' | 'version';
 export type Value = string | number | null;
 
 export interface Column {
@@ -175,6 +457,8 @@ export const COLUMNS: readonly Column[] = [
   { key: 'recent_merged', recent: 'prs_merged', label: 'Merged', kind: 'num', group: RECENT, title: 'Pull requests merged {span}' },
   { key: 'recent_issues', recent: 'issues_opened', label: 'Issues', kind: 'num', group: RECENT, title: 'Issues opened {span}' },
   { key: 'recent_people', recent: 'people', label: 'People', kind: 'num', group: RECENT, title: 'People who committed to main {span} (all time: GitHub’s contributor count)' },
+  { key: 'parity_breadth', label: 'Breadth', kind: 'pct', group: 'Parity', title: 'Feature breadth from the Headline numbers of ROADMAP.md (or docs/target-app-parity.md): how much of the target app’s feature set exists', get: (e) => figurePct(e.parity?.breadth) },
+  { key: 'parity_ready', label: 'Ready', kind: 'pct', group: 'Parity', title: 'Ready for real work from ROADMAP.md’s Headline numbers; without that row, from its Readiness by audience table, the headline table of docs/target-app-parity.md, or Feature depth', get: (e) => figurePct(e.parity?.ready) },
   { key: 'latest_build', label: 'Build', kind: 'version', group: 'Builds', title: 'Most recent published release' },
   { key: 'latest_build_at', label: 'Built', kind: 'date', group: 'Builds', title: 'When the most recent release was published' },
   { key: 'commits_since_build', label: 'Unreleased', kind: 'num', group: 'Builds', title: 'Commits on main since the most recent release (~ means estimated: the release’s commit isn’t on main)', get: (e) => e.stats?.since_build?.commits ?? null },
@@ -365,4 +649,530 @@ export function urgentAcross(
   }
   all.sort((a, b) => b.score - a.score || Date.parse(b.created_at ?? '0') - Date.parse(a.created_at ?? '0'));
   return all.slice(0, limit);
+}
+
+// ───────────────────────────── parity ─────────────────────────────
+
+/** The `Parity` field each parity column shows. */
+export type ParityField = 'breadth' | 'ready';
+export const PARITY_FIGURES: Readonly<Record<string, ParityField>> = { parity_breadth: 'breadth', parity_ready: 'ready' };
+
+/** A figure's percentage; null when it is missing or unread. */
+export function figurePct(f: Figure | null | undefined): number | null {
+  return f?.state === 'ok' ? f.pct : null;
+}
+
+/** "77%", or "81.1%" when the document gives a decimal. */
+export const formatPct = (pct: number): string => `${Math.round(pct * 10) / 10}%`;
+
+const BASIS_TEXT: Readonly<Record<Basis, string>> = {
+  measured: 'Measured', partly: 'Partly measured', estimated: 'Estimated', unknown: 'Basis not stated',
+};
+
+/**
+ * Where a click on a parity cell goes: docs/target-app-parity.md on GitHub at
+ * the commit read, or without that document the figure's row in ROADMAP.md,
+ * shown as source (`?plain=1`); null when the repo has neither file.
+ */
+export function parityUrl(repo: string, p: Parity, f: Figure): string | null {
+  const at = encodeURIComponent(p.commit ?? 'HEAD');
+  if (p.parity_doc) return `https://github.com/${repo}/blob/${at}/docs/target-app-parity.md`;
+  if (!p.roadmap_oid) return null;
+  if (f.state === 'absent') return `https://github.com/${repo}/blob/${at}/ROADMAP.md`;
+  const path = f.path.split('/').map(encodeURIComponent).join('/');
+  return `https://github.com/${repo}/blob/${at}/${path}?plain=1#L${f.line}`;
+}
+
+/** The tooltip of a parity cell: the row and its basis, or why there is no number, and the review date. */
+export function parityTip(p: Parity | null | undefined, field: ParityField): string {
+  if (!p) return 'Not read yet';
+  const f = p[field];
+  const lines: string[] = [];
+  if (f.state === 'ok') {
+    lines.push(`${f.label}: ${f.text}`, f.kind ? `${BASIS_TEXT[f.basis]} · ${f.kind}` : BASIS_TEXT[f.basis]);
+    if (f.from) lines.push(`Source: ${f.from}`);
+  } else {
+    lines.push(f.why);
+    if (f.state === 'unreadable') lines.push(`${f.path} line ${f.line}: ${f.raw}`);
+  }
+  if (p.roadmap_oid) lines.push(p.last_reviewed ? `ROADMAP.md last reviewed ${p.last_reviewed}` : 'ROADMAP.md has no Last reviewed date');
+  if (p.parity_doc) lines.push('Click to open docs/target-app-parity.md on GitHub');
+  else if (p.roadmap_oid) lines.push('Click to open ROADMAP.md on GitHub');
+  return lines.join('\n');
+}
+
+// ───────────────────────────── parity tab ─────────────────────────────
+
+/**
+ * A document line on GitHub at `commit`: `…/blob/<commit>/<path>?plain=1#L<line>`.
+ * `?plain=1` shows a Markdown file as text, where the line anchor works; with
+ * no line (0) the link opens the rendered file.
+ */
+export function sourceUrl(repo: string, commit: string | null | undefined, src: Src): string {
+  const at = encodeURIComponent(commit ?? 'HEAD');
+  const path = src.path.split('/').map(encodeURIComponent).join('/');
+  const anchor = src.line ? `?plain=1#L${src.line}` : '';
+  return `https://github.com/${repo}/blob/${at}/${path}${anchor}`;
+}
+
+/** A document link on GitHub at `commit`, at the section it names; null for a link outside the repo. */
+export function docUrl(repo: string, commit: string | null | undefined, doc: Link): string | null {
+  if (!doc.path) return null;
+  const hash = doc.url.indexOf('#');
+  return sourceUrl(repo, commit, { path: doc.path, line: 0 }) + (hash >= 0 ? doc.url.slice(hash) : '');
+}
+
+/** A cell's value; null when absent or unreadable. */
+export function cellValue<T>(c: Cell<T> | null | undefined): T | null {
+  return c?.state === 'ok' ? c.v : null;
+}
+
+/** A score's percentage; null for "ahead" and missing scores. */
+export function scorePct(c: Cell<Score> | null | undefined): number | null {
+  const s = cellValue(c);
+  return s?.kind === 'pct' ? s.value : null;
+}
+
+/** "75%", "ahead" or "—". */
+export function scoreText(c: Cell<Score> | null | undefined): string {
+  const s = cellValue(c);
+  if (!s) return '—';
+  return s.kind === 'pct' ? formatPct(s.value) : 'ahead';
+}
+
+/** "170–270 h", "3 h" or "—". */
+export function hoursText(h: Pick<Hours, 'lo' | 'hi'> | null | undefined): string {
+  if (!h) return '—';
+  const n = (v: number) => v.toLocaleString('en-US');
+  return h.lo === h.hi ? `${n(h.lo)} h` : `${n(h.lo)}–${n(h.hi)} h`;
+}
+
+/** The hours of a sum of gaps, saying how many of them have no estimate. */
+export function sumText(s: HoursSum): string {
+  if (s.unknown >= s.count) return 'hours unknown';
+  return s.unknown ? `${hoursText(s)} + ${s.unknown} unestimated` : hoursText(s);
+}
+
+/** The gaps that block beta in part, with the most hours they add. */
+export function partText(s: HoursSum): string {
+  if (s.unknown >= s.count) return `part of ${s.count} gaps (hours unknown)`;
+  const unestimated = s.unknown ? `, ${s.unknown} unestimated` : '';
+  return `part of ${s.count} gaps (up to ${s.hi.toLocaleString('en-US')} h${unestimated})`;
+}
+
+/** Why a value is missing, for a dash's tooltip: the reason, and for an unreadable value its text and line. */
+export function whyMissing(c: Cell<unknown> | Figure | null | undefined): string {
+  if (!c) return 'Not read yet';
+  if (c.state === 'absent') return c.why;
+  if (c.state === 'unreadable') {
+    const at = 'src' in c ? `${c.src.path}:${c.src.line}` : `${c.path}:${c.line}`;
+    return `${c.why}\n${at}: ${c.raw}`;
+  }
+  return '';
+}
+
+/** Where a figure was read, or null when it was not. */
+export function figureSrc(f: Figure | null | undefined): Src | null {
+  if (!f || f.state === 'absent') return null;
+  return { path: f.path, line: f.line };
+}
+
+/** The badge text of a basis; empty when the document does not say. */
+export const BASIS_BADGE: Readonly<Record<Basis, string>> = { measured: 'Measured', partly: 'Partly measured', estimated: 'Estimated', unknown: '' };
+
+/** The Apps table's dimension columns, in order; agent control, collaboration and standards show under Other. */
+export const HEAT_COLUMNS: readonly { key: Canonical; label: string }[] = [
+  { key: 'features', label: 'Features' }, { key: 'ui_ux', label: 'UI/UX' }, { key: 'file_formats', label: 'Files' },
+  { key: 'type_layout', label: 'Type and layout' }, { key: 'hardware', label: 'Hardware' }, { key: 'localization', label: 'Localization' },
+  { key: 'performance', label: 'Performance' }, { key: 'stability', label: 'Stability' }, { key: 'platforms', label: 'Platforms' },
+  { key: 'ecosystem', label: 'Ecosystem' }, { key: 'ai', label: 'AI' }, { key: 'other', label: 'Other' },
+];
+
+/** The heat cell of column `col`. */
+export function heatOf(p: Parity | null | undefined, col: Canonical): Heat | undefined {
+  return p?.heat.find((h) => h.column === col);
+}
+
+export type Audience = 'full' | 'mainstream' | 'essentials';
+export const AUDIENCES: readonly { id: Audience; label: string }[] = [
+  { id: 'full', label: 'Full target' }, { id: 'mainstream', label: 'Mainstream' }, { id: 'essentials', label: 'Essentials' },
+];
+
+/** The readiness figure for an audience: Ready for the full target. */
+export function audienceFigure(p: Parity, a: Audience): Figure {
+  if (a === 'full') return p.ready;
+  return a === 'mainstream' ? p.mainstream : p.essentials;
+}
+
+/** Whether the repo has parity documents (and has been read). */
+export const hasParity = (e: RepoEntry): boolean => !!e.parity && !e.parity.na && !e.inaccessible;
+
+/** A gap that blocks alpha or beta outright and is still open. */
+export const isBlocker = (g: Gap): boolean => !g.closed && (g.alpha === 'yes' || g.beta === 'yes');
+
+/** The Parity tab's badge: open gaps that block alpha or beta, each counted once, summed across apps. */
+export function parityBadge(entries: readonly RepoEntry[]): number {
+  return entries.reduce((n, e) => n + (hasParity(e) ? e.parity!.gaps.filter(isBlocker).length : 0), 0);
+}
+
+/** How many days old a review date may be before the Parity tab marks it, when the snapshot does not say. */
+export const PARITY_WARN_DAYS = 14;
+
+/** Whole days since `date` (`YYYY-MM-DD`); null without one. */
+export function daysSince(date: string | null | undefined, now: number = Date.now()): number | null {
+  if (!date) return null;
+  return Math.floor((now - Date.parse(`${date}T00:00:00Z`)) / 86400e3);
+}
+
+/** Whole days since the oldest Last reviewed of ROADMAP.md, the parity doc and gaps.md; null without one. */
+export function reviewAgeDays(p: Parity | null | undefined, now: number = Date.now()): number | null {
+  return daysSince(p?.reviewed, now);
+}
+
+/** When any parity document last changed: the newest last commit to one; null when unknown. */
+export function changedAt(p: Parity | null | undefined): string | null {
+  const times = (p?.files ?? []).map((f) => f.commit_date).filter((s): s is string => !!s);
+  return times.reduce<string | null>((a, b) => (a !== null && Date.parse(a) > Date.parse(b) ? a : b), null);
+}
+
+const STAGES = ['pre-alpha', 'early alpha', 'alpha', 'beta', 'stable'];
+
+/** The stage's name, or null. */
+export const stageOf = (p: Parity | null | undefined): string | null => cellValue(p?.stage)?.name ?? null;
+
+/** The value a Parity tab column sorts by; null when there is none. */
+export type ParityValue = number | string | null;
+
+/** A column of the Apps table: its label, its tooltip, and the value it sorts by. */
+export interface ParityColumn {
+  key: string;
+  label: string;
+  title: string;
+  /** Sorts ascending when first clicked. */
+  asc?: boolean;
+  value: (e: RepoEntry, audience: Audience) => ParityValue;
+}
+
+const readyFor = (e: RepoEntry, a: Audience): number | null => figurePct(e.parity && audienceFigure(e.parity, a));
+
+export const PARITY_COLUMNS: readonly ParityColumn[] = [
+  { key: 'app', label: 'App', title: 'Sort by name', asc: true, value: (e) => e.repo.split('/').pop() ?? e.repo },
+  { key: 'stage', label: 'Stage', title: 'The stage from ROADMAP.md’s Stage line', value: (e) => { const s = stageOf(e.parity); return s === null ? null : STAGES.indexOf(s); } },
+  { key: 'ready', label: 'Ready', title: 'Ready for real work for the chosen audience, with its range; the tick marks Breadth', value: readyFor },
+  { key: 'breadth', label: 'Breadth', title: 'Feature breadth: how much of the target app’s feature set exists', value: (e) => figurePct(e.parity?.breadth) },
+  { key: 'to_beta', label: 'To beta', title: 'Hours to beta from ROADMAP.md’s Headline numbers', asc: true, value: (e) => cellValue(e.parity?.to_beta)?.hi ?? null },
+  { key: 'to_full', label: 'To full', title: 'Hours to full parity from ROADMAP.md’s Headline numbers', asc: true, value: (e) => cellValue(e.parity?.to_full)?.hi ?? null },
+  { key: 'top_drag', label: 'Top drag', title: 'The dimension that loses the most weighted points: weight share × (100 − ready)', value: (e) => cellValue(e.parity?.top_drag)?.points ?? null },
+  { key: 'beta_gaps', label: 'Beta gaps', title: 'Open gaps that block beta, and their hours, from docs/gaps.md', value: (e) => {
+    const t = e.parity?.gap_totals;
+    return !t || t.beta_unknown ? null : t.beta?.count ?? 0;
+  } },
+  ...HEAT_COLUMNS.map((c): ParityColumn => ({
+    key: `heat_${c.key}`, label: c.label, title: `${c.label}: ready for real work on this dimension`,
+    value: (e) => {
+      const h = heatOf(e.parity, c.key);
+      if (!h) return null;
+      return h.value ?? (h.text === 'ahead' ? 101 : null);
+    },
+  })),
+  { key: 'areas', label: 'Areas', title: 'Feature areas: width is weight, fill is ready', value: (e) => e.parity?.areas.length || null },
+  { key: 'checklist', label: 'Checklist', title: 'The machine checklist: done share per tier, or menu items that exist', value: (e) => checklistOverall(e.parity) },
+  { key: 'reviewed', label: 'Reviewed', title: 'Age of the oldest Last reviewed among ROADMAP.md, docs/target-app-parity.md and docs/gaps.md', asc: true, value: (e) => reviewAgeDays(e.parity) },
+  { key: 'changed', label: 'Changed', title: 'When a parity document last changed: the newest last commit to one', value: (e) => { const t = changedAt(e.parity); return t ? Date.parse(t) : null; } },
+];
+
+export const PARITY_COLUMN: Readonly<Record<string, ParityColumn>> = Object.fromEntries(PARITY_COLUMNS.map((c) => [c.key, c]));
+
+/** The Apps rows in order: repos without parity documents last, then by the sort, missing values last. */
+export function parityOrder(entries: readonly RepoEntry[], sort: Sort, audience: Audience): RepoEntry[] {
+  const col = PARITY_COLUMN[sort.key] ?? PARITY_COLUMN.ready!;
+  const sign = sort.dir === 'asc' ? 1 : -1;
+  const name = (e: RepoEntry) => String(PARITY_COLUMN.app!.value(e, audience));
+  const byApp = (a: RepoEntry, b: RepoEntry) => name(a).localeCompare(name(b), undefined, { sensitivity: 'base', numeric: true });
+  return [...entries].sort((a, b) => {
+    const pa = hasParity(a);
+    const pb = hasParity(b);
+    if (pa !== pb) return pa ? -1 : 1;
+    const va = col.value(a, audience);
+    const vb = col.value(b, audience);
+    if (va === null && vb === null) return byApp(a, b);
+    if (va === null) return 1;
+    if (vb === null) return -1;
+    const d = typeof va === 'string' || typeof vb === 'string'
+      ? String(va).localeCompare(String(vb), undefined, { sensitivity: 'base', numeric: true })
+      : va - vb;
+    return sign * d || byApp(a, b);
+  });
+}
+
+/** The Apps sort after clicking column `key`: flip it if already sorted by it, else the column's first direction. */
+export function parityNextSort(sort: Sort, key: string): Sort {
+  if (sort.key === key) return { key, dir: sort.dir === 'asc' ? 'desc' : 'asc' };
+  return { key, dir: PARITY_COLUMN[key]?.asc ? 'asc' : 'desc' };
+}
+
+/** Each dimension column's mean across the apps with a percentage there, and how many those are. */
+export function heatMeans(entries: readonly RepoEntry[]): Record<string, { mean: number | null; n: number }> {
+  const out: Record<string, { mean: number | null; n: number }> = {};
+  for (const c of HEAT_COLUMNS) {
+    const vs = entries.filter(hasParity).map((e) => heatOf(e.parity, c.key)?.value).filter((v): v is number => typeof v === 'number');
+    out[c.key] = { mean: vs.length ? Math.round((vs.reduce((a, b) => a + b, 0) / vs.length) * 10) / 10 : null, n: vs.length };
+  }
+  return out;
+}
+
+/** One segment of an app's area strip. */
+export interface Segment { name: string; key: string; width: number; fill: number | null; tip: string }
+
+/** The area strip: one segment per area, as wide as its weight share (equal without weights), filled to its ready (empty without one). */
+export function areaStrip(p: Parity | null | undefined): Segment[] {
+  const areas = (p?.areas ?? []).filter((a) => !a.unweighted);
+  if (!areas.length) return [];
+  const sum = areas.reduce((s, a) => s + (a.weight ?? 0), 0);
+  const weighted = sum > 0 && areas.every((a) => a.weight !== null);
+  const sorted = weighted ? [...areas].sort((a, b) => (b.weight ?? 0) - (a.weight ?? 0)) : areas;
+  return sorted.map((a) => ({
+    name: a.name,
+    key: a.key,
+    width: weighted ? ((a.weight ?? 0) / sum) * 100 : 100 / areas.length,
+    fill: scorePct(a.ready),
+    tip: [
+      a.name,
+      `Ready ${scoreText(a.ready)} · Breadth ${scoreText(a.breadth)} · ${hoursText(cellValue(a.hours))}`,
+      weighted ? `Weight ${a.weight} of ${sum}` : 'No weights in the source: equal widths',
+    ].join('\n'),
+  }));
+}
+
+/** The machine checklists' overall done share, for sorting: the first tiered or status one, else the presence one. */
+export function checklistOverall(p: Parity | null | undefined): number | null {
+  for (const c of p?.checklists ?? []) {
+    if (c.kind !== 'presence' && c.overall !== null) return c.overall;
+  }
+  for (const c of p?.checklists ?? []) {
+    if (c.kind === 'presence' && c.total.state === 'ok' && c.total.v.total > 0) return (c.total.v.done / c.total.v.total) * 100;
+  }
+  return null;
+}
+
+/** The Apps table's checklist cell: `P0 98 · P1 95 · P2 50`, `menus 100% · scorecard 75%`, `97% menus`, or a dash. */
+export function checklistSummary(p: Parity | null | undefined): { text: string; title: string } {
+  const lists = p?.checklists ?? [];
+  if (!lists.length) return { text: '—', title: 'No machine checklist in this repo' };
+  const parts: string[] = [];
+  const title: string[] = [];
+  const presence = lists.find((c) => c.kind === 'presence');
+  const tiered = lists.find((c) => c.kind === 'tiered');
+  const status = lists.find((c) => c.kind === 'status');
+  if (tiered?.kind === 'tiered') {
+    parts.push(tiered.tiers.filter((t) => t.name !== 'untiered' && t.pct !== null).map((t) => `${t.name} ${Math.round(t.pct!)}`).join(' · '));
+    title.push(`${tiered.path}: ${tiered.overall === null ? '—' : formatPct(tiered.overall)} overall`);
+  }
+  const menus = presence?.kind === 'presence' && presence.total.state === 'ok' && presence.total.v.total > 0
+    ? (presence.total.v.done / presence.total.v.total) * 100 : null;
+  if (menus !== null && presence?.kind === 'presence' && presence.total.state === 'ok') {
+    parts.push(status || tiered ? `menus ${Math.round(menus)}%` : `${Math.round(menus)}% menus`);
+    title.push(`${presence.path}: ${presence.total.v.done} of ${presence.total.v.total}`);
+  }
+  if (status?.kind === 'status' && status.overall !== null) {
+    parts.push(`scorecard ${Math.round(status.overall)}%`);
+    title.push(`${status.path}: ${formatPct(status.overall)} done`);
+  }
+  return { text: parts.filter(Boolean).join(' · ') || '—', title: title.join('\n') };
+}
+
+/** A gap with the repo it belongs to, for the All gaps view. */
+export interface AppGap extends Gap {
+  repo: string;
+  commit: string | null;
+  /** The Last reviewed date of the repo's docs/gaps.md. */
+  reviewed: string | null;
+}
+
+/** A gap's band in the default order: alpha blockers, beta blockers, partial blockers, the rest. */
+export function gapBand(g: Gap): number {
+  if (g.alpha === 'yes') return 0;
+  if (g.beta === 'yes') return 1;
+  if (typeof g.beta === 'object' || typeof g.alpha === 'object') return 2;
+  return 3;
+}
+
+/** The All gaps filters. */
+export interface GapFilter {
+  repo: string;
+  kind: string;
+  betaOnly: boolean;
+  hideClosed: boolean;
+  minHours: number;
+  text: string;
+}
+
+export const NO_GAP_FILTER: GapFilter = { repo: '', kind: '', betaOnly: false, hideClosed: true, minHours: 0, text: '' };
+
+/** The canonical gap kinds, as `KINDS` in crates/craft-core/src/parity/value.rs. */
+export const GAP_KINDS: readonly string[] = [
+  'feature', 'ui/ux', 'file format', 'codec', 'typography', 'layout', 'hardware', 'localization', 'performance',
+  'stability', 'platforms', 'ecosystem', 'ai', 'collaboration', 'standards', 'measurement', 'fidelity',
+];
+
+/** The kinds a summary groups a gap under: its canonical kinds, or "other". */
+export function gapKinds(g: Gap): string[] {
+  const known = g.kinds.filter((k) => GAP_KINDS.includes(k));
+  return known.length ? known : ['other'];
+}
+
+/**
+ * Every app's gaps, filtered. The default order is the bands (see `gapBand`)
+ * and, within each, rank interleaved across apps: every app's rank 1, then
+ * every rank 2, ties largest hours first. A sort by a column replaces it.
+ */
+export function allGaps(entries: readonly RepoEntry[], f: GapFilter = NO_GAP_FILTER, sort: Sort | null = null): AppGap[] {
+  const text = f.text.trim().toLowerCase();
+  const out: AppGap[] = [];
+  for (const e of entries) {
+    if (!hasParity(e) || (f.repo && e.repo !== f.repo)) continue;
+    const p = e.parity!;
+    const reviewed = p.files.find((x) => x.path === 'docs/gaps.md')?.reviewed ?? null;
+    for (const g of p.gaps) {
+      if (gapPasses(g, e.repo, f, text)) out.push({ ...g, repo: e.repo, commit: p.commit, reviewed });
+    }
+  }
+  const hi = (g: Gap) => cellValue(g.hours)?.hi ?? -1;
+  const rank = (g: Gap) => g.rank || 1e6;
+  if (!sort) {
+    return out.sort((a, b) => gapBand(a) - gapBand(b) || rank(a) - rank(b) || hi(b) - hi(a) || a.repo.localeCompare(b.repo));
+  }
+  const sign = sort.dir === 'asc' ? 1 : -1;
+  return out.sort((a, b) => compareGapValues(gapSortValue(a, sort.key), gapSortValue(b, sort.key), sign));
+}
+
+/** Whether gap `g` of `repo` passes filter `f`; `text` is the filter's text, trimmed and in lower case. */
+function gapPasses(g: Gap, repo: string, f: GapFilter, text: string): boolean {
+  if (f.hideClosed && g.closed) return false;
+  if (f.betaOnly && g.beta !== 'yes') return false;
+  if (f.kind && !gapKinds(g).includes(f.kind)) return false;
+  if (f.minHours > 0 && (cellValue(g.hours)?.hi ?? 0) < f.minHours) return false;
+  return !text || `${g.title} ${g.id} ${repo}`.toLowerCase().includes(text);
+}
+
+/** The value the All gaps column `key` sorts a gap by; null when it has none. */
+function gapSortValue(g: AppGap, key: string): ParityValue {
+  switch (key) {
+    case 'app': return g.repo.split('/').pop() ?? g.repo;
+    case 'rank': return g.rank || null;
+    case 'id': return g.id || null;
+    case 'gap': return g.title;
+    case 'blocks': return gapBand(g);
+    case 'kind': return gapKinds(g)[0] ?? null;
+    case 'hours': return cellValue(g.hours)?.hi ?? null;
+    case 'doc': return g.doc?.text || null;
+    case 'reviewed': return g.reviewed;
+    default: return null;
+  }
+}
+
+/** Compares two All gaps sort values, ascending for `sign` 1 and descending for -1; a null sorts last either way. */
+function compareGapValues(va: ParityValue, vb: ParityValue, sign: number): number {
+  if (va === null && vb === null) return 0;
+  if (va === null) return 1;
+  if (vb === null) return -1;
+  const d = typeof va === 'number' && typeof vb === 'number' ? va - vb : String(va).localeCompare(String(vb), undefined, { numeric: true });
+  return sign * d;
+}
+
+/**
+ * The All gaps sort after clicking column `key`: its first direction (Hours
+ * largest first, the others ascending), then the other direction, then the
+ * default order (null).
+ */
+export function nextGapSort(sort: Sort | null, key: string): Sort | null {
+  const first: Dir = key === 'hours' ? 'desc' : 'asc';
+  if (sort?.key !== key) return { key, dir: first };
+  return sort.dir === first ? { key, dir: first === 'asc' ? 'desc' : 'asc' } : null;
+}
+
+/** One kind's chip above the All gaps table; `unknown` counts its gaps without hours. */
+export interface KindSum extends HoursSum { kind: string; apps: number }
+
+/** The hours of the open gaps in `gaps`, leaving out a gap counted inside another (`(in N)`). */
+export function gapTotal(gaps: readonly Gap[]): HoursSum {
+  const s: HoursSum = { count: 0, lo: 0, hi: 0, unknown: 0 };
+  for (const g of gaps) {
+    if (g.closed || g.counted_in) continue;
+    const h = cellValue(g.hours);
+    s.count += 1;
+    s.lo += h?.lo ?? 0;
+    s.hi += h?.hi ?? 0;
+    if (!h) s.unknown += 1;
+  }
+  return s;
+}
+
+/** Gaps and hours per kind across apps, most hours first. A gap counted inside another (`(in N)`) adds no hours. */
+export function kindSums(gaps: readonly AppGap[]): KindSum[] {
+  const by = new Map<string, KindSum & { repos: Set<string> }>();
+  for (const g of gaps) {
+    if (g.closed) continue;
+    const h = g.counted_in ? null : cellValue(g.hours);
+    for (const k of gapKinds(g)) {
+      const s = by.get(k) ?? { kind: k, count: 0, lo: 0, hi: 0, unknown: 0, apps: 0, repos: new Set<string>() };
+      s.count += 1;
+      s.lo += h?.lo ?? 0;
+      s.hi += h?.hi ?? 0;
+      if (!h && !g.counted_in) s.unknown += 1;
+      s.repos.add(g.repo);
+      s.apps = s.repos.size;
+      by.set(k, s);
+    }
+  }
+  return [...by.values()].map(({ repos: _repos, ...s }) => s).sort((a, b) => b.hi - a.hi || b.count - a.count);
+}
+
+/** The flag shown for a gap: A (alpha), B (beta), a part of either, or nothing. */
+export function blocksLabel(g: Gap): { text: string; title: string } {
+  if (g.alpha === 'yes') return { text: 'A', title: 'Blocks alpha' };
+  if (typeof g.alpha === 'object') return { text: 'A part', title: `Blocks alpha in part: ${g.alpha.partial}` };
+  if (g.beta === 'yes') return { text: 'B', title: g.scope_note ? `Blocks beta (${g.scope_note})` : 'Blocks beta' };
+  if (typeof g.beta === 'object') return { text: 'B part', title: `Blocks beta in part: ${g.beta.partial}` };
+  if (g.beta === 'unknown') return { text: '', title: 'The document does not say whether this blocks beta' };
+  return { text: '', title: g.scope_note ?? 'Does not block beta' };
+}
+
+/** Why a report's beta blockers are unknown: no docs/gaps.md, no gap read from it, or it does not say. */
+export function betaUnknownWhy(p: Parity): string {
+  if (!p.files.some((f) => f.path === 'docs/gaps.md')) return 'No docs/gaps.md at HEAD';
+  return p.gaps.length ? 'docs/gaps.md does not say which gaps block beta' : 'No gaps read from docs/gaps.md';
+}
+
+/**
+ * The score a dimension row shows. A breadth row in a table without a
+ * Breadth column holds its score in `ready`.
+ */
+export function dimScore(d: Dim): Cell<Score> {
+  return d.fills === 'breadth' && d.breadth.state === 'ok' ? d.breadth : d.ready;
+}
+
+/**
+ * The dimensions in the order the detail pane lists them: most points lost
+ * first, or with no weights most hours first. A `↳` row follows the row
+ * above it in the document.
+ */
+export function dimsByDrag(dims: readonly Dim[]): { dims: Dim[]; byHours: boolean } {
+  const groups: Dim[][] = [];
+  for (const d of dims) {
+    const last = groups.at(-1);
+    if (d.child && last) last.push(d);
+    else groups.push([d]);
+  }
+  const byHours = !dims.some((d) => !d.child && d.shortfall !== null);
+  const key = (d: Dim) => (byHours ? cellValue(d.hours)?.hi ?? -1 : d.shortfall ?? -1);
+  groups.sort((a, b) => key(b[0]!) - key(a[0]!));
+  return { dims: groups.flat(), byHours };
+}
+
+/** The areas in the same order. */
+export function areasByDrag(areas: readonly Area[]): { areas: Area[]; byHours: boolean } {
+  const byHours = !areas.some((a) => a.shortfall !== null);
+  const key = (a: Area) => (byHours ? cellValue(a.hours)?.hi ?? -1 : a.shortfall ?? -1);
+  return { areas: [...areas].sort((a, b) => key(b) - key(a)), byHours };
 }

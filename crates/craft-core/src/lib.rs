@@ -1,10 +1,12 @@
 //! Everything Craft Status knows that isn't network or UI: the per-repo
 //! statistics model, release/download accounting, the urgency heuristic for
-//! open issues, the config file, the on-disk cache and window geometry.
+//! open issues, the parity numbers in each repo's roadmap, the config file,
+//! the on-disk cache and window geometry.
 
 pub mod cache;
 pub mod config;
 pub mod model;
+pub mod parity;
 pub mod releases;
 pub mod urgency;
 
@@ -14,6 +16,7 @@ pub use model::{
     Activity, RepoEntry, RepoStats, Schedule, Snapshot, TokenStatus, UrgentIssue, ALL_TIME,
     SINCE_RELEASE, WINDOWS,
 };
+pub use parity::{Figure, Parity};
 pub use releases::{summarize_releases, Asset, BuildLag, LagBasis, Release, ReleaseSummary};
 pub use urgency::{rank_issues, score_issue, IssueInput, Scored};
 

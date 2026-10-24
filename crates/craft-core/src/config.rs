@@ -36,6 +36,9 @@ pub struct Config {
     pub repos: Vec<String>,
     pub poll_minutes: f64,
     pub stale_minutes: f64,
+    /// The Parity tab marks a repo's documents amber when the oldest Last
+    /// reviewed date is more than this many days old (1 to 365).
+    pub parity_review_warn_days: u32,
     /// Optional, used only when `CRAFT_STATUS_GITHUB_TOKEN`, `GITHUB_TOKEN`
     /// and `GH_TOKEN` are unset; otherwise `gh auth token`.
     pub github_token: String,
@@ -74,6 +77,7 @@ impl Default for Config {
             repos: DEFAULT_REPOS.iter().map(|s| s.to_string()).collect(),
             poll_minutes: 30.0,
             stale_minutes: 60.0,
+            parity_review_warn_days: 14,
             github_token: String::new(),
             window: WindowConfig::default(),
             tray: TrayConfig::default(),
@@ -149,6 +153,7 @@ impl Config {
                 repos.push(r);
             }
         }
+        c.parity_review_warn_days = c.parity_review_warn_days.clamp(1, 365);
         c.repos = repos;
         Ok(c)
     }
@@ -238,6 +243,15 @@ mod tests {
     #[test]
     fn empty_file_is_defaults() {
         assert_eq!(Config::parse("").unwrap(), Config::default());
+    }
+
+    #[test]
+    fn the_parity_review_warning_stays_between_a_day_and_a_year() {
+        let days = |text: &str| Config::parse(text).unwrap().parity_review_warn_days;
+        assert_eq!(days(""), 14);
+        assert_eq!(days("parity_review_warn_days = 0"), 1);
+        assert_eq!(days("parity_review_warn_days = 30"), 30);
+        assert_eq!(days("parity_review_warn_days = 1000"), 365);
     }
 
     #[test]
