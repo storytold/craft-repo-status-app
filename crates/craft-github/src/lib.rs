@@ -431,6 +431,69 @@ impl GitHub {
         }
         Ok(out)
     }
+
+    /// The login of the user the token belongs to, from one
+    /// `viewer { login }` query.
+    pub fn token_login(&self) -> Result<String> {
+        let v = self.graphql("query { viewer { login } }", json!({}))?;
+        v["viewer"]["login"]
+            .as_str()
+            .map(str::to_string)
+            .ok_or_else(|| Error::GraphQl("no login for the token's user".into()))
+    }
+
+    /// The repos owned by `owner` where `login` has an open pull request,
+    /// from one search ([`OPEN_PRS_QUERY`]) read to its last page, and the
+    /// GraphQL points left after it. This is the app's only search; the
+    /// poller sends it once per owner every `poll_minutes`.
+    pub fn open_pr_repos(&self, login: &str, owner: &str) -> Result<OpenPrs> {
+        let q = format!("is:pr is:open author:{login} user:{owner}");
+        walk_open_prs(|after| self.graphql(OPEN_PRS_QUERY, json!({ "q": q, "after": after })))
+    }
+}
+
+/// What [`GitHub::open_pr_repos`] found.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct OpenPrs {
+    /// `owner/name` of each repo with one of the pull requests.
+    pub repos: std::collections::BTreeSet<String>,
+    /// GraphQL points left after the last page.
+    pub graphql_remaining: Option<u64>,
+    /// The search was read to its last page. False when it held more than
+    /// [`SEARCH_PAGES`] pages, so a repo missing from `repos` may still have
+    /// an open pull request.
+    pub complete: bool,
+}
+
+/// Reads [`OPEN_PRS_QUERY`]'s pages, each from `page` given the cursor to
+/// start after (`None` first), until the last page or [`SEARCH_PAGES`].
+pub fn walk_open_prs(mut page: impl FnMut(Option<String>) -> Result<Value>) -> Result<OpenPrs> {
+    let mut out = OpenPrs::default();
+    let mut after = None;
+    for _ in 0..SEARCH_PAGES {
+        let v = page(after.take())?;
+        let conn = &v["search"];
+        out.repos.extend(
+            conn["nodes"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|n| n["repository"]["nameWithOwner"].as_str())
+                .map(str::to_string),
+        );
+        out.graphql_remaining = v["rateLimit"]["remaining"]
+            .as_u64()
+            .or(out.graphql_remaining);
+        if conn["pageInfo"]["hasNextPage"].as_bool() != Some(true) {
+            out.complete = true;
+            break;
+        }
+        after = conn["pageInfo"]["endCursor"].as_str().map(str::to_string);
+        if after.is_none() {
+            break;
+        }
+    }
+    Ok(out)
 }
 
 pub fn parse_contributors(body: &Value) -> Vec<String> {
@@ -947,6 +1010,20 @@ query($owner: String!, $name: String!, $tag: String!, $branch: String!, $at: Git
 }
 "#;
 
+/// Pages of 100 a search may take: GitHub returns at most 1,000 results.
+const SEARCH_PAGES: usize = 10;
+
+/// One page of the pull requests a search finds, by repo.
+const OPEN_PRS_QUERY: &str = r#"
+query($q: String!, $after: String) {
+  search(type: ISSUE, query: $q, first: 100, after: $after) {
+    pageInfo { hasNextPage endCursor }
+    nodes { ... on PullRequest { repository { nameWithOwner } } }
+  }
+  rateLimit { remaining }
+}
+"#;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1216,6 +1293,51 @@ mod tests {
         assert_eq!(RawActivity::load(&dir, "o/r"), raw);
         assert_eq!(RawActivity::load(&dir, "o/missing"), RawActivity::default());
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn the_open_pull_request_search_is_read_to_its_last_page() {
+        let pages = [
+            json!({"search": {"pageInfo": {"hasNextPage": true, "endCursor": "c1"}, "nodes": [
+                {"repository": {"nameWithOwner": "acme/one"}},
+                {"repository": {"nameWithOwner": "acme/two"}},
+                {"repository": {"nameWithOwner": "acme/one"}}
+            ]}, "rateLimit": {"remaining": 4990}}),
+            json!({"search": {"pageInfo": {"hasNextPage": false, "endCursor": "c2"}, "nodes": [
+                {"repository": {"nameWithOwner": "acme/three"}}, {}
+            ]}, "rateLimit": {"remaining": 4989}}),
+        ];
+        let mut cursors = Vec::new();
+        let found = walk_open_prs(|after| {
+            let v = pages[cursors.len()].clone();
+            cursors.push(after);
+            Ok(v)
+        })
+        .unwrap();
+        assert_eq!(cursors, [None, Some("c1".to_string())]);
+        assert_eq!(
+            found.repos.into_iter().collect::<Vec<_>>(),
+            ["acme/one", "acme/three", "acme/two"]
+        );
+        assert_eq!(found.graphql_remaining, Some(4989));
+        assert!(found.complete);
+
+        let mut calls = 0;
+        let failed = walk_open_prs(|_| {
+            calls += 1;
+            Err(Error::RateLimited("later".into()))
+        });
+        assert!(matches!(failed, Err(Error::RateLimited(_))));
+        assert_eq!(calls, 1);
+
+        let mut calls = 0;
+        let endless = walk_open_prs(|_| {
+            calls += 1;
+            Ok(json!({"search": {"pageInfo": {"hasNextPage": true, "endCursor": "again"}, "nodes": []}}))
+        })
+        .unwrap();
+        assert_eq!((calls, endless.graphql_remaining), (SEARCH_PAGES, None));
+        assert!(!endless.complete, "more pages than a search may take");
     }
 
     #[test]
