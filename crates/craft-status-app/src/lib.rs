@@ -119,10 +119,55 @@ fn refresh_repo(app: AppHandle, state: State<AppState>, repo: String) {
 /// Only GitHub links leave the app, and they go to the default browser.
 #[tauri::command]
 fn open_url(url: String) -> Result<(), String> {
-    if !url.starts_with("https://github.com/") {
+    if !is_github_link(&url) {
         return Err(format!("refusing to open {url:?}"));
     }
     open_external(&url)
+}
+
+/// A `https://github.com/` URL made only of the characters RFC 3986 allows,
+/// with each `%` starting a percent-encoded byte.
+fn is_github_link(url: &str) -> bool {
+    let Some(rest) = url.strip_prefix("https://github.com/") else {
+        return false;
+    };
+    let bytes = rest.as_bytes();
+    bytes.iter().enumerate().all(|(i, &c)| match c {
+        b'%' => bytes
+            .get(i + 1..i + 3)
+            .is_some_and(|hex| hex.iter().all(u8::is_ascii_hexdigit)),
+        b'-' | b'.' | b'_' | b'~' | b':' | b'/' | b'?' | b'#' | b'[' | b']' | b'@' => true,
+        b'!' | b'$' | b'&' | b'\'' | b'(' | b')' | b'*' | b'+' | b',' | b';' | b'=' => true,
+        _ => c.is_ascii_alphanumeric(),
+    })
+}
+
+#[cfg(test)]
+mod link_tests {
+    use super::is_github_link;
+
+    #[test]
+    fn opens_only_well_formed_github_links() {
+        assert!(is_github_link("https://github.com/o/app/pulls"));
+        assert!(is_github_link(
+            "https://github.com/o/app/blob/HEAD/docs/parity.md?plain=1#L12"
+        ));
+        assert!(is_github_link(
+            "https://github.com/o/app/blob/HEAD/docs/a%20b.md#colour--fills"
+        ));
+        assert!(is_github_link(
+            "https://github.com/o/app/compare/v1.0...HEAD"
+        ));
+        assert!(!is_github_link("https://example.com/o/app"));
+        assert!(!is_github_link("https://github.com.example.com/o"));
+        assert!(!is_github_link("http://github.com/o/app"));
+        for bad in [
+            "|", "^", "<", ">", "\"", "`", "\\", "{", "}", " ", "\t", "\n", "%", "%2", "%zz", "é",
+        ] {
+            let url = format!("https://github.com/o/app#a{bad}z");
+            assert!(!is_github_link(&url), "{url:?}");
+        }
+    }
 }
 
 #[tauri::command]
@@ -519,10 +564,12 @@ fn open_external(target: &str) -> Result<(), String> {
         c.arg(target);
         c
     };
+    // rundll32 passes the target to the default handler without cmd.exe,
+    // which would parse & | ^ < > and % in it.
     #[cfg(target_os = "windows")]
     let mut cmd = {
-        let mut c = Command::new("cmd");
-        c.args(["/C", "start", ""]).arg(target);
+        let mut c = Command::new("rundll32");
+        c.arg("url.dll,FileProtocolHandler").arg(target);
         c
     };
     #[cfg(all(unix, not(target_os = "macos")))]
