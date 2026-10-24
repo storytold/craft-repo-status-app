@@ -1,15 +1,17 @@
 //! Everything Craft Status knows that isn't network or UI: the per-repo
 //! statistics model, release/download accounting, the urgency heuristic for
-//! open issues, the config file, the on-disk cache and window geometry.
+//! open issues, the pull request records and work states behind the People
+//! tab, the config file, the on-disk cache and window geometry.
 
 pub mod cache;
 pub mod config;
 pub mod model;
+pub mod people;
 pub mod releases;
 pub mod urgency;
 
 pub use cache::Cache;
-pub use config::{Config, WindowState};
+pub use config::{Config, PeopleConfig, WindowState};
 pub use model::{
     Activity, RepoEntry, RepoStats, Schedule, Snapshot, TokenStatus, UrgentIssue, ALL_TIME,
     SINCE_RELEASE, WINDOWS,

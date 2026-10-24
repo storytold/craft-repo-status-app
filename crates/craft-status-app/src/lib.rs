@@ -6,14 +6,33 @@
 //! UI and the cache after each repository lands.
 //! Failed repositories keep their previous numbers; staleness is derived from
 //! each repository's `fetched_at`, so old data is always visibly old.
+//!
+//! A second thread, the People thread ([`spawn_people`]), keeps the pull
+//! request records behind the People tab up to date. After each repository
+//! fetch the poll thread hands it a job ([`PeopleWork`]) and goes on. Its
+//! requests are background requests at the [`Gate`]: they wait while the
+//! poll thread fetches a repository, so they go out in the gaps between
+//! fetches. A rate limit on one of them pauses the poll thread's fetches as
+//! its own would. People data never goes into the [`Snapshot`]; the window
+//! reads it with [`get_people`], [`person_detail`] and [`repo_detail`].
 
+use std::collections::{BTreeMap, HashMap};
+use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{mpsc, Mutex};
-use std::time::{Duration, SystemTime};
+use std::sync::{mpsc, Arc, Condvar, Mutex};
+use std::time::{Duration, Instant, SystemTime};
 
 use chrono::{DateTime, Local, Timelike, Utc};
+use craft_core::people::ledger::Ledger;
+use craft_core::people::rank::{direct, Direct, PersonDetail, Rankings, RepoPeople};
+use craft_core::people::record::PrCache;
+use craft_core::people::roster::{self, RosterRow};
+use craft_core::people::view::{assemble, PeopleView};
+use craft_core::people::Directory;
 use craft_core::{Cache, Config, Schedule, Snapshot, TokenStatus, WindowState};
-use craft_github::{resolve_token, Error as GhError, GitHub, RawActivity};
+use craft_github::gate::PollSession;
+use craft_github::prs::{download_roster, PrEvent, PrInput, Seen, RUN_REQUESTS};
+use craft_github::{resolve_token, Error as GhError, Gate, GitHub, RawActivity};
 use serde::Serialize;
 use tauri::menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
@@ -25,6 +44,8 @@ const TRAY: &str = "main";
 const EV_SNAPSHOT: &str = "craft:snapshot";
 const EV_FOCUS: &str = "craft:focus";
 const EV_META: &str = "craft:meta";
+/// Carries the People tab's view after each update.
+const EV_PEOPLE: &str = "craft:people";
 /// How often the poll thread wakes to check the clock, the config file and
 /// the tray tooltip. Wall-clock based, so a sleeping laptop polls on wake.
 const TICK: Duration = Duration::from_secs(15);
@@ -41,6 +62,8 @@ const BACKOFF_MAX: i64 = 60 * 60;
 /// Below this many GraphQL points left, pause for `LOW_BUDGET_PAUSE`.
 const BUDGET_FLOOR: u64 = 150;
 const LOW_BUDGET_PAUSE: i64 = 30 * 60;
+/// Below this many GraphQL points left, skip requests nobody asked for.
+const OPTIONAL_FLOOR: u64 = 1_500;
 /// Ignore manual refreshes this soon after the previous one.
 const MANUAL_DEBOUNCE: i64 = 15;
 
@@ -52,6 +75,14 @@ pub struct AppState {
     refresh_tx: Mutex<Option<mpsc::Sender<Wake>>>,
     window_state: Mutex<Option<WindowState>>,
     window_dirty: AtomicBool,
+    /// The People tab's view; `None` until the records are read.
+    people: Mutex<Option<Arc<PeopleView>>>,
+    /// The credits and events behind the rankings, for the carets' tables.
+    rankings: Mutex<Option<Arc<Rankings>>>,
+    /// Keeps the People thread's requests out of the poll thread's fetches.
+    gate: Arc<Gate>,
+    /// The People thread's jobs.
+    people_work: Arc<PeopleWork>,
 }
 
 struct TrayItems {
@@ -95,6 +126,34 @@ fn meta(app: &AppHandle) -> Meta {
 #[tauri::command]
 fn get_snapshot(state: State<AppState>) -> Snapshot {
     state.snapshot.lock().unwrap().clone()
+}
+
+/// The People tab's view, or `null` before the records are read.
+#[tauri::command]
+fn get_people(state: State<AppState>) -> Option<PeopleView> {
+    state.people.lock().unwrap().as_deref().cloned()
+}
+
+/// Where `login`'s work went in window `window`: by repository, area, type
+/// and directory, in `repo` alone when it is given; `null` before the
+/// records are read.
+#[tauri::command]
+fn person_detail(
+    state: State<AppState>,
+    login: String,
+    window: String,
+    repo: Option<String>,
+) -> Option<PersonDetail> {
+    let rankings = state.rankings.lock().unwrap().clone()?;
+    Some(rankings.person(&login, &window, repo.as_deref()))
+}
+
+/// Each person's figures in `repo` for window `window`; `null` before the
+/// records are read.
+#[tauri::command]
+fn repo_detail(state: State<AppState>, repo: String, window: String) -> Option<RepoPeople> {
+    let rankings = state.rankings.lock().unwrap().clone()?;
+    Some(rankings.repo(&repo, &window))
 }
 
 #[tauri::command]
@@ -221,6 +280,11 @@ fn reload_config_if_changed(app: &AppHandle) {
             *state.config.lock().unwrap() = cfg.clone();
             apply_window_config(app, &cfg);
             let _ = app.emit(EV_META, meta(app));
+            // The People tab follows the new repos and `[people]` settings.
+            state.people_work.submit(PeopleJob {
+                cfg: cfg.clone(),
+                fetch: false,
+            });
         }
         Err(e) => {
             state.snapshot.lock().unwrap().error = Some(format!("Config error: {e}"));
@@ -357,6 +421,71 @@ fn clock(t: DateTime<Utc>) -> String {
     t.with_timezone(&Local).format("%H:%M").to_string()
 }
 
+/// The [`Instant`] at wall-clock time `t`, or now when `t` has passed.
+fn instant_at(t: DateTime<Utc>) -> Instant {
+    Instant::now() + (t - Utc::now()).to_std().unwrap_or_default()
+}
+
+/// The pause after GitHub rate-limited a request until `until`
+/// (`RateLimited`'s text), counted as one more strike, with the message for
+/// the window.
+fn rate_limited(
+    pacing: &mut Pacing,
+    until: &str,
+    now: DateTime<Utc>,
+) -> (chrono::Duration, String) {
+    pacing.strikes += 1;
+    let backoff = (BACKOFF_MIN << (pacing.strikes - 1).min(8)).min(BACKOFF_MAX);
+    let mut resume = now + chrono::Duration::seconds(backoff);
+    if let Some(end) = rate_limit_end(until, now) {
+        resume = resume.max(end);
+    }
+    let msg = format!("Rate limited by GitHub; pausing until {}", clock(resume));
+    (resume - now, msg)
+}
+
+/// Runs `fetch` in a poll session at `gate`, so the People thread's requests
+/// wait. The session first waits for a People request in flight; when GitHub
+/// rate-limited that one, returns its rate limit without running `fetch`.
+/// The People thread's requests wait until the caller drops the session it
+/// gets back, after it has set any pause.
+fn fetch_in_session(
+    gate: &Gate,
+    fetch: impl FnOnce() -> Result<(), GhError>,
+) -> (PollSession<'_>, Result<(), GhError>) {
+    let session = gate.poll_session();
+    let result = match gate.halted() {
+        Some(until) => Err(GhError::RateLimited(until)),
+        None => fetch(),
+    };
+    (session, result)
+}
+
+/// Pauses the fetches and the background requests for the rate limit the
+/// People thread hit since the last step, if any, as for a rate limit on a
+/// fetch. Returns the message for the window.
+fn people_rate_limit(gate: &Gate, pacing: &mut Pacing, now: DateTime<Utc>) -> Option<String> {
+    let until = gate.halted()?;
+    let (pause, msg) = rate_limited(pacing, &until, now);
+    let resume = now + pause;
+    pacing.not_before = Some(pacing.not_before.map_or(resume, |t| t.max(resume)));
+    gate.pause_until(instant_at(resume), msg.clone());
+    Some(msg)
+}
+
+/// Holds the People thread's requests back after a fetch for as long as the
+/// fetches: until the pause the step set, `pause`, with its message. A
+/// successful fetch (`fetched`) first ends a pause set before it, as when a
+/// manual refresh skipped a token or low-budget pause.
+fn hold_people(gate: &Gate, fetched: bool, pause: Option<(Instant, &str)>) {
+    if fetched {
+        gate.resume();
+    }
+    if let Some((until, msg)) = pause {
+        gate.pause_until(until, msg);
+    }
+}
+
 /// Fetch the most overdue repository, if one is due and pacing allows, and
 /// decide how long to wait before the next.
 fn step(app: &AppHandle, pacing: &mut Pacing) {
@@ -368,11 +497,19 @@ fn step(app: &AppHandle, pacing: &mut Pacing) {
         forced_since: pacing.forced_since,
     };
     let now = Utc::now();
+    let people_limit = people_rate_limit(&state.gate, pacing, now);
     let due = {
         let mut snap = state.snapshot.lock().unwrap();
         snap.sync_repos(&cfg.repos);
         snap.poll_secs = cfg.poll_secs();
         snap.stale_after_secs = cfg.stale_secs();
+        let config_error = snap
+            .error
+            .as_deref()
+            .is_some_and(|e| e.starts_with("Config"));
+        if let (Some(msg), false) = (&people_limit, config_error) {
+            snap.error = Some(msg.clone());
+        }
         let paused = pacing.not_before.is_some_and(|t| now < t);
         // Rows refreshed by hand go first.
         let due = (!paused)
@@ -389,19 +526,15 @@ fn step(app: &AppHandle, pacing: &mut Pacing) {
     };
     if let Some(repo) = &due {
         emit_snapshot(app);
-        let result = fetch_into_snapshot(app, &cfg, repo);
+        let (session, result) =
+            fetch_in_session(&state.gate, || fetch_into_snapshot(app, &cfg, repo));
+        let fetched = result.is_ok();
         let now = Utc::now();
         let mut snap = state.snapshot.lock().unwrap();
         let (pause, error) = match result {
             Err(GhError::RateLimited(until)) => {
-                pacing.strikes += 1;
-                let backoff = (BACKOFF_MIN << (pacing.strikes - 1).min(8)).min(BACKOFF_MAX);
-                let mut resume = now + chrono::Duration::seconds(backoff);
-                if let Some(end) = rate_limit_end(&until, now) {
-                    resume = resume.max(end);
-                }
-                let msg = format!("Rate limited by GitHub; pausing until {}", clock(resume));
-                (resume - now, Some(msg))
+                let (pause, msg) = rate_limited(pacing, &until, now);
+                (pause, Some(msg))
             }
             Err(GhError::Unauthorized) => {
                 let from = snap
@@ -430,6 +563,12 @@ fn step(app: &AppHandle, pacing: &mut Pacing) {
             }
         };
         pacing.not_before = Some(now + pause);
+        // Set before the session ends.
+        let people_pause = error
+            .as_ref()
+            .map(|msg| (instant_at(now + pause), msg.as_str()));
+        hold_people(&state.gate, fetched, people_pause);
+        drop(session);
         snap.refreshing = false;
         snap.fetching = None;
         // Keep a config error up until the file is fixed.
@@ -451,6 +590,14 @@ fn step(app: &AppHandle, pacing: &mut Pacing) {
                 eprintln!("could not save cache: {e}");
             }
         }
+        drop(snap);
+        // The fetch read when the repo's newest pull request was updated.
+        if fetched {
+            state.people_work.submit(PeopleJob {
+                cfg: cfg.clone(),
+                fetch: true,
+            });
+        }
     }
     {
         let mut snap = state.snapshot.lock().unwrap();
@@ -458,7 +605,7 @@ fn step(app: &AppHandle, pacing: &mut Pacing) {
             .next_due_at(&schedule(pacing))
             .map(|t| t.max(Utc::now()))
             .map(|t| pacing.not_before.map_or(t, |p| t.max(p)));
-        if snap.next_refresh_at == next && due.is_none() {
+        if snap.next_refresh_at == next && due.is_none() && people_limit.is_none() {
             return;
         }
         snap.next_refresh_at = next;
@@ -507,6 +654,356 @@ fn spawn_poller(app: AppHandle, rx: mpsc::Receiver<Wake>) {
             }
         })
         .expect("spawn poll thread");
+}
+
+// ───────────────────────────── people ─────────────────────────────
+
+/// One run of the People work, with the config of the step that asked for it.
+struct PeopleJob {
+    cfg: Config,
+    /// Whether the job asks GitHub for changes ([`run_people`]). A job that
+    /// does not works out the view again from the records on disk
+    /// ([`load_people`]), as after a change to the config file.
+    fetch: bool,
+}
+
+/// The People thread's queue: the poll thread hands it a job without
+/// waiting, and the People thread runs the jobs one at a time. A job that
+/// arrives while one runs waits for it, and a newer job replaces it.
+#[derive(Default)]
+struct PeopleWork {
+    queue: Mutex<PeopleQueue>,
+    wake: Condvar,
+}
+
+#[derive(Default)]
+struct PeopleQueue {
+    next: Option<PeopleJob>,
+}
+
+impl PeopleWork {
+    /// Queues `job` in place of any job still waiting. The queued job asks
+    /// GitHub for changes when either of the two does.
+    fn submit(&self, job: PeopleJob) {
+        let mut q = self.queue.lock().unwrap();
+        let fetch = job.fetch || q.next.as_ref().is_some_and(|waiting| waiting.fetch);
+        q.next = Some(PeopleJob { fetch, ..job });
+        self.wake.notify_all();
+    }
+
+    /// Waits for a job and takes it off the queue.
+    fn take(&self) -> PeopleJob {
+        let mut q = self.queue.lock().unwrap();
+        loop {
+            if let Some(job) = q.next.take() {
+                return job;
+            }
+            q = self.wake.wait(q).unwrap();
+        }
+    }
+}
+
+/// What the People thread keeps from one job to the next.
+#[derive(Default)]
+struct PeopleRuns {
+    /// When the last job started.
+    last_start: Option<DateTime<Utc>>,
+    /// The token user's login.
+    viewer: Viewer,
+}
+
+/// The login of the user a GitHub token belongs to, kept while the token
+/// stays the same.
+#[derive(Default)]
+struct Viewer {
+    /// The token the login belongs to.
+    token: String,
+    /// The login: read with one query for the token, then as each sweep
+    /// reads it again; `None` until a query answered.
+    login: Option<String>,
+}
+
+impl Viewer {
+    /// The login for `token`. A new token drops the kept login, and with no
+    /// login kept, `ask` reads it; a failed `ask` is logged and asked again
+    /// by the next call.
+    fn for_token(
+        &mut self,
+        token: &str,
+        ask: impl FnOnce() -> Result<String, GhError>,
+    ) -> Option<&str> {
+        if self.token != token {
+            self.token = token.to_string();
+            self.login = None;
+        }
+        if self.login.is_none() {
+            match ask() {
+                Ok(login) => self.login = Some(login),
+                Err(e) => eprintln!("people: the token's login: {e}"),
+            }
+        }
+        self.login.as_deref()
+    }
+}
+
+/// Starts the People thread, which shows the records on disk
+/// ([`load_people`]), runs a first job, then runs the jobs the poll thread
+/// hands it ([`run_people`] or [`load_people`]).
+fn spawn_people(app: AppHandle) {
+    std::thread::Builder::new()
+        .name("craft-people".into())
+        .spawn(move || {
+            let state = app.state::<AppState>();
+            let cfg = state.config.lock().unwrap().clone();
+            load_people(&app, &cfg, None);
+            state.people_work.submit(PeopleJob { cfg, fetch: true });
+            let mut runs = PeopleRuns::default();
+            loop {
+                let job = state.people_work.take();
+                if job.fetch {
+                    run_people(&app, &job, &mut runs);
+                } else {
+                    load_people(&app, &job.cfg, runs.viewer.login.as_deref());
+                }
+            }
+        })
+        .expect("spawn people thread");
+}
+
+/// Runs one People job ([`update_people`]) with a client whose requests are
+/// background requests at the app's [`Gate`].
+fn run_people(app: &AppHandle, job: &PeopleJob, runs: &mut PeopleRuns) {
+    let state = app.state::<AppState>();
+    let Some(cache) = &state.cache else {
+        return;
+    };
+    let now = Utc::now();
+    // The sweep takes its share for about as long until the next job.
+    let interval = runs
+        .last_start
+        .map_or(job.cfg.poll_secs(), |t| (now - t).num_seconds())
+        .max(REPO_GAP);
+    runs.last_start = Some(now);
+    let client = resolve_token(&job.cfg.github_token)
+        .and_then(|t| Ok((GitHub::new(t.value.clone())?, t.value)));
+    match client {
+        Ok((gh, token)) => {
+            let gh = gh.in_background(state.gate.clone());
+            runs.viewer.for_token(&token, || gh.viewer_login());
+            update_people(
+                app,
+                &gh,
+                &job.cfg,
+                cache.dir(),
+                now,
+                interval,
+                &mut runs.viewer.login,
+            );
+        }
+        Err(e) => eprintln!("people: {e}"),
+    }
+}
+
+/// What the last fetch of each of `repos` saw of its pull requests, for
+/// [`PrInput::seen`] ([`RawActivity::seen`]): `None` for a repo the fetch
+/// could not see, and no entry for one not fetched yet, or whose kept
+/// activity in `dir` an earlier version wrote. Each carries when its repo's
+/// last successful fetch read it.
+fn seen_by_fetches(snap: &Snapshot, repos: &[String], dir: &Path) -> HashMap<String, Option<Seen>> {
+    repos
+        .iter()
+        .filter_map(|repo| {
+            let entry = snap.repos.iter().find(|e| e.repo == *repo)?;
+            if entry.inaccessible {
+                return Some((repo.clone(), None));
+            }
+            entry.fetched_at?;
+            Some((repo.clone(), Some(RawActivity::seen(dir, repo)?)))
+        })
+        .collect()
+}
+
+/// Brings the pull request records in `dir` up to date for the People tab
+/// (see [`GitHub::update_prs`]): the changed lists always, the sweep, the
+/// backfill and the merged and closed walks only while at least
+/// [`OPTIONAL_FLOOR`] GraphQL points are left, with at most [`RUN_REQUESTS`]
+/// requests for the backfill, the walks and the file lists. After each stage
+/// that changed records, sends the People tab its view with the roster kept
+/// from before. At the end reads the roster, sends the People tab its view
+/// ([`publish_people`]) and logs what the job did. `viewer` is the token
+/// user's login, kept from one job to the next.
+fn update_people(
+    app: &AppHandle,
+    gh: &GitHub,
+    cfg: &Config,
+    dir: &Path,
+    now: DateTime<Utc>,
+    interval_secs: i64,
+    viewer: &mut Option<String>,
+) {
+    let state = app.state::<AppState>();
+    let started = Instant::now();
+    let (remaining, seen) = {
+        let snap = state.snapshot.lock().unwrap().clone();
+        let seen = seen_by_fetches(&snap, &cfg.repos, dir);
+        (snap.rate_limit_remaining, seen)
+    };
+    let kept = roster::load_kept(&cfg.people.roster, dir, now);
+    let on_event = |event: PrEvent<'_>| {
+        if let PrEvent::End {
+            stage,
+            caches,
+            changed: true,
+        } = event
+        {
+            eprintln!("people: {} changed records", stage.label());
+            publish_people(app, caches, cfg, &kept.rows, dir, now, viewer.as_deref());
+        }
+    };
+    let (report, mut caches) = gh.update_prs(&PrInput {
+        repos: &cfg.repos,
+        seen: &seen,
+        dir,
+        now,
+        interval_secs,
+        remaining,
+        floor: OPTIONAL_FLOOR,
+        max_requests: RUN_REQUESTS,
+        viewer: viewer.as_deref(),
+        on_event: Some(&on_event),
+    });
+    if report.viewer.is_some() {
+        viewer.clone_from(&report.viewer);
+    }
+    for e in &report.errors {
+        eprintln!("people: {e}");
+    }
+    let roster = roster::load(&cfg.people.roster, dir, now, download_roster);
+    if let Some(e) = &roster.error {
+        eprintln!("people: {e}");
+    }
+    let people = publish_people(
+        app,
+        &mut caches,
+        cfg,
+        &roster.rows,
+        dir,
+        now,
+        viewer.as_deref(),
+    );
+    let held: Vec<(&str, &PrCache)> = caches.iter().map(|(r, c)| (r.as_str(), c)).collect();
+    let events = Ledger::build(&held).events.len();
+    eprintln!(
+        "people in {:.1}s: {} requests ({} smaller retries), {} changed, {} repos swept, {} backfilled, {} commit and check pages, {} merged read, {} closed read, {} file pages{}; {} records ({} to fetch), merged and closed walks done {}/{}; {} people, {} on the roster, {} roster rows not linked; {} events",
+        started.elapsed().as_secs_f64(),
+        report.requests,
+        report.retries,
+        report.changed,
+        report.swept,
+        report.backfilled,
+        report.list_pages,
+        report.merged,
+        report.closed,
+        report.file_pages,
+        if report.low_budget { ", optional requests skipped: GitHub budget low" } else { "" },
+        report.records,
+        report.pending,
+        report.walks_done,
+        caches.len(),
+        people.people.values().filter(|p| !p.bot).count(),
+        people.people.values().filter(|p| p.on_roster).count(),
+        people.unlinked.len(),
+        events,
+    );
+}
+
+/// Works out the People tab's view and the rankings from `caches` (see
+/// [`craft_core::people::view::assemble`]), with each repo's latest build
+/// from the snapshot and its commits outside pull requests from the
+/// activity kept in `dir` ([`direct_of`]), keeps both and sends the view to
+/// the window. The view carries `viewer`, the token user's login, for the
+/// My PRs tab. Returns the directory of people.
+fn publish_people(
+    app: &AppHandle,
+    caches: &mut [(String, PrCache)],
+    cfg: &Config,
+    roster: &[RosterRow],
+    dir: &Path,
+    now: DateTime<Utc>,
+    viewer: Option<&str>,
+) -> Directory {
+    let state = app.state::<AppState>();
+    let builds: HashMap<String, DateTime<Utc>> = {
+        let snap = state.snapshot.lock().unwrap();
+        snap.repos
+            .iter()
+            .filter_map(|e| {
+                Some((
+                    e.repo.to_ascii_lowercase(),
+                    e.stats.as_ref()?.latest_build_at?,
+                ))
+            })
+            .collect()
+    };
+    let direct: BTreeMap<String, Direct> = caches
+        .iter()
+        .map(|(repo, cache)| {
+            (
+                repo.clone(),
+                direct_of(&RawActivity::load(dir, repo), cache),
+            )
+        })
+        .collect();
+    let (mut view, people, rankings) = assemble(
+        caches,
+        &cfg.people,
+        roster,
+        |repo| builds.get(&repo.to_ascii_lowercase()).copied(),
+        &direct,
+        now,
+    );
+    view.viewer = viewer.map(str::to_string);
+    let view = Arc::new(view);
+    *state.people.lock().unwrap() = Some(view.clone());
+    *state.rankings.lock().unwrap() = Some(Arc::new(rankings));
+    let _ = app.emit(EV_PEOPLE, &*view);
+    people
+}
+
+/// A repo's commits outside pull requests: the commits on its default
+/// branch that the kept activity `raw` holds, less every merge commit and
+/// pull request commit in `cache` (see [`direct`]).
+fn direct_of(raw: &RawActivity, cache: &PrCache) -> Direct {
+    let history = raw
+        .commits
+        .iter()
+        .map(|(oid, (at, who))| (oid.as_str(), *at, who.as_str()));
+    direct(history, raw.covers_from, cache)
+}
+
+/// The People tab's view from the records on disk for the repos and the
+/// `[people]` settings of `cfg`, with no request to GitHub: at launch,
+/// before the first job updates the records, and after a change to the
+/// config file. With no records it sends nothing until a view has been
+/// sent. The roster comes from its kept copy or file, without a download
+/// (see [`roster::load_kept`]). `viewer` is the token user's login, as the
+/// last job read it.
+fn load_people(app: &AppHandle, cfg: &Config, viewer: Option<&str>) {
+    let state = app.state::<AppState>();
+    let Some(cache) = &state.cache else { return };
+    let dir = cache.dir();
+    let mut caches: Vec<(String, PrCache)> = cfg
+        .repos
+        .iter()
+        .map(|r| (r.clone(), PrCache::load(dir, r)))
+        .collect();
+    let shown = state.people.lock().unwrap().is_some();
+    if !shown && caches.iter().all(|(_, c)| c.records.is_empty()) {
+        return;
+    }
+    let now = Utc::now();
+    let roster = roster::load_kept(&cfg.people.roster, dir, now);
+    publish_people(app, &mut caches, cfg, &roster.rows, dir, now, viewer);
 }
 
 // ───────────────────────────── window & tray ─────────────────────────────
@@ -776,6 +1273,10 @@ pub fn run() {
         refresh_tx: Mutex::new(Some(tx)),
         window_state: Mutex::new(None),
         window_dirty: AtomicBool::new(false),
+        people: Mutex::new(None),
+        rankings: Mutex::new(None),
+        gate: Arc::new(Gate::new()),
+        people_work: Arc::new(PeopleWork::default()),
     };
 
     tauri::Builder::default()
@@ -783,6 +1284,9 @@ pub fn run() {
         .manage(state)
         .invoke_handler(tauri::generate_handler![
             get_snapshot,
+            get_people,
+            person_detail,
+            repo_detail,
             get_meta,
             refresh_now,
             refresh_repo,
@@ -807,6 +1311,7 @@ pub fn run() {
             apply_window_config(app.handle(), &cfg);
             update_tray(app.handle());
             spawn_poller(app.handle().clone(), rx);
+            spawn_people(app.handle().clone());
             Ok(())
         })
         .on_window_event(|window, event| match event {
@@ -862,6 +1367,247 @@ mod tests {
         let hour = rate_limit_end("the top of the hour", now).unwrap();
         assert_eq!(hour.to_rfc3339(), "2026-10-18T05:00:00+00:00");
         assert!(rate_limit_end("later", now).is_none());
+    }
+
+    #[test]
+    fn a_rate_limit_on_the_people_work_pauses_the_fetches_and_the_people_work() {
+        let gate = Gate::new();
+        let now = Utc::now().with_nanosecond(0).unwrap();
+        let mut pacing = Pacing::default();
+        assert_eq!(people_rate_limit(&gate, &mut pacing, now), None);
+        assert_eq!(pacing.not_before, None, "nothing happened");
+        let end = now + CDuration::minutes(40);
+        gate.halt(end.to_rfc3339());
+        let msg = people_rate_limit(&gate, &mut pacing, now).unwrap();
+        assert!(
+            msg.starts_with("Rate limited by GitHub; pausing until"),
+            "{msg}"
+        );
+        assert_eq!(pacing.strikes, 1);
+        assert_eq!(
+            pacing.not_before,
+            Some(end),
+            "no fetch before GitHub's reset, later than the backoff"
+        );
+        assert!(
+            matches!(gate.background(), Err(GhError::Halted(_))),
+            "background requests wait as long"
+        );
+        assert_eq!(gate.halted(), None, "replaced by the pause");
+        assert_eq!(
+            people_rate_limit(&gate, &mut pacing, now),
+            None,
+            "counted once"
+        );
+        // A second limit doubles the backoff, as on a fetch.
+        gate.halt("later");
+        people_rate_limit(&gate, &mut pacing, now).unwrap();
+        assert_eq!(pacing.strikes, 2);
+        assert_eq!(pacing.not_before, Some(end), "a longer pause stays");
+    }
+
+    #[test]
+    fn a_fetch_does_not_start_after_a_people_request_in_flight_was_rate_limited() {
+        let gate = Arc::new(Gate::new());
+        let permit_taken = Arc::new(std::sync::Barrier::new(2));
+        let people = {
+            let (gate, permit_taken) = (gate.clone(), permit_taken.clone());
+            std::thread::spawn(move || {
+                let permit = gate.background().unwrap();
+                permit_taken.wait();
+                std::thread::sleep(Duration::from_millis(100));
+                // GitHub answers with a rate limit; it is kept before the
+                // permit goes.
+                gate.halt("later");
+                drop(permit);
+            })
+        };
+        permit_taken.wait();
+        let mut fetched = false;
+        let (session, result) = fetch_in_session(&gate, || {
+            fetched = true;
+            Ok(())
+        });
+        people.join().unwrap();
+        assert!(matches!(result, Err(GhError::RateLimited(u)) if u == "later"));
+        assert!(!fetched, "no fetch request went out");
+        // Until the poll thread drops the session, People requests wait;
+        // it sets the pause first.
+        assert!(gate.poll_running());
+        gate.pause_until(
+            Instant::now() + Duration::from_secs(60),
+            "Rate limited by GitHub",
+        );
+        drop(session);
+        assert!(
+            matches!(gate.background(), Err(GhError::Halted(r)) if r == "Rate limited by GitHub"),
+            "the next People request meets the pause"
+        );
+        assert!(
+            fetch_in_session(&gate, || Ok(())).1.is_ok(),
+            "the next fetch runs"
+        );
+    }
+
+    #[test]
+    fn a_successful_fetch_ends_the_pause_of_the_people_work() {
+        let gate = Gate::new();
+        let later = Instant::now() + Duration::from_secs(30 * 60);
+        // A token pause, which a manual refresh skips for the fetches.
+        hold_people(&gate, false, Some((later, "GitHub rejected the token")));
+        assert!(matches!(gate.background(), Err(GhError::Halted(_))));
+        hold_people(&gate, true, None);
+        assert!(gate.background().is_ok(), "the next fetch succeeded");
+        // A fetch that leaves the budget low pauses them again.
+        hold_people(&gate, true, Some((later, "GitHub API budget low")));
+        assert!(
+            matches!(gate.background(), Err(GhError::Halted(r)) if r == "GitHub API budget low")
+        );
+    }
+
+    #[test]
+    fn the_people_work_keeps_only_the_newest_waiting_job() {
+        let work = PeopleWork::default();
+        let job = |minutes: f64, fetch: bool| PeopleJob {
+            cfg: Config {
+                poll_minutes: minutes,
+                ..Config::default()
+            },
+            fetch,
+        };
+        work.submit(job(1.0, true));
+        work.submit(job(2.0, true));
+        assert_eq!(work.take().cfg.poll_minutes, 2.0);
+        work.submit(job(3.0, true));
+        assert_eq!(work.take().cfg.poll_minutes, 3.0, "queued while one ran");
+        // A changed config file replaces a waiting fetch, which still runs
+        // with the new config.
+        work.submit(job(4.0, true));
+        work.submit(job(5.0, false));
+        let next = work.take();
+        assert_eq!((next.cfg.poll_minutes, next.fetch), (5.0, true));
+        work.submit(job(6.0, false));
+        assert!(!work.take().fetch, "only the view is worked out again");
+    }
+
+    #[test]
+    fn the_token_users_login_is_read_once_per_token() {
+        let asked = std::cell::Cell::new(0);
+        let ask = |answer: Result<&str, GhError>| {
+            asked.set(asked.get() + 1);
+            answer.map(str::to_string)
+        };
+        let mut v = Viewer::default();
+        assert_eq!(
+            v.for_token("t1", || ask(Ok("Ann-Example"))),
+            Some("Ann-Example")
+        );
+        assert_eq!(v.for_token("t1", || ask(Ok("other"))), Some("Ann-Example"));
+        assert_eq!(asked.get(), 1, "kept while the token stays the same");
+        // The sweep read it again.
+        v.login = Some("ann-example".into());
+        assert_eq!(v.for_token("t1", || ask(Ok("other"))), Some("ann-example"));
+        assert_eq!(
+            v.for_token("t2", || ask(Err(GhError::Unauthorized))),
+            None,
+            "a new token drops the old login"
+        );
+        assert_eq!(
+            v.for_token("t2", || ask(Ok("Bo-Example"))),
+            Some("Bo-Example")
+        );
+        assert_eq!(asked.get(), 3, "a failed query is asked again");
+    }
+
+    #[test]
+    fn the_changed_lists_follow_what_each_fetch_saw() {
+        let dir = std::env::temp_dir().join(format!("craft-seen-{}", std::process::id()));
+        let now = Utc::now();
+        let repos: Vec<String> = ["o/new", "o/hidden", "o/old", "o/seen", "o/empty"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let mut snap = Snapshot::default();
+        snap.sync_repos(&repos);
+        for e in &mut snap.repos {
+            if e.repo != "o/new" {
+                e.fetched_at = Some(now);
+            }
+            e.inaccessible = e.repo == "o/hidden";
+        }
+        let at = "2026-10-18T09:30:00Z".parse::<DateTime<Utc>>().unwrap();
+        // Its last successful fetch; a failed one since leaves this time.
+        let read = "2026-10-18T09:40:00Z".parse::<DateTime<Utc>>().unwrap();
+        let seen_raw = RawActivity {
+            fetched_at: Some(read),
+            pr_updated_at: Some(at),
+            ..Default::default()
+        };
+        seen_raw.save(&dir, "o/seen").unwrap();
+        // A repo without pull requests.
+        let empty_raw = RawActivity {
+            fetched_at: Some(read),
+            ..Default::default()
+        };
+        empty_raw.save(&dir, "o/empty").unwrap();
+        // Kept by a version that did not read the field.
+        std::fs::write(
+            dir.join("raw").join("o@old.json"),
+            r#"{"fetched_at":"2026-10-18T09:40:00Z","commits":{}}"#,
+        )
+        .unwrap();
+        let seen = seen_by_fetches(&snap, &repos, &dir);
+        assert_eq!(seen.get("o/hidden"), Some(&None), "left out of the update");
+        assert_eq!(
+            seen.get("o/seen"),
+            Some(&Some(Seen {
+                pr_updated_at: Some(at),
+                read_at: read,
+            }))
+        );
+        assert_eq!(
+            seen.get("o/empty"),
+            Some(&Some(Seen {
+                pr_updated_at: None,
+                read_at: read,
+            })),
+            "its changed list is not read"
+        );
+        assert!(
+            !seen.contains_key("o/new") && !seen.contains_key("o/old"),
+            "their changed lists are read"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn the_snapshot_holds_nothing_about_people() {
+        let mut snap = snap_with(&[1], Utc::now());
+        snap.repos[0].stats = Some(Default::default());
+        let json = serde_json::to_value(&snap).unwrap();
+        let mut keys: Vec<&str> = json
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        keys.extend(
+            json["repos"][0]
+                .as_object()
+                .unwrap()
+                .keys()
+                .map(String::as_str),
+        );
+        keys.extend(
+            json["repos"][0]["stats"]
+                .as_object()
+                .unwrap()
+                .keys()
+                .map(String::as_str),
+        );
+        for word in ["people", "viewer", "login", "state", "work", "rank"] {
+            assert!(!keys.iter().any(|k| k.contains(word)), "{word} in {keys:?}");
+        }
     }
 
     #[test]
