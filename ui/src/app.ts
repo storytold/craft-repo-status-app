@@ -3,7 +3,7 @@
 
 import {
   COLUMNS, RECENT, WINDOWS, MANUAL, windowById, value, orderedEntries, nextSort, dropIndex,
-  freshness, ago, totals, urgentAcross, tokenStatus, isRefreshing,
+  freshness, ago, totals, urgentAcross, tokenStatus, isRefreshing, mainCiFailing, mainCiText, mainCiTip, mainCiUrl,
 } from './model.ts';
 import type { Column, Meta, RepoEntry, Snapshot, Sort } from './model.ts';
 
@@ -121,6 +121,13 @@ export function start(api: Api): () => void {
     if (col.key === 'fetched') {
       const age = v ? el('span', { title: `Fetched ${localTime(String(v))}` }, ago(String(v))) : el('span', { class: 'muted', title: 'Not fetched yet' }, '—');
       return el('span', { class: 'fetched' }, age, rowRefresh(entry));
+    }
+    if (col.key === 'main_ci' && !entry.inaccessible) {
+      const ci = entry.main_ci;
+      const failing = mainCiFailing(ci);
+      const title = mainCiTip(ci, localTime);
+      if (failing === null) return el('span', { class: 'muted', title }, mainCiText(ci));
+      return el('span', { class: failing ? 'ci-fail' : 'ci-ok', title }, link(mainCiText(ci), mainCiUrl(entry.repo, ci)));
     }
     if (!s) return entry.inaccessible ? document.createTextNode('') : el('span', { class: 'muted' }, '—');
     switch (col.key) {

@@ -12,7 +12,7 @@ use std::sync::{mpsc, Mutex};
 use std::time::{Duration, SystemTime};
 
 use chrono::{DateTime, Local, Timelike, Utc};
-use craft_core::{Cache, Config, Schedule, Snapshot, TokenStatus, WindowState};
+use craft_core::{Cache, Config, MainCi, Schedule, Snapshot, TokenStatus, WindowState};
 use craft_github::{resolve_token, Error as GhError, GitHub, RawActivity};
 use serde::Serialize;
 use tauri::menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem};
@@ -41,6 +41,8 @@ const BACKOFF_MAX: i64 = 60 * 60;
 /// Below this many GraphQL points left, pause for `LOW_BUDGET_PAUSE`.
 const BUDGET_FLOOR: u64 = 150;
 const LOW_BUDGET_PAUSE: i64 = 30 * 60;
+/// Below this many GraphQL points left, skip requests nobody asked for.
+const OPTIONAL_FLOOR: u64 = 1_500;
 /// Ignore manual refreshes this soon after the previous one.
 const MANUAL_DEBOUNCE: i64 = 15;
 
@@ -258,6 +260,17 @@ fn fetch_into_snapshot(app: &AppHandle, cfg: &Config, repo: &str) -> Result<(), 
         .map(|d| RawActivity::load(d, repo))
         .unwrap_or_default();
     let result = gh.fetch_repo(repo, now, &mut raw);
+    // Read before the raw cache is saved, which keeps the runs' ETags.
+    let main_ci = match &result {
+        Ok((_, budget)) if optional_requests_allowed(budget.graphql_remaining) => {
+            Some(read_main_ci(&gh, repo, &mut raw, now))
+        }
+        _ => None,
+    };
+    let ci_limited = match &main_ci {
+        Some(Err(GhError::RateLimited(until))) => Some(until.clone()),
+        _ => None,
+    };
     if let (Ok(_), Some(dir)) = (&result, &raw_dir) {
         if let Err(e) = raw.save(dir, repo) {
             eprintln!("{repo}: could not save raw cache: {e}");
@@ -300,6 +313,11 @@ fn fetch_into_snapshot(app: &AppHandle, cfg: &Config, repo: &str) -> Result<(), 
                     }
                     None => {}
                 }
+                match main_ci {
+                    Some(Ok(ci)) => entry.main_ci = ci,
+                    Some(Err(e)) => eprintln!("{repo}: main CI: {e}"),
+                    None => {}
+                }
                 entry.stats = Some(stats);
                 entry.fetched_at = Some(now);
                 entry.error = None;
@@ -310,6 +328,7 @@ fn fetch_into_snapshot(app: &AppHandle, cfg: &Config, repo: &str) -> Result<(), 
                 entry.stats = None;
                 entry.icon = None;
                 entry.icon_oid = None;
+                entry.main_ci = None;
                 entry.fetched_at = Some(now);
                 entry.error = None;
                 entry.inaccessible = true;
@@ -327,7 +346,12 @@ fn fetch_into_snapshot(app: &AppHandle, cfg: &Config, repo: &str) -> Result<(), 
             if left.is_some() {
                 snap.rate_limit_remaining = left;
             }
-            Ok(())
+            // The repo's numbers are stored. When GitHub rate-limited the CI
+            // requests, `step` pauses the next fetch.
+            match ci_limited {
+                Some(until) => Err(GhError::RateLimited(until)),
+                None => Ok(()),
+            }
         }
         Err(GhError::Unauthorized) => {
             if let Some(t) = snap.token.as_mut() {
@@ -337,6 +361,27 @@ fn fetch_into_snapshot(app: &AppHandle, cfg: &Config, repo: &str) -> Result<(), 
         }
         Err(e) => Err(e),
     }
+}
+
+/// Whether a fetch that left `left` GraphQL points may send optional
+/// requests, such as the workflow runs on the default branch: not below
+/// [`OPTIONAL_FLOOR`].
+fn optional_requests_allowed(left: Option<u64>) -> bool {
+    left.is_none_or(|r| r >= OPTIONAL_FLOOR)
+}
+
+/// `repo`'s workflow results on its default branch, read into the runs `raw`
+/// keeps; `None` for a repository without a default branch.
+fn read_main_ci(
+    gh: &GitHub,
+    repo: &str,
+    raw: &mut RawActivity,
+    now: DateTime<Utc>,
+) -> Result<Option<MainCi>, GhError> {
+    let Some(branch) = raw.default_branch.clone() else {
+        return Ok(None);
+    };
+    gh.main_ci(repo, &branch, &mut raw.http.runs, now).map(Some)
 }
 
 /// When a rate limit GitHub reported (`RateLimited`'s text) lifts.
@@ -862,6 +907,14 @@ mod tests {
         let hour = rate_limit_end("the top of the hour", now).unwrap();
         assert_eq!(hour.to_rfc3339(), "2026-10-18T05:00:00+00:00");
         assert!(rate_limit_end("later", now).is_none());
+    }
+
+    #[test]
+    fn optional_requests_wait_while_the_budget_is_low() {
+        assert!(!optional_requests_allowed(Some(OPTIONAL_FLOOR - 1)));
+        assert!(!optional_requests_allowed(Some(0)));
+        assert!(optional_requests_allowed(Some(OPTIONAL_FLOOR)));
+        assert!(optional_requests_allowed(None), "GitHub sent no count");
     }
 
     #[test]
