@@ -60,7 +60,13 @@ sort by a column again.
   people.
 - **Fix first** (`⌘2`) ranks open issues across every repo. Each issue shows
   the reasons behind its score. Click a row in the Repos table to filter the
-  list to that repo. Click an issue to open it on GitHub.
+  list to that repo. Click an issue to open it on GitHub. The caret on a
+  Repos row shows the repo's people and open work under the row instead (see
+  [The People tab](#the-people-tab)).
+- **People** (`⌘4`) shows one row per person with their open pull requests
+  by work state, who each one waits on, and their flow and reviews in a
+  window, or the rankings. The tab's badge counts the open pull requests held
+  for the owner. See [The People tab](#the-people-tab).
 - **Freshness**: the header shows when the oldest data on screen was fetched,
   and a pill that reads `FRESH`, `REFRESHING` or **`STALE`**. Data is stale
   when any repo has gone `stale_minutes` (default 15) without a successful
@@ -89,6 +95,134 @@ Issues labelled `wontfix`, `duplicate` or `invalid` are dropped. For each
 repo, the 100 newest open issues and the 30 most-commented open issues are
 scored.
 
+### The People tab
+
+Every open pull request has one work state, decided by the rules in
+`crates/craft-core/src/people/states.rs` in order: the author stepped back,
+held for the owner, a maintainer's own task, declined in a comment,
+superseded, parked by the author, depends on another pull request, draft, not
+ready, competing pull requests, move to craft-libs, changes requested by a
+maintainer, changes requested by a community reviewer, merge conflict,
+workflow approval, CI failing (from the pull request or inherited from
+`main`), CI running, author answered, community approved, ready to merge and
+awaiting a first response. The first rule that matches gives the state; every
+later match is listed on hover. A maintainer request made at or after a hold
+outranks the hold and waits on both the author and the owner. In repos listed
+in `people.rebase_repos`, a conflict on a contributor's pull request that
+maintainers can push to is a flag.
+
+States read from GitHub fields (draft, mergeability, checks) show plainly.
+States read from comment text carry a dotted underline. Hovering one shows
+the rule, the matched sentence (up to 200 characters) with its author and
+date, the phrase that matched, and the other states that matched; clicking it
+opens the comment on GitHub. A `?` marks low confidence: the two author
+states, a competitor found only through a shared issue, and a close with no
+maintainer response. Counts give the part read from comments, as in
+`3 (2 from comments)`.
+
+A pull request the app has found but whose comments, reviews and events it
+has not read yet shows as **Not read yet**, under its author, with when GitHub
+last saw it change. It waits on nobody, and no rule decides its state until
+the app reads it. Until every record is read, the bar shows
+`N of M timelines read`.
+
+The columns are Open, On them (pull requests waiting on the person: their own
+that wait on the author, ones where they made the last maintainer request or
+comment, and holds they own), On others, Held, Merged, Landed elsewhere,
+Closed (without merging, folded parents and accidental closes left out), To
+merge (median), Landed (merged plus landed elsewhere over everything closed),
+They answer (their median time to answer a maintainer request; a rebase or
+split request is answered only by a push), First response (the median time
+to the first maintainer comment, review or merge on their pull requests) and
+Reviews given. The window picker sets the window for flow and reviews; the
+response times cover all time. The repo picker limits every figure to one
+repo. Every column sorts. A name from the team roster (`people.roster`)
+shows next to the login.
+
+The search box in the bar (`⌘F`) filters the work view and Rankings as you
+type, by GitHub login, roster name, the roster's Discord name, and repo.
+Every word has to match. In Rankings, a repo matches the people listed in
+that repo's own figures, co-authors included. The bar shows how many people
+match, as in `3 of 12 people`, and `Esc` clears the search.
+
+**Group by repo**, next to the Work and Rankings buttons, shows one section
+per repo with that repo's people and each person's figures in that repo. A
+section's header row gives its people count and the totals of the columns
+that add up; its caret collapses the section. Sorting applies inside each
+section, and the search keeps a person in a section when the words match them
+or the section's repo. The app remembers the choice and the collapsed
+sections. In Rankings, the sections come from the same per-repo figures as
+the caret on a Repos row, and their header rows leave Co-authored, Active days
+and PRs reviewed blank.
+
+The caret on a person opens one row per repo and the person's detail: open
+work by state, grouped by who it waits on, with the median and longest time in
+state and the five oldest items; the work of others that waits on them; their
+pull requests held for the owner, with the hold's age, who placed it, its
+reason (design, policy, brand, packaging, library, dependency or owner
+decision) and when it was last held again, and the ones they parked
+themselves; their response times and unanswered requests; the reviews,
+requests, holds, merges and closes they gave; their flow by subtype and
+outcome; and where their work went (see below). The bar also shows how old
+the records are, in the alert color past `stale_minutes` or while a repo has
+never been checked.
+
+**Rankings** (the second button in the bar) lists one row per person for
+the window picked, with a selector for three rankings. Every column sorts.
+
+- **Merged**: their merged pull requests; pull requests that landed elsewhere;
+  product lines added and removed, split by commit author; lines in
+  `Cargo.lock`, translation catalogs and `contributors/contributors.json` in a
+  column of their own; changed files; commits they authored in merged pull
+  requests; commits whose `Co-authored-by:` trailer names them (AI co-authors
+  are left out); commits on `main` that belong to no pull request; and active
+  days (UTC days with a commit, a merge or a review). Direct commits come from
+  the history of `main` that the app keeps, so they show for the 7-day and
+  release windows only, once every merged pull request is loaded, and `—`
+  otherwise.
+- **Maintainer**: merges, credited to the merge commit's committer when
+  someone pushed a local merge and to GitHub's merged-by otherwise; reviews of
+  other people's pull requests, split into approved, changes requested and
+  commented, with the number of pull requests reviewed; and review commits
+  (commits in someone else's pull request) with their lines. A merge count
+  with batch merges carries a badge such as `14 in batch pushes`.
+- **Type**: their merged pull requests by type (feature, fix, docs, tests, ci,
+  packaging, dependency, i18n, refactor, perf, release) and product work
+  (feature plus fix). The picker next to the selector sorts by one type. A
+  `?` marks counts whose type a fallback rule decided; hovering it says so.
+
+A merged pull request's product lines are split over its non-merge commits by
+each commit's share of the commits' lines. A commit that an earlier merged
+pull request in the same repo holds counts there only. A commit without a
+linked account, and a pull request whose commits past the first 100 are not
+read yet, credit their share to the author. The type and area come from
+`crates/craft-core/src/people/kind.rs`: the title's Conventional Commits type
+or `Area:` prefix, `Fix #N:`, the changed paths, refactor and perf words, the
+branch prefix and fix words, in that order. In repos listed in
+`people.batch_repos`, merge and landed counts carry an `*` marking them
+unverified. Roster rows without a GitHub login and co-author names without an
+account are listed under the table. While the first load of merged and closed
+pull requests runs, the bar shows how many of each are loaded.
+
+The caret on a person, in Rankings and in the work view, shows where their
+work went in the window: by repository (with their merges, reviews and review
+commits), by area, by type and by directory (two path segments under
+`crates/` and `apps/`, translation catalogs grouped as `translations`). With a
+repo picked, and in a repo section of the grouped view, the tables cover that
+repo alone. Each row gives their merged pull requests, their product lines and
+their share of their own total. Click a directory, or press `Enter` or `Space`
+on it, to list its modules under `src/`. Hover an area or a type for the rule
+that decided it.
+
+The caret on a row of the Repos table shows that repo's people for the table's
+window, with their merges, reviews and review commits, and its open work: open
+pull requests by who they wait on and state, the oldest one waiting on a
+maintainer and the first-response queue, the pull requests held for the owner,
+the maintainer and author queues, the checks on `main`, the flow in the window
+(merged by subtype, landed elsewhere, closed by outcome, median time to merge
+and to the first maintainer response, merge methods and mergers), aging and
+stale counts, and pull requests that wait on or compete with another.
+
 ## Polling and cache
 
 - The app fetches one repo at a time, 20 s apart: first any repo with no data
@@ -112,6 +246,26 @@ scored.
   within about 15 s.
 - `⌘R` or the ⟳ button makes every repo due at once; they are still fetched
   one at a time, stalest first, and a rate-limit pause still holds.
+- The People tab's pull request records are kept up to date by a thread of
+  their own. At launch and after each successful repo fetch, it reads the
+  changed pull requests of the repos whose newest pull request update moved
+  (the fetch reads that time with its other counts), sweeps the open pull
+  requests of a share of the repos so that each is swept every 30 minutes,
+  reads the records the sweep found (yours first, then the most recently
+  updated), and continues the first load of merged and closed pull
+  requests. It reads commit lists and the checks on a head commit in pages
+  of 100, one request a page. Its requests go one at a
+  time and only while no repo is being fetched, so they fill the 20 s gaps.
+  Each run sends at most 30 requests for the reading, the first load and long
+  commit, check and file lists, and below 1,500 points left it reads only the
+  changed lists.
+  When GitHub cannot finish a query (a server error, or an error that names
+  a timeout), it asks again for a smaller page, or splits the batch in two.
+  If GitHub rate-limits one of its requests, fetching
+  pauses as after a rate limit of its own. `craft-fetch --people` runs one
+  such update and prints what it read; quit the app before running it,
+  because both write the same record files. `craft-fetch --states` prints the
+  work states of the kept records without a request.
 - Two caches in `~/Library/Caches/craft-status/` survive restarts:
   - `raw/<owner>@<repo>.json`: each repo's commit authors, PRs and issues
     from the last week (or since the latest build). Each poll fetches only
@@ -120,6 +274,9 @@ scored.
   - `snapshot.json`: what the window shows, saved after each repo. On launch
     the window shows it at once, marked `STALE` if it's old. Repos whose
     data is still fresh aren't refetched at launch.
+  - `prs/<owner>@<repo>.json`: each repo's pull request records for the
+    People tab, saved after each stage of an update; `roster.json` keeps a
+    downloaded roster for an hour. People data stays out of `snapshot.json`.
 - The GitHub token comes from the first of `$CRAFT_STATUS_GITHUB_TOKEN`,
   `$GITHUB_TOKEN` and `$GH_TOKEN` that is set, then from `github_token` in the
   config, then from `gh auth token`. The app is started by launchd, not a
@@ -137,6 +294,10 @@ The app behaves like the Todo app:
 - The window is chrome-less and semi-transparent, and it appears on every
   Space. It remembers its position and size in `~/.craft_status_state.toml`.
 - `Esc` hides the window.
+- `⌘1`, `⌘2` and `⌘4` switch to Repos, Fix first and People.
+- In the People tab, `⌘F` moves to the search box. There `Esc` clears the
+  search when there is one, then leaves the search box, and then hides the
+  window.
 
 ## Configuration: `~/.craft_status_config.toml`
 
@@ -144,6 +305,26 @@ The app creates this file from
 [`craft_status_config.template.toml`](craft_status_config.template.toml) the
 first time it launches. It re-reads the file before each poll, so edits to the
 repo list or the intervals take effect without a restart.
+
+The `[people]` table sets up the People tab:
+
+- `roster` (default empty): the team roster, as the `https://` URL of a
+  sheet's CSV export or a CSV file path. Columns are found by their header:
+  `GitHub` for the login, `Discord` with `user` or `handle`, the first other
+  column with `name` for the display name, `time zone` or `timezone`, and
+  `focus`. The app reads it at runtime; a downloaded copy is kept for an hour.
+- `owner_logins` (default none): the owners of every repo that
+  `[people.repo_owners]` does not list; a pull request held for the owner
+  waits on them. Without owners, a hold waits on a login named after "owner"
+  in the hold's sentence.
+- `[people.repo_owners]`: owners by repo (`"owner/name" = ["login"]`), in
+  place of `owner_logins`. An empty list means no owners.
+- `maintainers` (default none): logins counted as maintainers of every repo,
+  besides the ones found from membership, merges and closes.
+- `rebase_repos`: repos whose maintainers rebase contributors' branches
+  themselves.
+- `batch_repos`: repos that land work through a batch branch; their merge and
+  landed counts are marked unverified.
 
 ## Build, install, test
 
