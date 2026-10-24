@@ -216,6 +216,21 @@ test('clicking a row, or barely moving it, opens its urgent issues', async () =>
   assert.equal(stored(h, 'order'), null, 'a click is not a reorder');
 });
 
+test('links are anchors the keyboard can reach, and opening one leaves the window where it is', async () => {
+  const h = await setup();
+  const link = h.row('gamma').querySelector<HTMLAnchorElement>('.repo .link')!;
+  assert.equal(link.tagName, 'A');
+  assert.equal(link.getAttribute('href'), 'https://github.com/o/gamma');
+  const click = new h.win.MouseEvent('click', { bubbles: true, cancelable: true }) as unknown as Event;
+  link.dispatchEvent(click);
+  assert.ok(click.defaultPrevented, 'the host opens the URL, not the webview');
+  const middle = new h.win.MouseEvent('auxclick', { bubbles: true, cancelable: true, button: 1 }) as unknown as Event;
+  link.dispatchEvent(middle);
+  assert.ok(middle.defaultPrevented, 'a middle click opens no second window');
+  assert.equal(h.view(), 'repos');
+  assert.deepEqual(h.calls.filter((c) => c.cmd === 'open_url').map((c) => c.args?.url), ['https://github.com/o/gamma']);
+});
+
 test('links in a row open on GitHub without dragging or switching views', async () => {
   const h = await setup();
   const link = h.row('gamma').querySelector<HTMLElement>('.repo .link')!;
@@ -327,6 +342,18 @@ test('urgent view lists every repo’s issues, filters to critical, and opens th
   assert.equal(stored(h, 'criticalOnly'), true);
   h.doc.querySelector<HTMLElement>('.urgent-item')!.click();
   assert.equal(h.calls.at(-1)?.args?.url, 'https://github.com/o/x/issues/1');
+});
+
+test('urgent issues can be reached with Tab and opened with Enter', async () => {
+  const h = await setup();
+  h.doc.querySelector<HTMLElement>('[data-view="urgent"]')!.click();
+  const item = h.doc.querySelectorAll<HTMLElement>('.urgent-item')[1]!;
+  assert.equal(item.tabIndex, 0);
+  assert.equal(item.getAttribute('role'), 'link');
+  item.dispatchEvent(new h.win.KeyboardEvent('keydown', { key: 'a', bubbles: true }) as unknown as Event);
+  assert.ok(!h.calls.some((c) => c.cmd === 'open_url'), 'other keys do nothing');
+  item.dispatchEvent(new h.win.KeyboardEvent('keydown', { key: 'Enter', bubbles: true }) as unknown as Event);
+  assert.deepEqual(h.calls.filter((c) => c.cmd === 'open_url').map((c) => c.args?.url), ['https://github.com/o/x/issues/3']);
 });
 
 // ───────────────────────────── host ─────────────────────────────

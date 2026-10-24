@@ -93,12 +93,18 @@ export function start(api: Api): () => void {
   };
 
   function openUrl(url: string, ev?: Event): void {
+    ev?.preventDefault();
     ev?.stopPropagation();
     api.invoke('open_url', { url }).catch((e: unknown) => console.warn(e));
   }
 
+  // A real anchor, so Tab reaches it and Enter opens it; the host opens the URL and the webview stays put.
   const link = (text: string, url: string, cls = ''): HTMLElement =>
-    el('span', { class: `link ${cls}`, onclick: (e: Event) => openUrl(url, e) }, text);
+    el('a', {
+      class: `link ${cls}`, href: url, draggable: 'false',
+      onclick: (e: Event) => openUrl(url, e),
+      onauxclick: (e: Event) => e.preventDefault(),
+    }, text);
 
   /** The repo's app icon; repos without one (libraries) get a lettered tile, unfetched ones a blank. */
   function appIcon(entry: Pick<RepoEntry, 'repo'> & Partial<RepoEntry>): HTMLElement {
@@ -334,7 +340,11 @@ export function start(api: Api): () => void {
     const SEVERE = /crash|panic|freeze|hang|data loss|corruption|won't|blank|security/;
     $('urgent-list').replaceChildren(...items.map((u) => {
       const a = Math.min(1, u.score / 90) * 0.5;
-      return el('li', { class: `urgent-item${u.critical ? ' critical' : ''}`, onclick: () => openUrl(u.url), title: u.url },
+      return el('li', {
+        class: `urgent-item${u.critical ? ' critical' : ''}`, title: u.url, tabindex: '0', role: 'link',
+        onclick: () => openUrl(u.url),
+        onkeydown: (e: KeyboardEvent) => { if (e.key === 'Enter') openUrl(u.url, e); },
+      },
         el('span', { class: 'score', style: `background: rgb(var(--hot-rgb) / ${a.toFixed(2)})` }, String(u.score)),
         el('span', { class: 'u-repo' }, appIcon(snap.repos.find((r) => r.repo === u.repo) ?? { repo: u.repo }), shortName(u.repo)),
         el('div', { class: 'u-title' },
