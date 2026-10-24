@@ -5,8 +5,6 @@
 // What the Rust poller sends: mirrors crates/craft-core/src/model.rs.
 // Timestamps are RFC 3339 strings.
 
-export type Time = string;
-
 export interface Activity {
   commits: number;
   prs_opened: number;
@@ -25,8 +23,8 @@ export interface UrgentIssue {
   number: number;
   title: string;
   url: string;
-  created_at: Time | null;
-  updated_at: Time | null;
+  created_at: string | null;
+  updated_at: string | null;
   comments: number;
   reactions: number;
   labels: string[];
@@ -38,13 +36,13 @@ export interface UrgentIssue {
 export interface RepoStats {
   open_prs: number;
   open_issues: number;
-  last_commit_at: Time | null;
-  last_issue_at: Time | null;
-  oldest_open_pr_at: Time | null;
-  newest_pr_at: Time | null;
+  last_commit_at: string | null;
+  last_issue_at: string | null;
+  oldest_open_pr_at: string | null;
+  newest_pr_at: string | null;
   recent: Record<string, Activity>;
   latest_build: string | null;
-  latest_build_at: Time | null;
+  latest_build_at: string | null;
   latest_build_prerelease: boolean;
   latest_build_sha: string | null;
   since_build: BuildLag | null;
@@ -59,8 +57,8 @@ export interface RepoStats {
 export interface RepoEntry {
   repo: string;
   stats: RepoStats | null;
-  fetched_at: Time | null;
-  last_attempt_at?: Time | null;
+  fetched_at: string | null;
+  last_attempt_at?: string | null;
   error?: string | null;
   inaccessible?: boolean;
   icon?: string | null;
@@ -69,9 +67,9 @@ export interface RepoEntry {
 
 export interface Snapshot {
   repos: RepoEntry[];
-  last_full_refresh_at: Time | null;
+  last_full_refresh_at: string | null;
   refreshing: boolean;
-  next_refresh_at: Time | null;
+  next_refresh_at: string | null;
   poll_secs: number;
   stale_after_secs: number;
   rate_limit_remaining: number | null;
@@ -203,9 +201,11 @@ export type Dir = 'asc' | 'desc';
 /** The table's order: by a column, or `MANUAL` (the rows as last dragged). */
 export type Sort = { key: string; dir?: Dir };
 
+const VERSION_REGEX = /^(\d+)(?:\.(\d+))?(?:\.(\d+))?(?:-([A-Za-z]*)\.?(\d+)?)?/;
+
 /** `v0.10.2-rc.1` → [0, 10, 2, -1, 1] so pre-releases sort below the release. */
 export function versionKey(tag: string): number[] {
-  const m = String(tag).replace(/^v/i, '').match(/^(\d+)(?:\.(\d+))?(?:\.(\d+))?(?:-([A-Za-z]*)\.?(\d+)?)?/);
+  const m = VERSION_REGEX.exec(String(tag).replace(/^v/i, ''));
   if (!m) return [-1];
   return [+m[1]!, +(m[2] ?? 0), +(m[3] ?? 0), m[4] !== undefined ? -1 : 0, +(m[5] ?? 0)];
 }
@@ -320,7 +320,7 @@ export function tokenStatus(token: TokenStatus | null | undefined): { text: stri
 // ───────────────────────────── formatting ─────────────────────────────
 
 /** "now", "45s", "12m", "3h", "5d", "2y" — compact for table cells. */
-export function ago(iso: Time | null | undefined, now: number = Date.now()): string {
+export function ago(iso: string | null | undefined, now: number = Date.now()): string {
   if (!iso) return '';
   const s = Math.max(0, (now - Date.parse(iso)) / 1000);
   if (s < 10) return 'now';

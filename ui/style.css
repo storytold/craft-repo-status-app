@@ -32,7 +32,7 @@
 }
 
 * { box-sizing: border-box; }
-[hidden] { display: none !important; }
+[hidden] { display: none; }
 html, body { margin: 0; height: 100%; overflow: hidden; background: transparent; }
 body { font: 12px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; color: var(--fg); -webkit-font-smoothing: antialiased; }
 button, select { color: inherit; font: inherit; cursor: pointer; }
@@ -92,7 +92,7 @@ tbody tr { cursor: pointer; }
 tbody tr:hover td { background-color: var(--row-hover); }
 tbody tr:hover td:first-child { background-image: linear-gradient(var(--row-hover), var(--row-hover)); }
 tbody tr:hover td:first-child::before { content: '⠿'; position: absolute; left: 3px; color: var(--muted); opacity: .6; cursor: grab; }
-body.reordering, body.reordering * { cursor: grabbing !important; user-select: none; -webkit-user-select: none; }
+body.reordering, body.reordering * { cursor: grabbing; user-select: none; -webkit-user-select: none; }
 body.reordering tbody tr:not(.dragging) td { background-color: transparent; background-image: none; }
 body.reordering tbody tr:not(.dragging) td:first-child { background-color: rgb(var(--bg)); }
 tbody tr.dragging td { background-color: var(--surface); box-shadow: inset 0 1px 0 var(--accent), inset 0 -1px 0 var(--accent); }

@@ -5,7 +5,7 @@ import {
   COLUMNS, RECENT, WINDOWS, MANUAL, windowById, value, orderedEntries, nextSort, dropIndex,
   freshness, ago, totals, urgentAcross, tokenStatus, isRefreshing,
 } from './model.ts';
-import type { Column, Meta, RepoEntry, Snapshot, Sort } from './model.ts';
+import type { BuildLag, Column, Meta, RepoEntry, RepoStats, Snapshot, Sort, Value } from './model.ts';
 
 /** What the UI needs from the host: Tauri commands and events, window chrome. */
 export interface Api {
@@ -45,16 +45,38 @@ function save(k: string, v: unknown): void {
 type Child = Node | string | null | undefined | false;
 type Props = Record<string, unknown>;
 
+function setAttr(n: HTMLElement, k: string, v: string | number | boolean): void {
+  if (k === 'class') n.className = String(v);
+  else n.setAttribute(k, String(v));
+}
+
+function setProp(n: HTMLElement, k: string, v: unknown): void {
+  if (v === undefined || v === null || v === false) return;
+  if (k === 'dataset' && typeof v === 'object') {
+    Object.assign(n.dataset, v);
+    return;
+  }
+  if (k.startsWith('on') && typeof v === 'function') {
+    n.addEventListener(k.slice(2), v as EventListener);
+    return;
+  }
+  if (typeof v === 'string' || typeof v === 'number' || typeof v === 'boolean') {
+    setAttr(n, k, v);
+  }
+}
+
+function appendKids(n: HTMLElement, kids: (Child | Child[])[]): void {
+  for (const kid of kids.flat()) {
+    if (kid !== null && kid !== undefined && kid !== false) {
+      n.append(kid);
+    }
+  }
+}
+
 function el<K extends keyof HTMLElementTagNameMap>(tag: K, props: Props = {}, ...kids: (Child | Child[])[]): HTMLElementTagNameMap[K] {
   const n = document.createElement(tag);
-  for (const [k, v] of Object.entries(props)) {
-    if (v === undefined || v === null || v === false) continue;
-    if (k === 'class') n.className = String(v);
-    else if (k === 'dataset') Object.assign(n.dataset, v);
-    else if (k.startsWith('on')) n.addEventListener(k.slice(2), v as EventListener);
-    else n.setAttribute(k, String(v));
-  }
-  for (const kid of kids.flat()) if (kid !== null && kid !== undefined && kid !== false) n.append(kid);
+  for (const [k, v] of Object.entries(props)) setProp(n, k, v);
+  appendKids(n, kids);
   return n;
 }
 
@@ -66,6 +88,78 @@ const gh = (repo: string, path = ''): string => `https://github.com/${repo}${pat
 const shortName = (repo: string): string => repo.split('/').pop() ?? repo;
 const classes = (...cs: (string | false | null | undefined)[]): string => cs.filter(Boolean).join(' ');
 const DAY = 86400e3;
+const SEVERE = /crash|panic|freeze|hang|data loss|corruption|won't|blank|security/;
+
+function groupStart(i: number): string {
+  return i > 0 && COLUMNS[i - 1]!.group !== COLUMNS[i]!.group ? 'group-start' : '';
+}
+
+function repoTooltip(entry: RepoEntry): string {
+  if (entry.error) return `Last attempt failed: ${entry.error}`;
+  if (entry.inaccessible) return 'Not accessible (private, or not found)';
+  if (entry.fetched_at) return `Fetched ${localTime(entry.fetched_at)}`;
+  return 'Not fetched yet';
+}
+
+function commitsSinceBuildTip(lag: BuildLag, latestBuild: string | null, v: Value): string {
+  const short = (sha: string | null) => sha?.slice(0, 7);
+  if (lag.basis === 'exact') {
+    return `${num(v)} commits on main since ${latestBuild} (${short(lag.from_sha)})`;
+  }
+  if (lag.basis === 'branched') {
+    return `${latestBuild}’s commit isn’t on main: ~${num(v)} commits on main since the two split`;
+  }
+  const fromShaText = lag.from_sha ? `, counted from ${short(lag.from_sha)}` : '';
+  return `${latestBuild}’s commit shares no history with main: ~${num(v)} commits on main are newer than it${fromShaText}`;
+}
+
+function footCellText(c: Column, i: number, repoCount: number, t: Record<string, number>): string {
+  if (i === 0) return `${repoCount} repos`;
+  if (c.kind === 'num') return num(Math.round(t[c.key] ?? 0));
+  return '';
+}
+
+function failedSummary(failing: RepoEntry[]): string | null {
+  if (!failing.length) return null;
+  const count = failing.length;
+  const plural = count > 1 ? 's' : '';
+  const details = failing.map((r) => `${shortName(r.repo)} (${r.error})`).join('; ');
+  return `${count} repo${plural} failed last poll: ${details}`;
+}
+
+function nextFetchText(snap: Snapshot): string {
+  if (snap.refreshing) return 'Fetching from GitHub…';
+  if (snap.next_refresh_at) {
+    const mins = Math.round(snap.poll_secs / 60);
+    return `Next fetch ${clock(Date.parse(snap.next_refresh_at))} · each repo every ${mins} min`;
+  }
+  return '';
+}
+
+function updateFreshPill(snap: Snapshot, stale: boolean): void {
+  const pill = $('fresh-pill');
+  if (snap.refreshing) {
+    pill.className = 'pill refreshing';
+    pill.textContent = 'REFRESHING';
+  } else if (stale) {
+    pill.className = 'pill stale';
+    pill.textContent = 'STALE';
+  } else {
+    pill.className = 'pill fresh';
+    pill.textContent = 'FRESH';
+  }
+}
+
+function formatRefreshedText(oldest: number | null, last: number | null): string {
+  if (oldest === null) {
+    return last ? `Partial data · last full refresh ${clock(last)}` : 'No data yet';
+  }
+  let text = `Data as of ${clock(oldest)} (${ago(new Date(oldest).toISOString())} ago)`;
+  if (last && Math.abs(last - oldest) > 60e3) {
+    text += ` · last full refresh ${clock(last)}`;
+  }
+  return text;
+}
 
 /** The toolbar's refresh arrow, as an element (SVG needs its namespace). */
 function refreshIcon(): SVGSVGElement {
@@ -107,66 +201,6 @@ export function start(api: Api): () => void {
     return el('span', { class: 'app-icon none', 'aria-hidden': 'true' }, shortName(entry.repo).charAt(0).toUpperCase());
   }
 
-  /** Cell content for a column. */
-  function cell(entry: RepoEntry, col: Column): Node {
-    const v = value(entry, col.key, state.window);
-    const s = entry.stats;
-    if (col.key === 'name') {
-      const tip = entry.error
-        ? `Last attempt failed: ${entry.error}`
-        : entry.inaccessible ? 'Not accessible (private, or not found)'
-        : entry.fetched_at ? `Fetched ${localTime(entry.fetched_at)}` : 'Not fetched yet';
-      return el('span', { class: 'repo', title: tip }, el('span', { class: 'dot' }), appIcon(entry), link(String(v), gh(entry.repo)));
-    }
-    if (col.key === 'fetched') {
-      const age = v ? el('span', { title: `Fetched ${localTime(String(v))}` }, ago(String(v))) : el('span', { class: 'muted', title: 'Not fetched yet' }, '—');
-      return el('span', { class: 'fetched' }, age, rowRefresh(entry));
-    }
-    if (!s) return entry.inaccessible ? document.createTextNode('') : el('span', { class: 'muted' }, '—');
-    switch (col.key) {
-      case 'urgency': {
-        const a = Math.min(1, Number(v) / 350) * 0.45;
-        return el('span', { class: 'urgency', style: `background: rgb(var(--hot-rgb) / ${a.toFixed(2)})` }, String(Math.round(Number(v))));
-      }
-      case 'critical_issues': return el('span', { class: v ? 'crit' : 'zero' }, num(v));
-      case 'open_prs': return link(num(v), gh(entry.repo, '/pulls'));
-      case 'open_issues': return link(num(v), gh(entry.repo, '/issues'));
-      case 'recent_commits': case 'recent_prs': case 'recent_merged': case 'recent_issues': case 'recent_people':
-        if (v === null) {
-          const why = state.window === 'release' && !s.latest_build ? 'No release yet' : 'Not fetched yet for this window';
-          return el('span', { class: 'muted', title: why }, '—');
-        }
-        return el('span', {
-          class: v ? 'active' : 'zero',
-          title: state.window === 'release' ? `Since ${s.latest_build}, published ${localTime(s.latest_build_at)} (${ago(s.latest_build_at)} ago)` : null,
-        }, num(v));
-      case 'commits_since_build': {
-        const lag = s.since_build;
-        if (!lag) return el('span', { class: 'muted' }, '—');
-        const short = (sha: string | null) => sha?.slice(0, 7);
-        const tip = {
-          exact: `${num(v)} commits on main since ${s.latest_build} (${short(lag.from_sha)})`,
-          branched: `${s.latest_build}’s commit isn’t on main: ~${num(v)} commits on main since the two split`,
-          by_date: `${s.latest_build}’s commit shares no history with main: ~${num(v)} commits on main are newer than it`
-            + (lag.from_sha ? `, counted from ${short(lag.from_sha)}` : ''),
-        }[lag.basis];
-        const from = lag.basis === 'by_date' ? lag.from_sha : s.latest_build;
-        const text = `${lag.basis === 'exact' ? '' : '~'}${num(v)}`;
-        return el('span', { title: tip }, from ? link(text, gh(entry.repo, `/compare/${encodeURIComponent(from)}...HEAD`), v ? '' : 'zero') : text);
-      }
-      case 'latest_build':
-        if (!v) return el('span', { class: 'muted' }, '—');
-        return el('span', {}, link(String(v), gh(entry.repo, `/releases/tag/${encodeURIComponent(v)}`)),
-          s.latest_build_prerelease ? el('span', { class: 'pre' }, 'PRE') : null);
-    }
-    if (col.kind === 'date') {
-      if (!v) return el('span', { class: 'muted' }, '—');
-      const old = col.key === 'oldest_open_pr_at' && Date.now() - Date.parse(String(v)) > 14 * DAY;
-      return el('span', { title: localTime(String(v)), class: old ? 'old' : '' }, ago(String(v)));
-    }
-    return document.createTextNode(num(v));
-  }
-
   /** The tiny button that refetches just this row. */
   function rowRefresh(entry: RepoEntry): HTMLButtonElement {
     const busy = state.snap ? isRefreshing(state.snap, entry.repo) : false;
@@ -180,6 +214,82 @@ export function start(api: Api): () => void {
         api.invoke('refresh_repo', { repo: entry.repo }).catch((err: unknown) => console.warn(err));
       },
     }, refreshIcon());
+  }
+
+  const nameCell = (entry: RepoEntry, v: Value): HTMLElement =>
+    el('span', { class: 'repo', title: repoTooltip(entry) }, el('span', { class: 'dot' }), appIcon(entry), link(String(v), gh(entry.repo)));
+
+  const fetchedCell = (entry: RepoEntry, v: Value): HTMLElement => {
+    const age = v ? el('span', { title: `Fetched ${localTime(String(v))}` }, ago(String(v))) : el('span', { class: 'muted', title: 'Not fetched yet' }, '—');
+    return el('span', { class: 'fetched' }, age, rowRefresh(entry));
+  };
+
+  const urgencyCell = (v: Value): HTMLElement => {
+    const a = Math.min(1, Number(v) / 350) * 0.45;
+    return el('span', { class: 'urgency', style: `background: rgb(var(--hot-rgb) / ${a.toFixed(2)})` }, String(Math.round(Number(v))));
+  };
+
+  const recentCell = (s: RepoStats, v: Value, window: string): HTMLElement => {
+    if (v === null) {
+      const why = window === 'release' && !s.latest_build ? 'No release yet' : 'Not fetched yet for this window';
+      return el('span', { class: 'muted', title: why }, '—');
+    }
+    const title = window === 'release' && s.latest_build
+      ? `Since ${s.latest_build}, published ${localTime(s.latest_build_at)} (${ago(s.latest_build_at)} ago)`
+      : null;
+    return el('span', { class: v ? 'active' : 'zero', title }, num(v));
+  };
+
+  const commitsSinceBuildCell = (entry: RepoEntry, s: RepoStats, v: Value): HTMLElement => {
+    const lag = s.since_build;
+    if (!lag) return el('span', { class: 'muted' }, '—');
+    const tip = commitsSinceBuildTip(lag, s.latest_build, v);
+    const from = lag.basis === 'by_date' ? lag.from_sha : s.latest_build;
+    const text = `${lag.basis === 'exact' ? '' : '~'}${num(v)}`;
+    const cls = v ? '' : 'zero';
+    const content = from ? link(text, gh(entry.repo, `/compare/${encodeURIComponent(from)}...HEAD`), cls) : text;
+    return el('span', { title: tip }, content);
+  };
+
+  const latestBuildCell = (entry: RepoEntry, s: RepoStats, v: Value): HTMLElement => {
+    if (!v) return el('span', { class: 'muted' }, '—');
+    const pre = s.latest_build_prerelease ? el('span', { class: 'pre' }, 'PRE') : null;
+    return el('span', {}, link(String(v), gh(entry.repo, `/releases/tag/${encodeURIComponent(String(v))}`)), pre);
+  };
+
+  const dateCell = (col: Column, v: Value): HTMLElement => {
+    if (!v) return el('span', { class: 'muted' }, '—');
+    const old = col.key === 'oldest_open_pr_at' && Date.now() - Date.parse(String(v)) > 14 * DAY;
+    return el('span', { title: localTime(String(v)), class: old ? 'old' : '' }, ago(String(v)));
+  };
+
+  function statsCell(entry: RepoEntry, s: RepoStats, col: Column, v: Value): Node {
+    switch (col.key) {
+      case 'urgency': return urgencyCell(v);
+      case 'critical_issues': return el('span', { class: v ? 'crit' : 'zero' }, num(v));
+      case 'open_prs': return link(num(v), gh(entry.repo, '/pulls'));
+      case 'open_issues': return link(num(v), gh(entry.repo, '/issues'));
+      case 'recent_commits':
+      case 'recent_prs':
+      case 'recent_merged':
+      case 'recent_issues':
+      case 'recent_people':
+        return recentCell(s, v, state.window);
+      case 'commits_since_build': return commitsSinceBuildCell(entry, s, v);
+      case 'latest_build': return latestBuildCell(entry, s, v);
+    }
+    if (col.kind === 'date') return dateCell(col, v);
+    return document.createTextNode(num(v));
+  }
+
+  /** Cell content for a column. */
+  function cell(entry: RepoEntry, col: Column): Node {
+    const v = value(entry, col.key, state.window);
+    if (col.key === 'name') return nameCell(entry, v);
+    if (col.key === 'fetched') return fetchedCell(entry, v);
+    const s = entry.stats;
+    if (!s) return entry.inaccessible ? document.createTextNode('') : el('span', { class: 'muted' }, '—');
+    return statsCell(entry, s, col, v);
   }
 
   // ───────────────────────────── rendering ─────────────────────────────
@@ -229,10 +339,6 @@ export function start(api: Api): () => void {
     }, WINDOWS.map((w) => el('option', { value: w.id }, w.label)));
   }
 
-  function groupStart(i: number): string {
-    return i > 0 && COLUMNS[i - 1]!.group !== COLUMNS[i]!.group ? 'group-start' : '';
-  }
-
   function renderTable(snap: Snapshot): void {
     renderHead();
     const rows = orderedEntries(snap.repos, state.sort, state.order, state.window);
@@ -256,7 +362,7 @@ export function start(api: Api): () => void {
     }
     const t = totals(snap.repos, state.window);
     $('tfoot').replaceChildren(el('tr', {}, COLUMNS.map((c, i) =>
-      el('td', { class: groupStart(i) }, i === 0 ? `${snap.repos.length} repos` : c.kind === 'num' ? num(Math.round(t[c.key] ?? 0)) : ''))));
+      el('td', { class: groupStart(i) }, footCellText(c, i, snap.repos.length, t)))));
   }
 
   // ───────────────────────────── row dragging ─────────────────────────────
@@ -331,7 +437,6 @@ export function start(api: Api): () => void {
     sel.value = state.urgentRepo;
     $<HTMLInputElement>('critical-only').checked = state.criticalOnly;
     const items = urgentAcross(snap.repos, { repo: state.urgentRepo, criticalOnly: state.criticalOnly });
-    const SEVERE = /crash|panic|freeze|hang|data loss|corruption|won't|blank|security/;
     $('urgent-list').replaceChildren(...items.map((u) => {
       const a = Math.min(1, u.score / 90) * 0.5;
       return el('li', { class: `urgent-item${u.critical ? ' critical' : ''}`, onclick: () => openUrl(u.url), title: u.url },
@@ -350,18 +455,9 @@ export function start(api: Api): () => void {
 
   function renderStatus(snap: Snapshot): void {
     const { oldest, stale } = freshness(snap);
-    const pill = $('fresh-pill');
-    if (snap.refreshing) { pill.className = 'pill refreshing'; pill.textContent = 'REFRESHING'; }
-    else if (stale) { pill.className = 'pill stale'; pill.textContent = 'STALE'; }
-    else { pill.className = 'pill fresh'; pill.textContent = 'FRESH'; }
+    updateFreshPill(snap, stale);
     const last = snap.last_full_refresh_at ? Date.parse(snap.last_full_refresh_at) : null;
-    let text: string;
-    if (oldest === null) text = last ? `Partial data · last full refresh ${clock(last)}` : 'No data yet';
-    else {
-      text = `Data as of ${clock(oldest)} (${ago(new Date(oldest).toISOString())} ago)`;
-      if (last && Math.abs(last - oldest) > 60e3) text += ` · last full refresh ${clock(last)}`;
-    }
-    $('refreshed').textContent = text;
+    $('refreshed').textContent = formatRefreshedText(oldest, last);
     $('refreshed').title = [
       `Oldest data on screen: ${oldest ? localTime(new Date(oldest).toISOString()) : '—'}`,
       `Last full refresh: ${localTime(snap.last_full_refresh_at) || '—'}`,
@@ -369,16 +465,11 @@ export function start(api: Api): () => void {
     ].join('\n');
     $('refresh').classList.toggle('spinning', !!snap.refreshing);
 
-    const failing = snap.repos.filter((r) => r.error);
-    const msgs = [
-      snap.error,
-      failing.length ? `${failing.length} repo${failing.length > 1 ? 's' : ''} failed last poll: ${failing.map((r) => `${shortName(r.repo)} (${r.error})`).join('; ')}` : null,
-    ].filter(Boolean);
+    const msgs = [snap.error, failedSummary(snap.repos.filter((r) => r.error))].filter(Boolean);
     $('banner').hidden = !msgs.length;
     $('banner').textContent = msgs.join(' — ');
 
-    $('next').textContent = snap.refreshing ? 'Fetching from GitHub…'
-      : snap.next_refresh_at ? `Next fetch ${clock(Date.parse(snap.next_refresh_at))} · each repo every ${Math.round(snap.poll_secs / 60)} min` : '';
+    $('next').textContent = nextFetchText(snap);
     $('budget').textContent = snap.rate_limit_remaining != null ? `GitHub budget ${num(snap.rate_limit_remaining)}` : '';
     const token = tokenStatus(snap.token);
     $('token').textContent = token.text;
