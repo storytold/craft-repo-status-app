@@ -11,8 +11,8 @@ pub mod urgency;
 pub use cache::Cache;
 pub use config::{Config, WindowState};
 pub use model::{
-    Activity, RepoEntry, RepoStats, Schedule, Snapshot, TokenStatus, UrgentIssue, ALL_TIME,
-    SINCE_RELEASE, WINDOWS,
+    Activity, MainCi, MainRun, MainWorkflow, RepoEntry, RepoStats, Schedule, Snapshot, TokenStatus,
+    UrgentIssue, ALL_TIME, SINCE_RELEASE, WINDOWS,
 };
 pub use releases::{summarize_releases, Asset, BuildLag, LagBasis, Release, ReleaseSummary};
 pub use urgency::{rank_issues, score_issue, IssueInput, Scored};

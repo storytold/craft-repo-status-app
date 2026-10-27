@@ -120,6 +120,59 @@ pub struct RepoEntry {
     pub icon: Option<String>,
     /// The blob `icon` was downloaded from; compared with `stats.icon_oid`.
     pub icon_oid: Option<String>,
+    /// The latest result of each workflow on the default branch; `None`
+    /// until read.
+    pub main_ci: Option<MainCi>,
+}
+
+/// The latest result of each GitHub Actions workflow on a repository's
+/// default branch.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct MainCi {
+    /// The default branch the runs were listed for.
+    pub branch: String,
+    /// One per active workflow with a result, by name.
+    pub workflows: Vec<MainWorkflow>,
+    /// When GitHub last answered, an unchanged answer included.
+    pub checked_at: Option<Time>,
+}
+
+/// One workflow's latest result: its newest completed run on the default
+/// branch that was not canceled or skipped, with every other such run of
+/// the workflow on the same commit and event created within 60 s of it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct MainWorkflow {
+    pub workflow_id: u64,
+    /// The workflow's name from its definition, such as `CI` or
+    /// `Dependabot Updates`.
+    pub name: String,
+    /// The workflow file, such as `.github/workflows/ci.yml`.
+    pub path: String,
+    /// Newest first.
+    pub runs: Vec<MainRun>,
+}
+
+/// A completed workflow run on the default branch. Scheduled and manual runs
+/// count; pull request runs do not.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct MainRun {
+    /// GitHub's run id, which grows with each new run; a re-run keeps it.
+    pub run_id: u64,
+    /// GitHub's conclusion: `success`, `failure`, `timed_out`,
+    /// `startup_failure`, `action_required`, `neutral` or `stale`.
+    pub conclusion: String,
+    /// What started the run: `push`, `schedule`, `workflow_dispatch`…
+    pub event: String,
+    pub head_sha: String,
+    /// The run's title, such as the commit message or a Dependabot job.
+    pub title: String,
+    /// When the run last changed, which for a completed run is when it
+    /// finished.
+    pub at: Option<Time>,
+    pub url: String,
 }
 
 impl RepoEntry {
@@ -351,6 +404,17 @@ mod tests {
             .insert(SINCE_RELEASE.into(), Activity::default());
         e.stats = Some(stats);
         assert!(!e.is_hole());
+    }
+
+    #[test]
+    fn a_cache_without_main_ci_loads_and_is_not_a_hole() {
+        let old = r#"{"repos":[{"repo":"o/a","fetched_at":"2026-10-18T00:00:00Z"}]}"#;
+        let s: Snapshot = serde_json::from_str(old).unwrap();
+        assert_eq!(s.repos[0].main_ci, None);
+        assert!(
+            !s.repos[0].is_hole(),
+            "Main CI is read with a fetch, never for one"
+        );
     }
 
     #[test]

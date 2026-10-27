@@ -13,7 +13,11 @@
 //! after the first poll those queries fetch only what's new;
 //! one (usually) REST call for the contributor list, which GraphQL lacks.
 //! The icon itself is a REST blob fetch, made only when its blob id changes
-//! (see [`GitHub::icon`]). Blocking I/O: callers run this on worker threads.
+//! (see [`GitHub::icon`]). The workflow runs on the default branch are read
+//! on their own ([`GitHub::main_ci`]). Blocking I/O: callers run this on
+//! worker threads.
+
+pub mod ci;
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -26,9 +30,11 @@ use craft_core::{
     RepoStats, ALL_TIME, SINCE_RELEASE, WINDOWS,
 };
 use reqwest::blocking::Client;
-use reqwest::header::{HeaderMap, ACCEPT, AUTHORIZATION, USER_AGENT};
+use reqwest::header::{HeaderMap, ACCEPT, AUTHORIZATION, ETAG, IF_NONE_MATCH, USER_AGENT};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+
+pub use ci::CachedRuns;
 
 const API: &str = "https://api.github.com";
 /// How many ranked issues each repo keeps for the Urgent view.
@@ -122,6 +128,8 @@ fn env_or_config_token(configured: &str, env: impl Fn(&str) -> Option<String>) -
 pub struct GitHub {
     http: Client,
     token: String,
+    /// Base URL of the API: [`API`], or a local stub in tests.
+    api: String,
 }
 
 /// Rate-limit bookkeeping returned alongside each repo.
@@ -130,13 +138,35 @@ pub struct Budget {
     pub graphql_remaining: Option<u64>,
 }
 
+/// The answer to a REST GET sent with `If-None-Match`.
+#[derive(Debug)]
+enum Conditional {
+    /// 304: the stored copy is still current.
+    NotModified,
+    Fresh {
+        etag: Option<String>,
+        body: Value,
+    },
+    /// 204 No Content.
+    Empty,
+}
+
 impl GitHub {
     pub fn new(token: String) -> Result<GitHub> {
+        Self::with_api(token, API)
+    }
+
+    /// A client that sends its requests to `api` instead of api.github.com.
+    fn with_api(token: String, api: &str) -> Result<GitHub> {
         let http = Client::builder()
             .timeout(Duration::from_secs(30))
             .connect_timeout(Duration::from_secs(10))
             .build()?;
-        Ok(GitHub { http, token })
+        Ok(GitHub {
+            http,
+            token,
+            api: api.to_string(),
+        })
     }
 
     fn headers(&self) -> HeaderMap {
@@ -194,7 +224,7 @@ impl GitHub {
         let started = std::time::Instant::now();
         let sent = self
             .http
-            .post(format!("{API}/graphql"))
+            .post(format!("{}/graphql", self.api))
             .headers(self.headers())
             .json(&json!({ "query": query, "variables": variables }))
             .send();
@@ -217,6 +247,33 @@ impl GitHub {
             }
         }
         Ok(v["data"].clone())
+    }
+
+    /// GET `url` with the usual headers, sending `etag` as `If-None-Match`
+    /// when there is one.
+    fn get_conditional(&self, url: &str, etag: Option<&str>) -> Result<Conditional> {
+        let mut req = self.http.get(url).headers(self.headers());
+        if let Some(etag) = etag {
+            req = req.header(IF_NONE_MATCH, etag);
+        }
+        let resp = req.send()?;
+        // `check` treats a 304 as an error.
+        if resp.status().as_u16() == 304 {
+            return Ok(Conditional::NotModified);
+        }
+        let resp = Self::check(resp)?;
+        if resp.status().as_u16() == 204 {
+            return Ok(Conditional::Empty);
+        }
+        let etag = resp
+            .headers()
+            .get(ETAG)
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_string);
+        Ok(Conditional::Fresh {
+            etag,
+            body: resp.json()?,
+        })
     }
 
     /// Everything the UI shows for `owner/name`, measured at `now`. `raw` is
@@ -244,9 +301,13 @@ impl GitHub {
         if full {
             fresh = RawActivity {
                 full_at: Some(now),
+                http: fresh.http,
                 ..Default::default()
             };
         }
+        fresh.default_branch = main["repository"]["defaultBranchRef"]["name"]
+            .as_str()
+            .map(str::to_string);
         fresh.commits.extend(self.authors(owner, name, from)?);
         self.events(owner, name, from, &mut fresh)?;
         fresh.covers_from = Some(since);
@@ -275,7 +336,7 @@ impl GitHub {
     pub fn icon(&self, repo: &str, oid: &str) -> Result<String> {
         let resp = self
             .http
-            .get(format!("{API}/repos/{repo}/git/blobs/{oid}"))
+            .get(format!("{}/repos/{repo}/git/blobs/{oid}", self.api))
             .headers(self.headers())
             .send()?;
         let v: Value = Self::check(resp)?.json()?;
@@ -412,7 +473,8 @@ impl GitHub {
             let resp = self
                 .http
                 .get(format!(
-                    "{API}/repos/{repo}/contributors?per_page=100&anon=1&page={page}"
+                    "{}/repos/{repo}/contributors?per_page=100&anon=1&page={page}",
+                    self.api
                 ))
                 .headers(self.headers())
                 .send()?;
@@ -613,6 +675,21 @@ pub struct RawActivity {
     pub prs_opened: BTreeMap<u64, DateTime<Utc>>,
     pub prs_merged: BTreeMap<u64, DateTime<Utc>>,
     pub issues_opened: BTreeMap<u64, DateTime<Utc>>,
+    /// The default branch's name at the last fetch; `None` for an empty
+    /// repository.
+    pub default_branch: Option<String>,
+    /// REST answers kept for conditional requests. A fetch from scratch
+    /// keeps them.
+    pub http: HttpCache,
+}
+
+/// What the last REST requests returned, kept so the next fetch can skip
+/// unchanged downloads. Holds the parsed results, not the response bodies.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct HttpCache {
+    /// The default branch's workflow runs ([`GitHub::main_ci`]).
+    pub runs: Option<CachedRuns>,
 }
 
 impl RawActivity {
@@ -1233,5 +1310,34 @@ mod tests {
         assert!(s.recent.values().all(|a| *a == Activity::default()));
         s.recent.clear();
         assert_eq!(s, RepoStats::default());
+    }
+
+    /// A client of a server on 127.0.0.1 that answers one connection with
+    /// each of `responses`, in order, and sends back the head of each request
+    /// it read, in lowercase. Once `responses` run out, connections fail.
+    pub(crate) fn stub(responses: Vec<String>) -> (GitHub, std::sync::mpsc::Receiver<String>) {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let api = format!("http://{}", listener.local_addr().unwrap());
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            for response in responses {
+                let Ok((mut conn, _)) = listener.accept() else {
+                    return;
+                };
+                conn.set_read_timeout(Some(Duration::from_secs(5))).ok();
+                let mut head = Vec::new();
+                let mut buf = [0; 1024];
+                while !head.windows(4).any(|w| w == b"\r\n\r\n") {
+                    match conn.read(&mut buf) {
+                        Ok(0) | Err(_) => break,
+                        Ok(n) => head.extend_from_slice(&buf[..n]),
+                    }
+                }
+                conn.write_all(response.as_bytes()).ok();
+                let _ = tx.send(String::from_utf8_lossy(&head).to_lowercase());
+            }
+        });
+        (GitHub::with_api("t".into(), &api).unwrap(), rx)
     }
 }
