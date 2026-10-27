@@ -10,6 +10,7 @@
   --warn: #b7741a;
   --bad: #d23c3c;
   --hot-rgb: 210 60 60;
+  --flash-rgb: 47 111 224;
   --lib: #7a4fd0;
   --row-hover: rgba(47, 111, 224, .06);
   --opacity: .96;
@@ -26,6 +27,7 @@
     --warn: #f4bc70;
     --bad: #ff8f8f;
     --hot-rgb: 255 110 110;
+    --flash-rgb: 91 157 255;
     --lib: #b59bff;
     --row-hover: rgba(91, 157, 255, .07);
   }
@@ -104,6 +106,10 @@ body.reordering tbody tr:not(.dragging) td:first-child::before { content: none; 
 .app-icon.pending { background: var(--surface); }
 tr.stale .repo .dot { background: var(--warn); }
 tr.error .repo .dot { background: var(--bad); }
+tr.fetching .repo .dot { background: var(--accent); animation: pulse 1.2s ease-in-out infinite; }
+td.changed { animation: cell-flash 2.5s ease-out; }
+@keyframes cell-flash { from { box-shadow: inset 0 0 0 100vmax rgb(var(--flash-rgb) / .3); } to { box-shadow: inset 0 0 0 100vmax rgb(var(--flash-rgb) / 0); } }
+@media (prefers-reduced-motion: reduce) { tr.fetching .repo .dot { animation: none; } td.changed { animation: none; box-shadow: inset 0 0 0 100vmax rgb(var(--flash-rgb) / .18); } }
 tr.stale td:not(:first-child) { opacity: .55; }
 .muted { color: var(--muted); }
 .fetched { display: inline-flex; align-items: center; gap: 3px; }
