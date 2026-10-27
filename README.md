@@ -61,10 +61,11 @@ sort by a column again.
 - **Fix first** (`⌘2`) ranks open issues across every repo. Each issue shows
   the reasons behind its score. Click a row in the Repos table to filter the
   list to that repo. Click an issue to open it on GitHub.
-- **Freshness**: the header shows when the oldest data on screen was fetched,
-  and a pill that reads `FRESH`, `REFRESHING` or **`STALE`**. Data is stale
-  when any repo has gone `stale_minutes` (default 15) without a successful
-  fetch. A stale row is dimmed and gets an amber dot; a failed row gets a red
+- **Freshness**: the header shows when the oldest data on screen was fetched
+  or last checked, and a pill that reads `FRESH`, `REFRESHING` or
+  **`STALE`**. Data is stale when any repo has gone `stale_minutes` (default
+  60) without a successful fetch or a check that found nothing changed. A
+  stale row is dimmed and gets an amber dot; a failed row gets a red
   dot, and its error appears in the banner. The tray tooltip also says
   whether the data is stale.
 
@@ -100,6 +101,21 @@ scored.
   request. It never uses search, which GitHub limits far more tightly (to
   about 30 a minute); PR and issue counts per window come from walking the
   recent PRs and issues.
+- When repos fall due, the app first reads a few values for all of them in
+  one GraphQL request: the commit at the head of the default branch, the
+  issue and PR counts, when the most recently updated issue and PR were
+  updated, and the newest release. When a repo's values match the ones read
+  before its last fetch, the app does not fetch it. It computes the repo's
+  numbers again from that fetch at the time of the check: the activity
+  windows move to that time, and issues are ranked by their age then. The
+  Fetched column still shows the age of the last full fetch; its tooltip adds
+  the time of the last check that found nothing changed. The app fetches the
+  repo anyway when the six-hourly fetch from scratch is due, when its last
+  fetch failed, when the commits kept in `raw/` do not match the commit
+  counts GitHub reported for each window, and when you refresh its row from
+  the Fetched column. Reactions, download counts and edits to older releases
+  do not change these values, so those numbers can be up to six hours plus
+  one `poll_minutes` interval old.
 - Each repo's icon is `assets/app-icon/hicolor/64x64/apps/*.png` on its default
   branch. It is downloaded once and again only when the file changes; it's
   kept in the cache. Repos without one (libraries) get a lettered tile.
@@ -111,12 +127,15 @@ scored.
 - Timing follows the wall clock, so a laptop that wakes from sleep polls
   within about 15 s.
 - `⌘R` or the ⟳ button makes every repo due at once; they are still fetched
-  one at a time, stalest first, and a rate-limit pause still holds.
+  one at a time, stalest first, and a rate-limit pause still holds. Repos
+  that the check above finds unchanged are not fetched.
 - Two caches in `~/Library/Caches/craft-status/` survive restarts:
   - `raw/<owner>@<repo>.json`: each repo's commit authors, PRs and issues
     from the last week (or since the latest build). Each poll fetches only
     what's new since the previous one, and refetches from scratch every six
-    hours to drop deleted issues and pick up late-dated commits.
+    hours to drop deleted issues and pick up late-dated commits. The file
+    also holds the last fetch's other answers (counts, open issues, releases,
+    the contributor list) with the values the check read before it.
   - `snapshot.json`: what the window shows, saved after each repo. On launch
     the window shows it at once, marked `STALE` if it's old. Repos whose
     data is still fresh aren't refetched at launch.

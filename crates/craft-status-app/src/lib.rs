@@ -3,9 +3,12 @@
 //!
 //! One background thread owns polling. Every `poll_minutes` (and on demand)
 //! it fetches all repositories one at a time, publishing the snapshot to the
-//! UI and the cache after each repository lands.
+//! UI and the cache after each repository lands. Before a fetch, one probe
+//! request finds the due repositories that have not changed since their last
+//! fetch; those are measured again from that fetch instead.
 //! Failed repositories keep their previous numbers; staleness is derived from
-//! each repository's `fetched_at`, so old data is always visibly old.
+//! when each repository's data was last known current
+//! (`RepoEntry::current_at`), so old data is always visibly old.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Mutex};
@@ -13,7 +16,7 @@ use std::time::{Duration, Instant, SystemTime};
 
 use chrono::{DateTime, Local, Timelike, Utc};
 use craft_core::{Cache, Config, Schedule, Snapshot, TokenStatus, WindowState};
-use craft_github::{resolve_token, Error as GhError, GitHub, RawActivity};
+use craft_github::{can_skip, resolve_token, restat, Error as GhError, GitHub, Probe, RawActivity};
 use serde::Serialize;
 use tauri::menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
@@ -255,11 +258,20 @@ struct Pacing {
     strikes: u32,
     /// The last manual refresh, while repos older than it remain.
     forced_since: Option<DateTime<Utc>>,
+    /// Probes that found a repo changed, each kept until that repo's fetch
+    /// succeeds. Those repos aren't probed again in the meantime.
+    probes: Vec<(String, Probe)>,
 }
 
-/// Fetch `repo` into the snapshot. Errors about this repo land on its row;
-/// a missing or rejected token doesn't, since it isn't the repo's fault.
-fn fetch_into_snapshot(app: &AppHandle, cfg: &Config, repo: &str) -> Result<(), GhError> {
+/// Fetch `repo` into the snapshot, keeping `probe` (taken before the fetch)
+/// in its raw cache. Errors about this repo land on its row; a missing or
+/// rejected token doesn't, since it isn't the repo's fault.
+fn fetch_into_snapshot(
+    app: &AppHandle,
+    cfg: &Config,
+    repo: &str,
+    probe: Option<Probe>,
+) -> Result<(), GhError> {
     let state = app.state::<AppState>();
     let token = resolve_token(&cfg.github_token);
     state.snapshot.lock().unwrap().token = Some(TokenStatus {
@@ -274,7 +286,7 @@ fn fetch_into_snapshot(app: &AppHandle, cfg: &Config, repo: &str) -> Result<(), 
         .as_deref()
         .map(|d| RawActivity::load(d, repo))
         .unwrap_or_default();
-    let result = gh.fetch_repo(repo, now, &mut raw);
+    let result = gh.fetch_repo(repo, now, &mut raw, probe);
     if let (Ok(_), Some(dir)) = (&result, &raw_dir) {
         if let Err(e) = raw.save(dir, repo) {
             eprintln!("{repo}: could not save raw cache: {e}");
@@ -319,6 +331,7 @@ fn fetch_into_snapshot(app: &AppHandle, cfg: &Config, repo: &str) -> Result<(), 
                 }
                 entry.stats = Some(stats);
                 entry.fetched_at = Some(now);
+                entry.checked_at = None;
                 entry.error = None;
                 entry.inaccessible = false;
                 Ok(budget.graphql_remaining)
@@ -328,6 +341,7 @@ fn fetch_into_snapshot(app: &AppHandle, cfg: &Config, repo: &str) -> Result<(), 
                 entry.icon = None;
                 entry.icon_oid = None;
                 entry.fetched_at = Some(now);
+                entry.checked_at = None;
                 entry.error = None;
                 entry.inaccessible = true;
                 Ok(None)
@@ -356,6 +370,120 @@ fn fetch_into_snapshot(app: &AppHandle, cfg: &Config, repo: &str) -> Result<(), 
     }
 }
 
+/// Probes the due repos that [`Snapshot::skip_candidates`] lists and that
+/// have no probe in `pending`, in one request, and measures again each one
+/// that has not changed since its last fetch (see [`restat_unchanged`]).
+/// Returns how many it measured again, and the probes of the others for
+/// their fetches to keep. Without a token, a raw cache or the probe's
+/// answer, it measures nothing again and the due repos are fetched. When
+/// GitHub rate-limits the probe, it returns that error.
+fn skip_unchanged(
+    app: &AppHandle,
+    cfg: &Config,
+    schedule: &Schedule,
+    now: DateTime<Utc>,
+    pending: &[(String, Probe)],
+) -> Result<(usize, Vec<(String, Probe)>), GhError> {
+    let state = app.state::<AppState>();
+    let candidates = state
+        .snapshot
+        .lock()
+        .unwrap()
+        .skip_candidates(now, schedule);
+    let repos = unprobed(candidates, pending);
+    let Some(dir) = state.cache.as_ref().map(|c| c.dir().to_path_buf()) else {
+        return Ok((0, Vec::new()));
+    };
+    if repos.is_empty() {
+        return Ok((0, Vec::new()));
+    }
+    // Show the token in use, as a fetch does. Only a fetch marks it rejected.
+    let token = resolve_token(&cfg.github_token);
+    state.snapshot.lock().unwrap().token = Some(TokenStatus {
+        source: token.as_ref().ok().map(|t| t.source.to_string()),
+        rejected: false,
+    });
+    let Ok(gh) = token.and_then(|t| GitHub::new(t.value)) else {
+        return Ok((0, Vec::new()));
+    };
+    let probed_at = Utc::now();
+    let probes = match gh.probe(&repos) {
+        Ok((probes, budget)) => {
+            if budget.graphql_remaining.is_some() {
+                state.snapshot.lock().unwrap().rate_limit_remaining = budget.graphql_remaining;
+            }
+            probes
+        }
+        Err(e @ GhError::RateLimited(_)) => return Err(e),
+        Err(e) => {
+            eprintln!("probe failed, fetching instead: {e}");
+            return Ok((0, Vec::new()));
+        }
+    };
+    let checks = repos
+        .into_iter()
+        .zip(probes)
+        .map(|(repo, probe)| {
+            let raw = RawActivity::load(&dir, &repo);
+            (repo, raw, probe)
+        })
+        .collect();
+    let (restated, left) = {
+        let mut snap = state.snapshot.lock().unwrap();
+        let (restated, left) = restat_unchanged(&mut snap, checks, probed_at);
+        if let (false, Some(cache)) = (restated.is_empty(), &state.cache) {
+            if let Err(e) = cache.save(&snap) {
+                eprintln!("could not save cache: {e}");
+            }
+        }
+        (restated, left)
+    };
+    if !restated.is_empty() {
+        emit_snapshot(app);
+    }
+    Ok((restated.len(), left))
+}
+
+/// The `candidates` that have no probe in `pending`.
+fn unprobed(candidates: Vec<String>, pending: &[(String, Probe)]) -> Vec<String> {
+    candidates
+        .into_iter()
+        .filter(|repo| !pending.iter().any(|(r, _)| r == repo))
+        .collect()
+}
+
+/// Measures again, at `probed_at` (when the probe was sent), each of
+/// `checks` (a repo, its raw cache and its probe) whose probe shows that
+/// nothing changed since its last fetch. Such a repo keeps its `fetched_at`,
+/// and its `checked_at` becomes `probed_at`. Returns the repos measured
+/// again, and the probes of the others.
+fn restat_unchanged(
+    snap: &mut Snapshot,
+    checks: Vec<(String, RawActivity, Option<Probe>)>,
+    probed_at: DateTime<Utc>,
+) -> (Vec<String>, Vec<(String, Probe)>) {
+    let mut restated = Vec::new();
+    let mut left = Vec::new();
+    for (repo, raw, probe) in checks {
+        let stats = can_skip(&raw, probe.as_ref(), probed_at)
+            .then(|| restat(&raw, probed_at))
+            .flatten();
+        match (stats, snap.repos.iter_mut().find(|e| e.repo == repo)) {
+            (Some(stats), Some(entry)) => {
+                entry.stats = Some(stats);
+                entry.checked_at = Some(probed_at);
+                restated.push(repo);
+            }
+            _ => {
+                if let Some(probe) = probe {
+                    left.push((repo, probe));
+                }
+            }
+        }
+    }
+    (restated, left)
+}
+
 /// When a rate limit GitHub reported (`RateLimited`'s text) lifts.
 fn rate_limit_end(until: &str, now: DateTime<Utc>) -> Option<DateTime<Utc>> {
     if let Ok(t) = DateTime::parse_from_rfc3339(until) {
@@ -375,7 +503,8 @@ fn clock(t: DateTime<Utc>) -> String {
 }
 
 /// Fetch the most overdue repository, if one is due and pacing allows, and
-/// decide how long to wait before the next.
+/// decide how long to wait before the next. Due repositories that a probe
+/// finds unchanged are measured again first, without a fetch.
 fn step(app: &AppHandle, pacing: &mut Pacing) {
     let state = app.state::<AppState>();
     let cfg = state.config.lock().unwrap().clone();
@@ -385,14 +514,35 @@ fn step(app: &AppHandle, pacing: &mut Pacing) {
         forced_since: pacing.forced_since,
     };
     let now = Utc::now();
-    let due = {
+    let paused = pacing.not_before.is_some_and(|t| now < t);
+    {
         let mut snap = state.snapshot.lock().unwrap();
         snap.sync_repos(&cfg.repos);
         snap.poll_secs = cfg.poll_secs();
         snap.stale_after_secs = cfg.stale_secs();
-        let paused = pacing.not_before.is_some_and(|t| now < t);
-        // Rows refreshed by hand go first.
-        let due = (!paused)
+        pacing
+            .probes
+            .retain(|(r, _)| snap.repos.iter().any(|e| e.repo == *r));
+    }
+    // Due repos that one probe finds unchanged are measured again instead of
+    // fetched. After a step that only probes, the pacing below runs as after
+    // a fetch.
+    let probed = if paused {
+        Ok((0, Vec::new()))
+    } else {
+        skip_unchanged(app, &cfg, &schedule(pacing), now, &pacing.probes)
+    };
+    let (restated, limited) = match probed {
+        Ok((restated, changed)) => {
+            pacing.probes.extend(changed);
+            (restated, None)
+        }
+        Err(e) => (0, Some(e)),
+    };
+    let due = {
+        let mut snap = state.snapshot.lock().unwrap();
+        // Rows refreshed by hand go first, and are always fetched in full.
+        let due = (!paused && limited.is_none())
             .then(|| {
                 snap.take_requested().or_else(|| {
                     snap.next_due(now, &schedule(pacing))
@@ -404,9 +554,24 @@ fn step(app: &AppHandle, pacing: &mut Pacing) {
         snap.fetching = due.clone();
         due
     };
-    if let Some(repo) = &due {
-        emit_snapshot(app);
-        let result = fetch_into_snapshot(app, &cfg, repo);
+    let result = match (&due, limited) {
+        // A rate-limited probe pauses polling as a rate-limited fetch does.
+        (_, Some(e)) => Some(Err(e)),
+        (Some(repo), None) => {
+            emit_snapshot(app);
+            let probe = pacing.probes.iter().find(|(r, _)| r == repo);
+            let result = fetch_into_snapshot(app, &cfg, repo, probe.map(|(_, p)| p.clone()));
+            // A failed fetch keeps the probe for its retry.
+            if result.is_ok() {
+                pacing.probes.retain(|(r, _)| r != repo);
+            }
+            Some(result)
+        }
+        // Only the probe was sent: the gap and the low-budget pause follow it.
+        (None, None) => (restated > 0).then_some(Ok(())),
+    };
+    let acted = result.is_some();
+    if let Some(result) = result {
         let now = Utc::now();
         let mut snap = state.snapshot.lock().unwrap();
         let (pause, error) = match result {
@@ -475,7 +640,7 @@ fn step(app: &AppHandle, pacing: &mut Pacing) {
             .next_due_at(&schedule(pacing))
             .map(|t| t.max(Utc::now()))
             .map(|t| pacing.not_before.map_or(t, |p| t.max(p)));
-        if snap.next_refresh_at == next && due.is_none() {
+        if snap.next_refresh_at == next && !acted {
             return;
         }
         snap.next_refresh_at = next;
@@ -1008,6 +1173,115 @@ mod tests {
             e.fetched_at = Some(now - CDuration::minutes(*m));
         }
         s
+    }
+
+    /// A raw cache whose last fetch, at `fetched_at`, was taken after `probe`.
+    fn raw_fetched(fetched_at: DateTime<Utc>, probe: &Probe) -> RawActivity {
+        RawActivity {
+            covers_from: Some(fetched_at - CDuration::days(7)),
+            fetched_at: Some(fetched_at),
+            full_at: Some(fetched_at),
+            last: Some(craft_github::LastFetch {
+                at: fetched_at,
+                probe: Some(probe.clone()),
+                main: serde_json::json!({"repository": {
+                    "openPrs": {"totalCount": 4}, "defaultBranchRef": null}}),
+                releases: vec![],
+                since_build: None,
+                contributors: vec![],
+            }),
+            ..Default::default()
+        }
+    }
+
+    fn probe(head: &str) -> Probe {
+        Probe {
+            head_oid: Some(head.into()),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn three_due_repos_with_one_changed_cost_one_probe_and_one_fetch() {
+        let now = Utc::now();
+        let schedule = Schedule {
+            refresh_secs: 30 * 60,
+            retry_secs: REPO_RETRY,
+            forced_since: None,
+        };
+        let mut snap = snap_with(&[40, 50, 60], now);
+        for e in &mut snap.repos {
+            e.stats = Some(craft_github::restat(&raw_fetched(now, &probe("h")), now).unwrap());
+        }
+        let due = snap.skip_candidates(now, &schedule);
+        assert_eq!(due, ["o/r0", "o/r1", "o/r2"]);
+        // One probe query names all three.
+        let query = craft_github::probe_query(due.len());
+        assert!(query.contains("r2: repository(") && !query.contains("r3:"));
+        let fetched_at = |m| now - CDuration::minutes(m);
+        let probed_at = now + CDuration::seconds(1);
+        // A repo fetched `mins` ago at head `before`, and now at head `head`.
+        let check = |repo: &str, mins, before: &str, head: &str| {
+            let raw = raw_fetched(fetched_at(mins), &probe(before));
+            (repo.to_string(), raw, Some(probe(head)))
+        };
+        let checks = vec![
+            check("o/r0", 40, "a", "a"),
+            // r1 has a new head since its last fetch.
+            check("o/r1", 50, "b", "b2"),
+            check("o/r2", 60, "c", "c"),
+        ];
+        let (restated, left) = restat_unchanged(&mut snap, checks, probed_at);
+        assert_eq!(restated, ["o/r0", "o/r2"]);
+        assert_eq!(
+            left,
+            [("o/r1".to_string(), probe("b2"))],
+            "the fetch keeps the changed repo's probe"
+        );
+        for (i, mins) in [(0, 40), (2, 60)] {
+            let e = &snap.repos[i];
+            assert_eq!(
+                e.fetched_at,
+                Some(fetched_at(mins)),
+                "a check is not a fetch"
+            );
+            assert_eq!(e.checked_at, Some(probed_at));
+            assert_eq!(e.stats.as_ref().map(|s| s.open_prs), Some(4));
+        }
+        assert_eq!(snap.repos[1].checked_at, None);
+        // Only the changed repo is left to fetch, and its probe waits for
+        // that fetch: the next step doesn't probe it again.
+        let left_due = snap.skip_candidates(probed_at, &schedule);
+        assert_eq!(left_due, ["o/r1"]);
+        assert!(unprobed(left_due, &left).is_empty());
+        assert_eq!(
+            snap.next_due(probed_at, &schedule).map(|e| e.repo.as_str()),
+            Some("o/r1")
+        );
+    }
+
+    #[test]
+    fn unchanged_repos_are_measured_at_the_probe_time() {
+        let now = Utc::now();
+        let mut snap = snap_with(&[40], now);
+        let fetched_at = now - CDuration::minutes(40);
+        let mut raw = raw_fetched(fetched_at, &probe("a"));
+        // Opened 3 h 55 min before the probe: inside the 4-hour window then,
+        // outside it ten minutes later.
+        raw.prs_opened
+            .insert(7, now - CDuration::minutes(3 * 60 + 55));
+        let checks = vec![("o/r0".into(), raw.clone(), Some(probe("a")))];
+        let (restated, _) = restat_unchanged(&mut snap, checks, now);
+        assert_eq!(restated, ["o/r0"]);
+        let stats = snap.repos[0].stats.clone().unwrap();
+        assert_eq!(stats.recent["4h"].prs_opened, 1);
+        assert_eq!(Some(stats), craft_github::restat(&raw, now));
+        let later = craft_github::restat(&raw, now + CDuration::minutes(10)).unwrap();
+        assert_eq!(later.recent["4h"].prs_opened, 0);
+        // Without a probe there is nothing to compare: the repo is fetched.
+        let checks = vec![("o/r0".into(), raw, None)];
+        let (restated, left) = restat_unchanged(&mut snap, checks, now);
+        assert!(restated.is_empty() && left.is_empty());
     }
 
     #[test]

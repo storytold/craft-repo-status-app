@@ -60,6 +60,8 @@ export interface RepoEntry {
   repo: string;
   stats: RepoStats | null;
   fetched_at: Time | null;
+  /** When a probe last found nothing changed since `fetched_at` (absent from older builds). */
+  checked_at?: Time | null;
   last_attempt_at?: Time | null;
   error?: string | null;
   inaccessible?: boolean;
@@ -283,14 +285,26 @@ export function dropIndex(mids: readonly number[], y: number): number {
 
 // ───────────────────────────── freshness ─────────────────────────────
 
+/** The check time when a probe found nothing changed after the fetch, else null. As `checked_at` in model.rs. */
+export function checkedAfterFetch(entry: RepoEntry): Time | null {
+  const { fetched_at: fetched, checked_at: checked } = entry;
+  return checked && (!fetched || Date.parse(checked) > Date.parse(fetched)) ? checked : null;
+}
+
+/** When the entry's data was last known current: the fetch, or a later check. As `RepoEntry::current_at` in model.rs. */
+export function currentAt(entry: RepoEntry): Time | null {
+  return checkedAfterFetch(entry) ?? entry.fetched_at;
+}
+
 export function isStale(entry: RepoEntry, staleAfterSecs: number, now: number = Date.now()): boolean {
-  if (!entry.fetched_at) return true;
-  return now - Date.parse(entry.fetched_at) > staleAfterSecs * 1000;
+  const at = currentAt(entry);
+  if (!at) return true;
+  return now - Date.parse(at) > staleAfterSecs * 1000;
 }
 
 /** `{ oldest, stale }` for the whole snapshot: the age of the oldest data on screen. */
 export function freshness(snap: Pick<Snapshot, 'repos' | 'stale_after_secs'>, now: number = Date.now()): { oldest: number | null; stale: boolean } {
-  const times = snap.repos.map((r) => (r.fetched_at ? Date.parse(r.fetched_at) : null));
+  const times = snap.repos.map((r) => { const at = currentAt(r); return at ? Date.parse(at) : null; });
   const oldest = times.length && times.every((t) => t !== null) ? Math.min(...(times as number[])) : null;
   const stale = !snap.repos.length || snap.repos.some((r) => isStale(r, snap.stale_after_secs, now));
   return { oldest, stale };
