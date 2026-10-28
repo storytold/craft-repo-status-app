@@ -8,7 +8,7 @@ import { Window } from 'happy-dom';
 import { start } from './app.ts';
 import type { Api } from './app.ts';
 import { COLUMNS } from './model.ts';
-import type { Meta, RepoEntry, RepoStats, Snapshot, UrgentIssue } from './model.ts';
+import type { Config, Meta, RepoEntry, RepoStats, Settings, Snapshot, UrgentIssue } from './model.ts';
 
 const HTML = readFileSync(new URL('../index.html', import.meta.url), 'utf8');
 const BODY = HTML.match(/<body>([\s\S]*)<\/body>/)![1]!.replace(/<script[\s\S]*?<\/script>/g, '');
@@ -55,8 +55,11 @@ afterEach(async () => { await teardown?.(); teardown = null; });
 
 const tick = () => new Promise((r) => setTimeout(r, 0));
 
+/** Answers a host command for one test; `undefined` falls back to the defaults below. */
+type Host = (cmd: string, args?: Record<string, unknown>) => unknown;
+
 /** A fresh document with the UI started in it. */
-async function setup({ snap = snapshot(), storage = {} as Record<string, unknown>, meta = {} as Meta } = {}): Promise<Harness> {
+async function setup({ snap = snapshot(), storage = {} as Record<string, unknown>, meta = {} as Meta, host = (() => undefined) as Host } = {}): Promise<Harness> {
   const win = new Window({ url: 'http://localhost/index.html' });
   win.document.body.innerHTML = BODY;
   for (const [k, v] of Object.entries(storage)) win.localStorage.setItem(k, JSON.stringify(v));
@@ -77,6 +80,8 @@ async function setup({ snap = snapshot(), storage = {} as Record<string, unknown
   const api: Api = {
     async invoke<T>(cmd: string, args?: Record<string, unknown>) {
       calls.push({ cmd, args });
+      const answer = await host(cmd, args);
+      if (answer !== undefined) return answer as T;
       if (cmd === 'get_snapshot') return snap as T;
       if (cmd === 'get_meta') return meta as T;
       return null as T;
@@ -342,10 +347,319 @@ test('keyboard shortcuts and buttons call the host', async () => {
   key('1', true);
   assert.equal(h.view(), 'repos');
   h.doc.getElementById('pin')!.click();
-  h.doc.getElementById('edit-config')!.click();
   h.doc.getElementById('resize')!.dispatchEvent(new h.win.MouseEvent('mousedown') as unknown as Event);
   const cmds = h.calls.map((c) => c.cmd).filter((c) => !['get_meta', 'get_snapshot', 'window_ready'].includes(c));
-  assert.deepEqual(cmds, ['refresh_now', 'hide_window', 'set_always_on_top', 'open_config', 'startResize']);
+  assert.deepEqual(cmds, ['refresh_now', 'hide_window', 'set_always_on_top', 'startResize']);
   assert.deepEqual(h.calls.find((c) => c.cmd === 'set_always_on_top')?.args, { on: false });
   assert.equal(h.doc.getElementById('pin')!.getAttribute('aria-pressed'), 'true');
+});
+
+// ───────────────────────────── settings ─────────────────────────────
+
+const config = (c: Partial<Config> = {}): Config => ({
+  repos: ['o/alpha', 'o/beta'], poll_minutes: 30, stale_minutes: 60, github_token: '',
+  window: { width: 1340, height: 560, always_on_top: false, start_hidden: false, opacity: 0.96 },
+  tray: { hide_dock_icon: true, visible_on_all_workspaces: true, close_to_tray: true },
+  shortcuts: { toggle_window: 'CmdOrCtrl+Shift+G' },
+  ...c,
+});
+
+const settingsOf = (c: Config = config(), token_set = false): Settings => ({ config: c, token_set, path: '/home/someone/.craft_status_config.toml' });
+
+/** A host whose config file holds `file`; `save_settings` writes it unless `refuse` names an error. */
+function fileHost(file: { settings: Settings }, refuse: string | null = null): Host {
+  return (cmd, args) => {
+    if (cmd === 'get_settings') return file.settings;
+    if (cmd === 'save_settings') {
+      if (refuse) return Promise.reject(refuse);
+      const saved = args!.config as Config;
+      file.settings = settingsOf({ ...saved, github_token: '' }, args!.keepToken ? file.settings.token_set : saved.github_token !== '');
+      return null;
+    }
+    return undefined;
+  };
+}
+
+const settingsShown = (h: Harness) => !h.doc.getElementById('settings-view')!.hidden;
+const field = (h: Harness, key: string) => h.doc.getElementById(`setting-${key.replaceAll('.', '-')}`) as HTMLInputElement;
+const fieldError = (h: Harness, key: string) => h.doc.querySelector(`.field-error[data-for="${key}"]`)!.textContent;
+const saveButton = (h: Harness) => h.doc.getElementById('settings-save') as HTMLButtonElement;
+const settingsStatus = (h: Harness) => h.doc.getElementById('settings-status')!.textContent;
+const listed = (h: Harness) => [...h.doc.querySelectorAll<HTMLElement>('#settings-repos li[data-repo]')].map((li) => li.dataset.repo);
+
+function type(h: Harness, input: HTMLInputElement, text: string): void {
+  input.value = text;
+  input.dispatchEvent(new h.win.Event('input', { bubbles: true }) as unknown as Event);
+}
+
+function check(h: Harness, input: HTMLInputElement, on: boolean): void {
+  input.checked = on;
+  input.dispatchEvent(new h.win.Event('change', { bubbles: true }) as unknown as Event);
+}
+
+async function openSettings(h: Harness): Promise<void> {
+  h.doc.getElementById('settings')!.click();
+  await tick();
+}
+
+test('the gear, ⌘, the footer and the host’s event open Settings with the file’s values', async () => {
+  const h = await setup({ host: fileHost({ settings: settingsOf(config({ poll_minutes: 45 }), true) }) });
+  await openSettings(h);
+  assert.ok(settingsShown(h));
+  assert.equal(h.view(), 'urgent', 'the table is hidden');
+  assert.equal(field(h, 'poll_minutes').value, '45');
+  assert.equal(field(h, 'window.opacity').value, '0.96');
+  assert.equal(field(h, 'tray.close_to_tray').checked, true);
+  assert.equal(field(h, 'shortcuts.toggle_window').value, 'CmdOrCtrl+Shift+G');
+  assert.equal(field(h, 'github_token').type, 'password');
+  assert.equal(field(h, 'github_token').value, '', 'the host never sends the token');
+  assert.match(field(h, 'github_token').placeholder, /Saved token kept/);
+  assert.deepEqual(listed(h), ['o/alpha', 'o/beta']);
+  const key = (key: string, mod = false) =>
+    h.doc.dispatchEvent(new h.win.KeyboardEvent('keydown', { key, metaKey: mod, bubbles: true }) as unknown as Event);
+  key('Escape');
+  assert.ok(!settingsShown(h) && h.view() === 'repos', 'Escape goes back to the table');
+  assert.ok(!h.calls.some((c) => c.cmd === 'hide_window'), 'and leaves the window up');
+  key(',', true);
+  await tick();
+  assert.ok(settingsShown(h));
+  h.doc.getElementById('settings-close')!.click();
+  assert.ok(!settingsShown(h));
+  h.doc.getElementById('edit-config')!.click();
+  await tick();
+  assert.ok(settingsShown(h));
+  h.doc.getElementById('settings')!.click();
+  assert.ok(!settingsShown(h), 'the gear closes Settings too');
+  h.emit('craft:settings', null);
+  await tick();
+  assert.ok(settingsShown(h));
+  h.doc.getElementById('settings-open-file')!.click();
+  assert.equal(h.calls.at(-1)?.cmd, 'open_config', 'the raw file is one click away');
+  assert.equal(stored(h, 'view'), 'repos', 'Settings is not remembered as the view to start in');
+});
+
+test('a fetch leaves the open Settings form alone', async () => {
+  const h = await setup({ host: fileHost({ settings: settingsOf() }) });
+  await openSettings(h);
+  const poll = field(h, 'poll_minutes');
+  type(h, poll, '7');
+  h.emit('craft:snapshot', { ...snapshot(), fetching: 'o/alpha' });
+  assert.ok(field(h, 'poll_minutes') === poll && poll.value === '7');
+  assert.ok(settingsShown(h));
+});
+
+test('invalid values disable Save and say why', async () => {
+  const h = await setup({ host: fileHost({ settings: settingsOf() }) });
+  await openSettings(h);
+  assert.equal(saveButton(h).disabled, false);
+  type(h, field(h, 'poll_minutes'), '0.5');
+  assert.match(fieldError(h, 'poll_minutes'), /from 1 to 1440/);
+  assert.equal(field(h, 'poll_minutes').getAttribute('aria-invalid'), 'true');
+  assert.equal(saveButton(h).disabled, true);
+  type(h, field(h, 'poll_minutes'), '90');
+  assert.equal(fieldError(h, 'poll_minutes'), '');
+  assert.match(fieldError(h, 'stale_minutes'), /at least the fetch interval/);
+  type(h, field(h, 'stale_minutes'), '90');
+  assert.equal(saveButton(h).disabled, false);
+  for (const [key, bad, why] of [
+    ['poll_minutes', '1441', /from 1 to 1440/], ['stale_minutes', '10081', /from 1 to 10080/], ['window.opacity', '', /Enter a number/],
+    ['window.width', '100', /from 520/], ['shortcuts.toggle_window', 'Ctrl++G', /single \+/],
+  ] as const) {
+    const good = field(h, key).value;
+    type(h, field(h, key), bad);
+    assert.match(fieldError(h, key), why, key);
+    assert.equal(saveButton(h).disabled, true, key);
+    type(h, field(h, key), good);
+    assert.equal(saveButton(h).disabled, false, key);
+  }
+  saveButton(h).click();
+  await tick();
+  assert.equal((h.calls.find((c) => c.cmd === 'save_settings')?.args?.config as Config).poll_minutes, 90);
+});
+
+test('each field names its message for screen readers', async () => {
+  const h = await setup({ host: fileHost({ settings: settingsOf(config({ repos: ['o/a', 'O/A'] }), true) }) });
+  await openSettings(h);
+  const errorOf = (key: string) => h.doc.querySelector(`.field-error[data-for="${key}"]`);
+  const describes = (input: Element, expected: (Element | null)[], what: string) => {
+    const linked = (input.getAttribute('aria-describedby') ?? '').split(' ').map((id) => h.doc.getElementById(id));
+    assert.ok(linked.length === expected.length && linked.every((n, i) => n !== null && n === expected[i]), what);
+  };
+  for (const key of ['poll_minutes', 'window.opacity', 'tray.close_to_tray', 'shortcuts.toggle_window']) {
+    describes(field(h, key), [errorOf(key)], key);
+  }
+  describes(field(h, 'github_token'), [h.doc.getElementById('settings-token-source'), errorOf('github_token')], 'github_token');
+  const repoInput = h.doc.getElementById('settings-repo-input')!;
+  describes(repoInput, [h.doc.getElementById('settings-repo-error'), errorOf('repos')], 'repos');
+  assert.match(fieldError(h, 'repos'), /listed twice/);
+  assert.equal(repoInput.getAttribute('aria-invalid'), 'true', 'a repos problem marks the repo input');
+  (h.doc.querySelector('#settings-repos button[aria-label="Remove O/A"]') as HTMLButtonElement).click();
+  assert.equal(repoInput.getAttribute('aria-invalid'), 'false');
+});
+
+test('the repo list adds, checks, reorders and removes repos', async () => {
+  const h = await setup({ host: fileHost({ settings: settingsOf() }) });
+  await openSettings(h);
+  const input = h.doc.getElementById('settings-repo-input') as HTMLInputElement;
+  const add = (text: string) => { type(h, input, text); h.doc.getElementById('settings-repo-add')!.click(); };
+  const error = () => h.doc.getElementById('settings-repo-error')!.textContent;
+  add('nonsense');
+  assert.match(error(), /owner\/name/);
+  assert.deepEqual(listed(h), ['o/alpha', 'o/beta']);
+  add('https://github.com/o/delta.git');
+  assert.deepEqual(listed(h), ['o/alpha', 'o/beta', 'o/delta']);
+  assert.equal(input.value, '');
+  type(h, input, 'O/Delta');
+  input.dispatchEvent(new h.win.KeyboardEvent('keydown', { key: 'Enter', bubbles: true }) as unknown as Event);
+  assert.match(error(), /already listed/);
+  type(h, input, '');
+  assert.equal(error(), '', 'typing clears the message');
+  const button = (label: string) => h.doc.querySelector<HTMLButtonElement>(`#settings-repos button[aria-label="${label}"]`)!;
+  assert.equal(button('Move o/alpha up').disabled, true);
+  assert.equal(button('Move o/delta down').disabled, true);
+  button('Move o/delta up').click();
+  assert.deepEqual(listed(h), ['o/alpha', 'o/delta', 'o/beta']);
+  button('Move o/alpha down').click();
+  assert.deepEqual(listed(h), ['o/delta', 'o/alpha', 'o/beta']);
+  button('Remove o/alpha').click();
+  assert.deepEqual(listed(h), ['o/delta', 'o/beta']);
+  saveButton(h).click();
+  await tick();
+  assert.deepEqual((h.calls.find((c) => c.cmd === 'save_settings')?.args?.config as Config).repos, ['o/delta', 'o/beta']);
+});
+
+test('the repo list keeps the keyboard focus through moves and removals', async () => {
+  const h = await setup({ host: fileHost({ settings: settingsOf(config({ repos: ['o/a', 'o/b', 'o/c'] })) }) });
+  await openSettings(h);
+  const focused = () => h.doc.activeElement?.getAttribute('aria-label');
+  const press = () => (h.doc.activeElement as HTMLButtonElement).click();
+  const button = (label: string) => h.doc.querySelector<HTMLButtonElement>(`#settings-repos button[aria-label="${label}"]`)!;
+  button('Move o/c up').click();
+  assert.deepEqual(listed(h), ['o/a', 'o/c', 'o/b']);
+  assert.equal(focused(), 'Move o/c up', 'the same button in the moved row');
+  press();
+  assert.deepEqual(listed(h), ['o/c', 'o/a', 'o/b'], 'pressed again, it moves again');
+  assert.equal(focused(), 'Move o/c down', 'at the top, the other move button');
+  button('Remove o/a').click();
+  assert.deepEqual(listed(h), ['o/c', 'o/b']);
+  assert.equal(focused(), 'Remove o/b', 'the next row’s Remove');
+  press();
+  assert.equal(focused(), 'Remove o/c', 'the last row removed: the row before it');
+  press();
+  assert.deepEqual(listed(h), []);
+  assert.equal(h.doc.activeElement?.id, 'settings-repo-input', 'an empty list: the input');
+});
+
+test('a save sends the values Settings opened with, so the host keeps later file edits', async () => {
+  const file = { settings: settingsOf(config({ stale_minutes: 90 })) };
+  const h = await setup({ host: fileHost(file) });
+  await openSettings(h);
+  type(h, field(h, 'window.opacity'), '0.8');
+  saveButton(h).click();
+  await tick();
+  const args = h.calls.find((c) => c.cmd === 'save_settings')!.args!;
+  assert.deepEqual(args.base, config({ stale_minutes: 90 }));
+  assert.equal((args.config as Config).window.opacity, 0.8);
+});
+
+test('saving sends the edits, keeps the saved token unless replaced or removed, and reloads', async () => {
+  const file = { settings: settingsOf(config(), true) };
+  const h = await setup({ host: fileHost(file) });
+  await openSettings(h);
+  type(h, field(h, 'window.opacity'), '0.8');
+  check(h, field(h, 'window.always_on_top'), true);
+  saveButton(h).click();
+  await tick();
+  const saves = () => h.calls.filter((c) => c.cmd === 'save_settings').map((c) => c.args!);
+  assert.deepEqual(saves()[0], { config: config({ window: { ...config().window, opacity: 0.8, always_on_top: true } }), base: config(), keepToken: true });
+  assert.equal(settingsStatus(h), 'Saved.');
+  assert.equal(field(h, 'window.opacity').value, '0.8', 'the form shows the file as saved');
+  type(h, field(h, 'github_token'), '  new-token ');
+  saveButton(h).click();
+  await tick();
+  assert.deepEqual([saves()[1]!.keepToken, (saves()[1]!.config as Config).github_token], [false, 'new-token']);
+  assert.equal(field(h, 'github_token').value, '', 'the typed token is not kept in the form');
+  check(h, h.doc.getElementById('setting-token-clear') as HTMLInputElement, true);
+  saveButton(h).click();
+  await tick();
+  assert.deepEqual([saves()[2]!.keepToken, (saves()[2]!.config as Config).github_token], [false, '']);
+  assert.equal(file.settings.token_set, false);
+  assert.equal(h.doc.getElementById('setting-token-clear'), null, 'no saved token left to remove');
+});
+
+test('the token field says which token the last fetch used', async () => {
+  const h = await setup({
+    snap: { ...snapshot(), token: { source: '$GITHUB_TOKEN', rejected: false } },
+    host: fileHost({ settings: settingsOf(config(), true) }),
+  });
+  await openSettings(h);
+  const note = () => h.doc.getElementById('settings-token-source')!.textContent;
+  assert.equal(note(), 'The last fetch used $GITHUB_TOKEN. A token saved here is not used while $GITHUB_TOKEN is set.');
+  h.emit('craft:snapshot', { ...snapshot(), token: { source: 'config', rejected: true } });
+  assert.equal(note(), 'The last fetch used the token saved here, and GitHub rejected it.');
+});
+
+test('relaunch-only fields are marked, and saving one says to relaunch', async () => {
+  const h = await setup({ host: fileHost({ settings: settingsOf() }) });
+  await openSettings(h);
+  const marked = [...h.doc.querySelectorAll('.setting')].filter((s) => s.querySelector('.relaunch')).map((s) => s.querySelector('input')!.id);
+  assert.deepEqual(marked, ['setting-window-width', 'setting-window-height', 'setting-window-start_hidden', 'setting-tray-hide_dock_icon']);
+  check(h, field(h, 'window.start_hidden'), true);
+  saveButton(h).click();
+  await tick();
+  assert.equal(settingsStatus(h), 'Saved. Relaunch Craft Status to apply: Start hidden.');
+});
+
+test('the form cannot be edited while a save runs', async () => {
+  let finish = (): void => {};
+  const file = { settings: settingsOf() };
+  const host = fileHost(file);
+  const h = await setup({
+    host: (cmd, args) => (cmd === 'save_settings' ? new Promise((r) => { finish = () => r(host(cmd, args)); }) : host(cmd, args)),
+  });
+  await openSettings(h);
+  type(h, field(h, 'poll_minutes'), '40');
+  saveButton(h).click();
+  const fieldsets = () => [...h.doc.querySelectorAll<HTMLFieldSetElement>('#settings-form fieldset')];
+  assert.ok(fieldsets().length > 0 && fieldsets().every((f) => f.disabled), 'every section is disabled');
+  assert.equal(saveButton(h).disabled, true);
+  type(h, field(h, 'poll_minutes'), '50');
+  finish();
+  await tick();
+  await tick();
+  assert.equal(file.settings.config.poll_minutes, 40);
+  assert.equal(field(h, 'poll_minutes').value, '40', 'the form shows what was saved');
+  assert.ok(fieldsets().every((f) => !f.disabled));
+});
+
+test('a refused save shows the host’s reason and keeps the edits', async () => {
+  const h = await setup({ host: fileHost({ settings: settingsOf() }, 'shortcuts.toggle_window: Couldn\'t recognize "Nope"') });
+  await openSettings(h);
+  type(h, field(h, 'shortcuts.toggle_window'), 'Ctrl+Nope');
+  saveButton(h).click();
+  await tick();
+  const status = h.doc.getElementById('settings-status')!;
+  assert.equal(status.textContent, 'Not saved: shortcuts.toggle_window: Couldn\'t recognize "Nope"');
+  assert.equal(status.className, 'error');
+  assert.equal(field(h, 'shortcuts.toggle_window').value, 'Ctrl+Nope');
+  assert.equal(saveButton(h).disabled, false, 'Save can be tried again');
+});
+
+test('a config file that does not load says so and still offers the raw file', async () => {
+  const h = await setup({ host: (cmd) => (cmd === 'get_settings' ? Promise.reject('config: invalid type') : undefined) });
+  await openSettings(h);
+  assert.ok(settingsShown(h));
+  assert.equal(settingsStatus(h), 'Could not read the config file: config: invalid type');
+  assert.equal(saveButton(h).disabled, true);
+  h.doc.getElementById('settings-open-file')!.click();
+  assert.equal(h.calls.at(-1)?.cmd, 'open_config');
+});
+
+test('in a browser, where get_settings answers null, Settings says it needs the app', async () => {
+  const h = await setup();
+  await openSettings(h);
+  assert.ok(settingsShown(h));
+  assert.equal(settingsStatus(h), 'Settings need the app.');
+  assert.equal(h.doc.querySelector('#settings-form fieldset'), null, 'no form to fill in');
+  assert.equal(saveButton(h).disabled, true);
 });
