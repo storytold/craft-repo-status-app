@@ -16,6 +16,8 @@
       <nav class="views" role="tablist">
         <button class="view" data-view="repos" role="tab">Repos <span class="badge" id="repo-count"></span></button>
         <button class="view" data-view="urgent" role="tab">Fix first <span class="badge hot" id="urgent-count"></span></button>
+        <button class="view" data-view="people" role="tab" title="Open pull requests by work state, and rankings (⌘4)">People <span class="badge" id="people-count"></span></button>
+        <button class="view" data-view="mine" role="tab" title="Your open pull requests and what blocks each (⌘5)">My PRs <span class="badge hot" id="mine-count"></span></button>
       </nav>
       <div class="status" data-tauri-drag-region>
         <span id="fresh-pill" class="pill"></span>
@@ -50,6 +52,32 @@
         <span class="hint">Scored by severity words, labels, user reports, 👍/💬, the latest build and freshness. Click to open on GitHub.</span>
       </div>
       <ol class="urgent-list" id="urgent-list"></ol>
+    </main>
+
+    <main id="people-view" hidden>
+      <div class="people-bar">
+        <div class="segmented" role="tablist" aria-label="People view">
+          <button class="seg" data-pmode="work" role="tab">Work</button>
+          <button class="seg" data-pmode="rankings" role="tab">Rankings</button>
+        </div>
+        <select id="people-window" aria-label="Window for flow and reviews"></select>
+        <select id="people-repo" aria-label="Repository"></select>
+        <select id="people-rank" aria-label="Ranking"></select>
+        <select id="people-type" aria-label="Type to sort by"></select>
+        <span class="hint legend" id="people-hint"></span>
+        <span class="hint" id="people-cached"></span>
+        <span class="hint" id="people-age"></span>
+      </div>
+      <div class="people-main" id="people-main"></div>
+    </main>
+
+    <main id="mine-view" hidden>
+      <div class="people-bar">
+        <span class="hint" id="mine-who"></span>
+        <label class="toggle"><input type="checkbox" id="mine-needs"> Needs me only</label>
+        <span class="hint legend">Blockers come from each pull request’s work state; hover one for its rule.</span>
+      </div>
+      <div class="people-main" id="mine-main"></div>
     </main>
 
     <footer data-tauri-drag-region>
