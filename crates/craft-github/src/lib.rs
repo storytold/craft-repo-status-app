@@ -14,10 +14,22 @@
 //! one (usually) REST call for the contributor list, which GraphQL lacks.
 //! The icon itself is a REST blob fetch, made only when its blob id changes
 //! (see [`GitHub::icon`]). Blocking I/O: callers run this on worker threads.
+//! The counts query also reads when the newest pull request was updated
+//! ([`RawActivity::pr_updated_at`]). The People thread reads a repository's
+//! changed pull requests when that time has moved ([`prs`]).
+//!
+//! A client made with [`GitHub::in_background`] sends each request only
+//! while the poll thread holds no [`gate::PollSession`].
+
+pub mod gate;
+pub mod prs;
+
+pub use gate::Gate;
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::Arc;
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
@@ -47,6 +59,9 @@ const FULL_REFRESH_HOURS: i64 = 6;
 /// Pages of 100 each history walk may take; a busier stretch undercounts its
 /// oldest windows (photocraft opens ~2000 PRs a week).
 const MAX_PAGES: usize = 30;
+/// How long a request may take to connect, and to finish, body included.
+pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+pub const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -56,6 +71,10 @@ pub enum Error {
     Unauthorized,
     #[error("rate limited by GitHub until {0}")]
     RateLimited(String),
+    /// Not sent: a background request was rate-limited, or the poll thread
+    /// paused background requests (see [`Gate`]).
+    #[error("stopped: {0}")]
+    Halted(String),
     /// The repo doesn't exist or the token can't see it (GitHub answers 404 for private repos).
     #[error("repository not found or not accessible")]
     NotFound,
@@ -65,6 +84,20 @@ pub enum Error {
     Network(#[from] reqwest::Error),
     #[error("GitHub: {0}")]
     GraphQl(String),
+}
+
+impl Error {
+    /// GitHub could not finish the query: a server error such as the 502 it
+    /// sends when a query runs too long, or a GraphQL error that names a
+    /// timeout. A smaller query may succeed. A request that got no answer in
+    /// time is a [`Error::Network`] error instead.
+    pub fn is_overload(&self) -> bool {
+        match self {
+            Error::Http(500..=599, _) => true,
+            Error::GraphQl(msg) => msg.to_ascii_lowercase().contains("timeout"),
+            _ => false,
+        }
+    }
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -122,6 +155,13 @@ fn env_or_config_token(configured: &str, env: impl Fn(&str) -> Option<String>) -
 pub struct GitHub {
     http: Client,
     token: String,
+    /// Base URL of the API: [`API`], or a local stub in tests.
+    api: String,
+    /// For a background client, the gate its requests wait at.
+    gate: Option<Arc<Gate>>,
+    /// GraphQL requests sent, for the tests.
+    #[cfg(test)]
+    graphql_sent: std::sync::atomic::AtomicU64,
 }
 
 /// Rate-limit bookkeeping returned alongside each repo.
@@ -132,11 +172,53 @@ pub struct Budget {
 
 impl GitHub {
     pub fn new(token: String) -> Result<GitHub> {
+        Self::with_api(token, API)
+    }
+
+    /// A client that sends its requests to `api` instead of api.github.com.
+    pub fn with_api(token: impl Into<String>, api: impl Into<String>) -> Result<GitHub> {
         let http = Client::builder()
-            .timeout(Duration::from_secs(30))
-            .connect_timeout(Duration::from_secs(10))
+            .timeout(REQUEST_TIMEOUT)
+            .connect_timeout(CONNECT_TIMEOUT)
             .build()?;
-        Ok(GitHub { http, token })
+        Ok(GitHub {
+            http,
+            token: token.into(),
+            api: api.into(),
+            gate: None,
+            #[cfg(test)]
+            graphql_sent: Default::default(),
+        })
+    }
+
+    /// GraphQL requests this client has sent.
+    #[cfg(test)]
+    fn graphql_sent(&self) -> u64 {
+        self.graphql_sent.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// This client with every request sent as a background request at
+    /// `gate`: it waits while the poll thread fetches a repository, and
+    /// fails with [`Error::Halted`] while background requests are stopped.
+    /// A rate limit on one of its requests stops them (see [`Gate::halt`]).
+    pub fn in_background(mut self, gate: Arc<Gate>) -> GitHub {
+        self.gate = Some(gate);
+        self
+    }
+
+    /// Leave to send one request: none for a poll client, a
+    /// [`gate::Permit`] for a background one.
+    fn permit(&self) -> Result<Option<gate::Permit<'_>>> {
+        self.gate.as_deref().map(Gate::background).transpose()
+    }
+
+    /// `err`, after a background client has stopped later background
+    /// requests when it is a rate limit.
+    fn note_limit(&self, err: Error) -> Error {
+        if let (Error::RateLimited(until), Some(gate)) = (&err, &self.gate) {
+            gate.halt(until.clone());
+        }
+        err
     }
 
     fn headers(&self) -> HeaderMap {
@@ -190,33 +272,74 @@ impl GitHub {
         Err(Error::Http(status.as_u16(), msg))
     }
 
-    fn graphql(&self, query: &str, variables: Value) -> Result<Value> {
+    /// The whole answer to a GraphQL request, `data` and `errors` both, or
+    /// [`Error::RateLimited`] when GitHub reports a rate limit.
+    fn graphql_body(&self, query: &str, variables: Value) -> Result<Value> {
+        let permit = self.permit()?;
+        #[cfg(test)]
+        self.graphql_sent
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let started = std::time::Instant::now();
         let sent = self
             .http
-            .post(format!("{API}/graphql"))
+            .post(format!("{}/graphql", self.api))
             .headers(self.headers())
             .json(&json!({ "query": query, "variables": variables }))
             .send();
-        std::thread::sleep(started.elapsed().mul_f64(GRAPHQL_PACING));
-        let v: Value = Self::check(sent?)?.json()?;
-        if let Some(errs) = v["errors"].as_array().filter(|e| !e.is_empty()) {
-            let msg = errs
-                .iter()
-                .filter_map(|e| e["message"].as_str())
-                .collect::<Vec<_>>()
-                .join("; ");
-            if errs.iter().any(|e| e["type"] == "RATE_LIMITED") {
-                return Err(Error::RateLimited("the top of the hour".into()));
-            }
-            if v["data"]["repository"].is_null() {
-                if errs.iter().any(|e| e["type"] == "NOT_FOUND") {
-                    return Err(Error::NotFound);
+        let took = started.elapsed();
+        let answer = sent
+            .map_err(Error::from)
+            .and_then(Self::check)
+            .and_then(|resp| Ok(resp.json::<Value>()?))
+            .and_then(|v| {
+                let limited = graphql_errors(&v)
+                    .iter()
+                    .any(|e| e["type"] == "RATE_LIMITED");
+                match limited {
+                    true => Err(Error::RateLimited("the top of the hour".into())),
+                    false => Ok(v),
                 }
-                return Err(Error::GraphQl(msg));
+            })
+            // Kept before the permit goes, so no poll starts in between.
+            .map_err(|e| self.note_limit(e));
+        // A background client keeps its permit until the wait ends.
+        std::thread::sleep(took.mul_f64(GRAPHQL_PACING));
+        drop(permit);
+        answer
+    }
+
+    /// The JSON body of a REST GET of `url`, or `None` for a 204 answer. A
+    /// background client sends it at its gate, and a rate limit on it stops
+    /// the client's later requests, as for [`GitHub::graphql_body`].
+    fn get_json(&self, url: &str) -> Result<Option<Value>> {
+        let permit = self.permit()?;
+        let answer = self
+            .http
+            .get(url)
+            .headers(self.headers())
+            .send()
+            .map_err(Error::from)
+            .and_then(Self::check)
+            .and_then(|resp| match resp.status().as_u16() {
+                204 => Ok(None),
+                _ => Ok(Some(resp.json::<Value>()?)),
+            })
+            .map_err(|e| self.note_limit(e));
+        drop(permit);
+        answer
+    }
+
+    /// The `data` of a query about one `repository`, which must be there.
+    fn graphql(&self, query: &str, variables: Value) -> Result<Value> {
+        let mut v = self.graphql_body(query, variables)?;
+        let errs = graphql_errors(&v);
+        if !errs.is_empty() && v["data"]["repository"].is_null() {
+            if errs.iter().any(|e| e["type"] == "NOT_FOUND") {
+                return Err(Error::NotFound);
             }
+            return Err(Error::GraphQl(error_messages(errs)));
         }
-        Ok(v["data"].clone())
+        Ok(v["data"].take())
     }
 
     /// Everything the UI shows for `owner/name`, measured at `now`. `raw` is
@@ -255,6 +378,7 @@ impl GitHub {
         let authors: Vec<CommitAuthor> = fresh.commits.values().cloned().collect();
         let events = fresh.events();
         let contributors = self.contributors(repo)?;
+        fresh.pr_updated_at = first_time(&main["repository"]["lastPr"], "updatedAt");
         *raw = fresh;
         let budget = Budget {
             graphql_remaining: main["rateLimit"]["remaining"].as_u64(),
@@ -273,12 +397,9 @@ impl GitHub {
 
     /// The app icon blob `oid` (from [`RepoStats::icon_oid`]) as a `data:` URI.
     pub fn icon(&self, repo: &str, oid: &str) -> Result<String> {
-        let resp = self
-            .http
-            .get(format!("{API}/repos/{repo}/git/blobs/{oid}"))
-            .headers(self.headers())
-            .send()?;
-        let v: Value = Self::check(resp)?.json()?;
+        let v = self
+            .get_json(&format!("{}/repos/{repo}/git/blobs/{oid}", self.api))?
+            .unwrap_or_default();
         let b64: String = v["content"]
             .as_str()
             .unwrap_or_default()
@@ -409,19 +530,14 @@ impl GitHub {
         let mut out = Vec::new();
         // 20 pages × 100 people; the cap guards against loops.
         for page in 1..=20 {
-            let resp = self
-                .http
-                .get(format!(
-                    "{API}/repos/{repo}/contributors?per_page=100&anon=1&page={page}"
-                ))
-                .headers(self.headers())
-                .send()?;
-            let resp = Self::check(resp)?;
+            let url = format!(
+                "{}/repos/{repo}/contributors?per_page=100&anon=1&page={page}",
+                self.api
+            );
             // 204: empty repository.
-            if resp.status().as_u16() == 204 {
+            let Some(body) = self.get_json(&url)? else {
                 break;
-            }
-            let body: Value = resp.json()?;
+            };
             let people = parse_contributors(&body);
             let done = people.len() < 100;
             out.extend(people);
@@ -448,7 +564,8 @@ pub fn parse_contributors(body: &Value) -> Vec<String> {
         .unwrap_or_default()
 }
 
-/// One commit's date and its author, keyed by GitHub login, else email, else name.
+/// One commit's date and its author, keyed by GitHub login, else email, else
+/// `~` and the name.
 pub type CommitAuthor = (DateTime<Utc>, String);
 
 /// `(oid, (committed, author))` per commit node.
@@ -469,7 +586,8 @@ pub fn parse_authors(conn: &Value) -> Vec<(String, CommitAuthor)> {
                                 .filter(|e| !e.is_empty())
                                 .map(str::to_lowercase)
                         })
-                        .or_else(|| a["name"].as_str().map(str::to_string))?;
+                        // A name is marked with `~`, so it can never read as a login.
+                        .or_else(|| a["name"].as_str().map(|n| format!("~{n}")))?;
                     let at = time(&c["committedDate"])?;
                     let oid = c["oid"]
                         .as_str()
@@ -483,6 +601,24 @@ pub fn parse_authors(conn: &Value) -> Vec<(String, CommitAuthor)> {
 
 fn time(v: &Value) -> Option<DateTime<Utc>> {
     v.as_str()?.parse().ok()
+}
+
+/// The `errors` list of a GraphQL answer; empty when there is none.
+fn graphql_errors(body: &Value) -> &[Value] {
+    body["errors"].as_array().map_or(&[], Vec::as_slice)
+}
+
+fn error_messages(errs: &[Value]) -> String {
+    let msg = errs
+        .iter()
+        .filter_map(|e| e["message"].as_str())
+        .collect::<Vec<_>>()
+        .join("; ");
+    if msg.is_empty() {
+        "no data in the answer".into()
+    } else {
+        msg
+    }
 }
 
 fn count(v: &Value) -> u64 {
@@ -613,6 +749,10 @@ pub struct RawActivity {
     pub prs_opened: BTreeMap<u64, DateTime<Utc>>,
     pub prs_merged: BTreeMap<u64, DateTime<Utc>>,
     pub issues_opened: BTreeMap<u64, DateTime<Utc>>,
+    /// When the most recently updated pull request (any state) was updated,
+    /// as the last fetch read it; `None` before a fetch and for a repository
+    /// without pull requests.
+    pub pr_updated_at: Option<DateTime<Utc>>,
 }
 
 impl RawActivity {
@@ -627,6 +767,22 @@ impl RawActivity {
             .ok()
             .and_then(|t| serde_json::from_str(&t).ok())
             .unwrap_or_default()
+    }
+
+    /// What the last fetch of `repo` read of its pull requests, from the
+    /// activity kept under `dir` ([`prs::Seen`]). `None` before a fetch,
+    /// and when the kept activity has no `pr_updated_at` field because an
+    /// earlier version wrote it. A repository without pull requests gives
+    /// `pr_updated_at: None`.
+    pub fn seen(dir: &Path, repo: &str) -> Option<prs::Seen> {
+        let text = std::fs::read_to_string(Self::path(dir, repo)).ok()?;
+        let value: Value = serde_json::from_str(&text).ok()?;
+        value.get("pr_updated_at")?;
+        let raw: RawActivity = serde_json::from_value(value).ok()?;
+        Some(prs::Seen {
+            pr_updated_at: raw.pr_updated_at,
+            read_at: raw.fetched_at?,
+        })
     }
 
     pub fn save(&self, dir: &Path, repo: &str) -> craft_core::Result<()> {
@@ -849,6 +1005,7 @@ query($owner: String!, $name: String!) {
     mergedPrs: pullRequests(states: MERGED) { totalCount }
     oldestOpenPr: pullRequests(states: OPEN, first: 1, orderBy: {field: CREATED_AT, direction: ASC}) { nodes { createdAt } }
     newestPr: pullRequests(first: 1, orderBy: {field: CREATED_AT, direction: DESC}) { nodes { createdAt } }
+    lastPr: pullRequests(first: 1, orderBy: {field: UPDATED_AT, direction: DESC}) { nodes { updatedAt } }
     openIssues: issues(states: OPEN) { totalCount }
     allIssues: issues { totalCount }
     newestIssue: issues(first: 1, orderBy: {field: CREATED_AT, direction: DESC}) { nodes { createdAt } }
@@ -1233,5 +1390,300 @@ mod tests {
         assert!(s.recent.values().all(|a| *a == Activity::default()));
         s.recent.clear();
         assert_eq!(s, RepoStats::default());
+    }
+
+    #[test]
+    fn a_commit_author_with_no_login_or_email_is_marked_as_a_name() {
+        let c = parse_authors(&json!({"nodes": [
+          {"oid": "n1", "committedDate": "2026-10-08T00:00:00Z", "author": {"email": "", "name": "Cy", "user": null}},
+          {"oid": "n2", "committedDate": "2026-10-08T00:00:00Z", "author": {"email": "", "name": "Cy", "user": {"login": "cy-x"}}}
+        ]}));
+        let who: Vec<&str> = c.iter().map(|(_, (_, w))| w.as_str()).collect();
+        assert_eq!(who, ["~Cy", "cy-x"]);
+    }
+
+    #[test]
+    fn a_fetch_keeps_when_the_newest_pull_request_was_updated() {
+        let api = routed_stub(|request| {
+            let body = if request.contains("/contributors") {
+                "[]".to_string()
+            } else if request.contains("openprs:") {
+                json!({"data": {"repository": {
+                    "lastPr": {"nodes": [{"updatedAt": "2026-10-18T09:30:00Z"}]},
+                    "defaultBranchRef": null
+                }}})
+                .to_string()
+            } else {
+                // Releases, commit authors and events: none.
+                json!({"data": {"repository": {"defaultBranchRef": null}}}).to_string()
+            };
+            Some(ok_json(&body))
+        });
+        let gh = GitHub::with_api("t", api).unwrap();
+        let mut raw = RawActivity::default();
+        let now = "2026-10-18T10:00:00Z".parse().unwrap();
+        gh.fetch_repo("o/r", now, &mut raw).unwrap();
+        assert_eq!(
+            raw.pr_updated_at,
+            Some("2026-10-18T09:30:00Z".parse().unwrap())
+        );
+        assert!(main_query(now, None)
+            .contains("lastPr: pullRequests(first: 1, orderBy: {field: UPDATED_AT"));
+        // A file written before the field existed loads without it.
+        let dir = std::env::temp_dir().join(format!("craft-raw-pr-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("raw")).unwrap();
+        std::fs::write(RawActivity::path(&dir, "o/old"), r#"{"commits":{}}"#).unwrap();
+        assert_eq!(RawActivity::load(&dir, "o/old").pr_updated_at, None);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn the_kept_activity_gives_what_the_fetch_read_of_pull_requests() {
+        let dir = std::env::temp_dir().join(format!("craft-raw-seen-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("raw")).unwrap();
+        let read: DateTime<Utc> = "2026-10-18T09:40:00Z".parse().unwrap();
+        let at: DateTime<Utc> = "2026-10-18T09:30:00Z".parse().unwrap();
+        let with_prs = RawActivity {
+            fetched_at: Some(read),
+            pr_updated_at: Some(at),
+            ..Default::default()
+        };
+        with_prs.save(&dir, "o/prs").unwrap();
+        let without_prs = RawActivity {
+            fetched_at: Some(read),
+            ..Default::default()
+        };
+        without_prs.save(&dir, "o/none").unwrap();
+        std::fs::write(
+            RawActivity::path(&dir, "o/old"),
+            r#"{"fetched_at":"2026-10-18T09:40:00Z","commits":{}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            RawActivity::seen(&dir, "o/prs"),
+            Some(prs::Seen {
+                pr_updated_at: Some(at),
+                read_at: read,
+            })
+        );
+        assert_eq!(
+            RawActivity::seen(&dir, "o/none"),
+            Some(prs::Seen {
+                pr_updated_at: None,
+                read_at: read,
+            }),
+            "a repository without pull requests"
+        );
+        assert_eq!(
+            RawActivity::seen(&dir, "o/old"),
+            None,
+            "written without the field"
+        );
+        assert_eq!(RawActivity::seen(&dir, "o/missing"), None);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_rate_limit_on_a_background_request_stops_the_next_ones() {
+        let limited = r#"{"message": "You have exceeded a secondary rate limit."}"#;
+        let secondary = format!(
+            "HTTP/1.1 403 Forbidden\r\nContent-Type: application/json\r\nretry-after: 60\r\n\
+             Content-Length: {}\r\nConnection: close\r\n\r\n{limited}",
+            limited.len()
+        );
+        let (api, requests) = stub(vec![secondary.clone(), secondary]);
+        let gate = Arc::new(Gate::new());
+        let background = GitHub::with_api("t", api.clone())
+            .unwrap()
+            .in_background(gate.clone());
+        let vars = json!({});
+        assert!(matches!(
+            background.graphql_body("query { viewer { login } }", vars.clone()),
+            Err(Error::RateLimited(_))
+        ));
+        assert!(matches!(
+            background.graphql_body("query { viewer { login } }", vars.clone()),
+            Err(Error::Halted(_))
+        ));
+        requests.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert!(
+            requests.recv_timeout(Duration::from_millis(200)).is_err(),
+            "the second request was not sent"
+        );
+        let until = gate.halted().expect("kept for the poll thread");
+        assert!(
+            DateTime::parse_from_rfc3339(&until).is_ok(),
+            "when GitHub said to retry: {until}"
+        );
+        gate.pause_until(std::time::Instant::now(), "paused");
+        // A poll client's rate limit is the poll thread's own business.
+        let poll = GitHub::with_api("t", api).unwrap();
+        assert!(matches!(
+            poll.graphql_body("query { viewer { login } }", vars),
+            Err(Error::RateLimited(_))
+        ));
+        assert_eq!(gate.halted(), None);
+    }
+
+    #[test]
+    fn rest_requests_of_a_background_client_wait_at_its_gate() {
+        let limited = r#"{"message": "API rate limit exceeded"}"#;
+        let primary = format!(
+            "HTTP/1.1 403 Forbidden\r\nContent-Type: application/json\r\nx-ratelimit-remaining: 0\r\n\
+             x-ratelimit-reset: 2000000000\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{limited}",
+            limited.len()
+        );
+        let (api, requests) = stub(vec![primary.clone(), primary]);
+        let gate = Arc::new(Gate::new());
+        let background = GitHub::with_api("t", api)
+            .unwrap()
+            .in_background(gate.clone());
+        assert!(matches!(
+            background.icon("o/r", "b1"),
+            Err(Error::RateLimited(_))
+        ));
+        assert!(gate.halted().is_some(), "the rate limit stops the others");
+        assert!(matches!(
+            background.icon("o/r", "b1"),
+            Err(Error::Halted(_))
+        ));
+        assert!(matches!(
+            background.contributors("o/r"),
+            Err(Error::Halted(_))
+        ));
+        requests.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert!(
+            requests.recv_timeout(Duration::from_millis(200)).is_err(),
+            "no request after the rate limit"
+        );
+    }
+
+    #[test]
+    fn a_poll_waits_through_the_pacing_after_a_background_request() {
+        let (arrived_tx, arrived) = std::sync::mpsc::channel();
+        let api = routed_stub(move |_| {
+            arrived_tx.send(()).ok();
+            std::thread::sleep(Duration::from_millis(300));
+            Some(ok_json(r#"{"data":{}}"#))
+        });
+        let gate = Arc::new(Gate::new());
+        let background = GitHub::with_api("t", api)
+            .unwrap()
+            .in_background(gate.clone());
+        let people = std::thread::spawn(move || {
+            background
+                .graphql_body("query { viewer { login } }", json!({}))
+                .unwrap();
+        });
+        arrived.recv_timeout(Duration::from_secs(5)).unwrap();
+        let sent = std::time::Instant::now();
+        let session = gate.poll_session();
+        // 300 ms for the answer, then as long again for the pacing.
+        assert!(
+            sent.elapsed() >= Duration::from_millis(550),
+            "the poll started {:?} after the request",
+            sent.elapsed()
+        );
+        drop(session);
+        people.join().unwrap();
+    }
+
+    #[test]
+    fn only_a_query_github_could_not_finish_asks_for_less() {
+        assert!(Error::Http(502, "Bad Gateway".into()).is_overload());
+        assert!(Error::GraphQl("Something went wrong: timeout".into()).is_overload());
+        assert!(!Error::Http(404, "Not Found".into()).is_overload());
+        assert!(!Error::RateLimited("later".into()).is_overload());
+    }
+
+    pub(crate) fn ok_json(body: &str) -> String {
+        format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\
+             Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        )
+    }
+
+    /// A server on 127.0.0.1 that answers one connection with each of
+    /// `responses`, in order, and sends back each request it read, head and
+    /// body, in lowercase.
+    pub(crate) fn stub(responses: Vec<String>) -> (String, std::sync::mpsc::Receiver<String>) {
+        use std::io::Write;
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            for response in responses {
+                let Ok((mut conn, _)) = listener.accept() else {
+                    return;
+                };
+                let request = read_request(&mut conn);
+                conn.write_all(response.as_bytes()).ok();
+                let _ = tx.send(request);
+            }
+        });
+        (url, rx)
+    }
+
+    /// A server on 127.0.0.1 that reads each connection on a thread of its
+    /// own and answers with `answer` of the request, head and body, in
+    /// lowercase. `None` keeps the connection open for 30 seconds without an
+    /// answer.
+    pub(crate) fn routed_stub(
+        answer: impl Fn(&str) -> Option<String> + Send + Sync + 'static,
+    ) -> String {
+        use std::io::Write;
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let answer = Arc::new(answer);
+        std::thread::spawn(move || {
+            for conn in listener.incoming() {
+                let Ok(mut conn) = conn else {
+                    return;
+                };
+                let answer = answer.clone();
+                std::thread::spawn(move || {
+                    let request = read_request(&mut conn);
+                    match answer(&request) {
+                        Some(response) => {
+                            conn.write_all(response.as_bytes()).ok();
+                        }
+                        None => std::thread::sleep(Duration::from_secs(30)),
+                    }
+                });
+            }
+        });
+        url
+    }
+
+    /// One request read from `conn`, head and body, in lowercase.
+    fn read_request(conn: &mut std::net::TcpStream) -> String {
+        use std::io::Read;
+        conn.set_read_timeout(Some(Duration::from_secs(5))).ok();
+        let mut head = Vec::new();
+        let mut buf = [0; 1024];
+        let end = loop {
+            if let Some(i) = head.windows(4).position(|w| w == b"\r\n\r\n") {
+                break i + 4;
+            }
+            match conn.read(&mut buf) {
+                Ok(0) | Err(_) => break head.len(),
+                Ok(n) => head.extend_from_slice(&buf[..n]),
+            }
+        };
+        let text = String::from_utf8_lossy(&head[..end]).to_lowercase();
+        // Read a POST body too, so closing the connection doesn't reset it.
+        let length = text
+            .lines()
+            .find_map(|l| l.strip_prefix("content-length:"))
+            .and_then(|n| n.trim().parse::<usize>().ok())
+            .unwrap_or(0);
+        while head.len() < end + length {
+            match conn.read(&mut buf) {
+                Ok(0) | Err(_) => break,
+                Ok(n) => head.extend_from_slice(&buf[..n]),
+            }
+        }
+        String::from_utf8_lossy(&head).to_lowercase()
     }
 }
