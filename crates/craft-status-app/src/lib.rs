@@ -23,6 +23,7 @@ use tauri::{
 };
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
 
+mod added;
 mod shrink;
 
 const MAIN: &str = "main";
@@ -46,6 +47,8 @@ const BACKOFF_MAX: i64 = 60 * 60;
 /// Below this many GraphQL points left, pause for `LOW_BUDGET_PAUSE`.
 const BUDGET_FLOOR: u64 = 150;
 const LOW_BUDGET_PAUSE: i64 = 30 * 60;
+/// Below this many GraphQL points left, skip requests nobody asked for.
+const OPTIONAL_FLOOR: u64 = 1_500;
 /// Ignore manual refreshes this soon after the previous one.
 const MANUAL_DEBOUNCE: i64 = 15;
 /// After the window gains focus, wait this long (past any Mission Control
@@ -489,8 +492,10 @@ fn spawn_poller(app: AppHandle, rx: mpsc::Receiver<Wake>) {
         .spawn(move || {
             let mut pacing = Pacing::default();
             let mut last_manual: Option<DateTime<Utc>> = None;
+            let mut found = added::Found::default();
             loop {
                 reload_config_if_changed(&app);
+                added::discover(&app, &mut pacing, &mut found);
                 step(&app, &mut pacing);
                 // Staleness changes with the clock alone.
                 update_tray(&app);
@@ -917,6 +922,8 @@ pub fn run() {
             hide_window,
             log,
             quit,
+            added::keep_repo,
+            added::hide_repo,
         ])
         .setup(move |app| {
             let cfg = app.state::<AppState>().config.lock().unwrap().clone();

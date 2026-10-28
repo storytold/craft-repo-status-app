@@ -112,6 +112,11 @@ tr.stale td:not(:first-child) { opacity: .55; }
 .row-refresh:hover, .row-refresh.spinning { opacity: 1; color: var(--accent); }
 .row-refresh.spinning svg { animation: spin 1s linear infinite; }
 @media (prefers-reduced-motion: reduce) { .row-refresh.spinning svg { animation: none; } }
+.added { display: inline-flex; align-items: center; gap: 3px; font-weight: 400; }
+.added-mark { font-size: 9px; font-weight: 600; color: var(--accent); padding: 0 5px; border-radius: 7px; background: color-mix(in srgb, var(--accent) 14%, transparent); }
+.added-action { border: 0; background: none; padding: 0 2px; font-size: 10px; color: var(--muted); opacity: .7; }
+.added-action:hover:not(:disabled) { opacity: 1; color: var(--accent); text-decoration: underline; }
+.added-action:disabled { opacity: .35; cursor: default; }
 .zero { color: var(--muted); opacity: .6; }
 .active { color: var(--accent); font-weight: 600; }
 .link:hover { text-decoration: underline; color: var(--accent); }

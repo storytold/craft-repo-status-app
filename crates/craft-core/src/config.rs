@@ -39,6 +39,11 @@ pub struct Config {
     /// Optional, used only when `CRAFT_STATUS_GITHUB_TOKEN`, `GITHUB_TOKEN`
     /// and `GH_TOKEN` are unset; otherwise `gh auth token`.
     pub github_token: String,
+    /// Add a row for each repo where the viewer has an open pull request,
+    /// when `repos` lists another repo of the same owner ([`Config::may_add`]).
+    pub auto_repos: bool,
+    /// Repos never added that way: `owner/name` or full GitHub URLs.
+    pub hidden_auto_repos: Vec<String>,
     pub window: WindowConfig,
     pub tray: TrayConfig,
     pub shortcuts: Shortcuts,
@@ -75,6 +80,8 @@ impl Default for Config {
             poll_minutes: 30.0,
             stale_minutes: 60.0,
             github_token: String::new(),
+            auto_repos: true,
+            hidden_auto_repos: Vec::new(),
             window: WindowConfig::default(),
             tray: TrayConfig::default(),
             shortcuts: Shortcuts::default(),
@@ -179,6 +186,203 @@ impl Config {
     }
 }
 
+/// A repo list in the config file that a row added by the poller writes to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RepoList {
+    /// `repos`: the row's Keep.
+    Watched,
+    /// `hidden_auto_repos`: the row's Hide.
+    Hidden,
+}
+
+impl RepoList {
+    fn key(self) -> &'static str {
+        match self {
+            RepoList::Watched => "repos",
+            RepoList::Hidden => "hidden_auto_repos",
+        }
+    }
+
+    fn of(self, config: &Config) -> &[String] {
+        match self {
+            RepoList::Watched => &config.repos,
+            RepoList::Hidden => &config.hidden_auto_repos,
+        }
+    }
+}
+
+impl Config {
+    /// The owners of the configured repos, each once, in config order.
+    pub fn owners(&self) -> Vec<String> {
+        let mut out: Vec<String> = Vec::new();
+        for (owner, _) in self.repos.iter().filter_map(|r| r.split_once('/')) {
+            if !out.iter().any(|o| o.eq_ignore_ascii_case(owner)) {
+                out.push(owner.to_string());
+            }
+        }
+        out
+    }
+
+    /// Whether the poller may add `repo` to the table on its own:
+    /// `auto_repos` is on, `repos` lists another repo of the same owner, and
+    /// neither `repos` nor `hidden_auto_repos` lists `repo`.
+    pub fn may_add(&self, repo: &str) -> bool {
+        let Some(repo) = normalize_repo(repo) else {
+            return false;
+        };
+        let owner = repo.split('/').next().unwrap_or_default();
+        self.auto_repos
+            && self.owners().iter().any(|o| o.eq_ignore_ascii_case(owner))
+            && !lists(&self.repos, &repo)
+            && !lists(&self.hidden_auto_repos, &repo)
+    }
+
+    /// Adds `repo` to `list` in the config file at `path` (written from the
+    /// template first when there is none) with [`add_to_list`], through a
+    /// temporary file and a rename. A symlink is followed, and the file keeps
+    /// its permissions: the temporary file gets them before any text goes in.
+    pub fn add_to_file(path: &Path, list: RepoList, repo: &str) -> Result<()> {
+        let path = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+        let io = |source| Error::Io {
+            path: path.display().to_string(),
+            source,
+        };
+        let text = match std::fs::read_to_string(&path) {
+            Ok(text) => text,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                return atomic_write(&path, &add_to_list(TEMPLATE, list, repo)?);
+            }
+            Err(e) => return Err(io(e)),
+        };
+        let out = add_to_list(&text, list, repo)?;
+        let mode = std::fs::metadata(&path).map_err(io)?.permissions();
+        let tmp = path.with_extension("tmp");
+        let _ = std::fs::remove_file(&tmp);
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&tmp)
+            .map_err(io)?;
+        file.set_permissions(mode).map_err(io)?;
+        std::io::Write::write_all(&mut file, out.as_bytes()).map_err(io)?;
+        drop(file);
+        std::fs::rename(&tmp, &path).map_err(io)
+    }
+}
+
+/// Whether `list` holds `repo` (`owner/name`), in any spelling.
+fn lists(list: &[String], repo: &str) -> bool {
+    list.iter()
+        .filter_map(|r| normalize_repo(r))
+        .any(|r| r.eq_ignore_ascii_case(repo))
+}
+
+/// `text`, a config file, with `repo` added to `list`. Comments and
+/// formatting stay; on a list written one repo per line, the new repo gets a
+/// line of its own and a trailing comma, and a comment on the last repo's
+/// line stays on that line. A list the file lacks is written with the repos
+/// it reads as (for `repos`, the defaults), then `repo`, above the first
+/// table. A repo the list already holds is not added again.
+pub fn add_to_list(text: &str, list: RepoList, repo: &str) -> Result<String> {
+    use toml_edit::{Array, DocumentMut, Item, RawString, TomlError, Value};
+    let invalid = |what: &str, e: String| Error::Io {
+        path: what.to_string(),
+        source: std::io::Error::new(std::io::ErrorKind::InvalidData, e),
+    };
+    let raw = |s: Option<&RawString>| {
+        s.and_then(RawString::as_str)
+            .unwrap_or_default()
+            .to_string()
+    };
+    let held = Config::parse(text)?;
+    let repo = normalize_repo(repo)
+        .ok_or_else(|| invalid(repo, "not owner/name or a GitHub URL".into()))?;
+    let held = list.of(&held);
+    if lists(held, &repo) {
+        return Ok(text.to_string());
+    }
+    let wanted = repo.clone();
+    // `Config::parse` has read the same text, so this is not expected to fail.
+    let mut doc: DocumentMut = text
+        .parse()
+        .map_err(|e: TomlError| invalid("config", e.to_string()))?;
+    match doc.get_mut(list.key()).and_then(Item::as_array_mut) {
+        Some(array) if !array.is_empty() => {
+            // On a list without a trailing comma, the line break after the
+            // last repo moves after a new comma.
+            let last = array.iter().last();
+            let suffix = raw(last.and_then(|v| v.decor().suffix()));
+            if suffix.contains('\n') {
+                if let Some(last) = array.iter_mut().last() {
+                    last.decor_mut().set_suffix("");
+                }
+                let trailing = raw(Some(array.trailing()));
+                array.set_trailing(format!("{suffix}{trailing}"));
+                array.set_trailing_comma(true);
+            }
+            // The indent of the last repo, without any comment above it.
+            let indent = array
+                .iter()
+                .last()
+                .and_then(|v| v.decor().prefix())
+                .and_then(|p| p.as_str())
+                .and_then(|p| p.rfind('\n').map(|i| p[i..].to_string()))
+                .unwrap_or_else(|| " ".to_string());
+            // A comment on the last repo's line stays on that line.
+            let trailing = raw(Some(array.trailing()));
+            let (line, rest) = trailing.split_at(trailing.find('\n').unwrap_or(trailing.len()));
+            let mut value = Value::from(repo);
+            if line.contains('#') {
+                let indent = if indent.starts_with('\n') {
+                    indent
+                } else {
+                    "\n  ".to_string()
+                };
+                value.decor_mut().set_prefix(format!("{line}{indent}"));
+                array.set_trailing(rest);
+            } else {
+                value.decor_mut().set_prefix(indent);
+            }
+            array.push_formatted(value);
+        }
+        Some(array) => array.push(repo),
+        None => {
+            let mut array = Array::new();
+            for r in held.iter().cloned().chain([repo]) {
+                let mut value = Value::from(r);
+                value.decor_mut().set_prefix("\n  ");
+                array.push_formatted(value);
+            }
+            array.set_trailing_comma(true);
+            array.set_trailing("\n");
+            doc.insert(list.key(), Item::Value(Value::Array(array)));
+            // The new list goes above the file's first table, with a blank
+            // line between them.
+            let first_table = doc
+                .as_table_mut()
+                .iter_mut()
+                .filter_map(|(_, item)| item.as_table_mut())
+                .filter(|t| !t.is_implicit())
+                .min_by_key(|t| t.position());
+            if let Some(table) = first_table {
+                let prefix = raw(table.decor().prefix());
+                if !prefix.starts_with('\n') {
+                    table.decor_mut().set_prefix(format!("\n{prefix}"));
+                }
+            }
+        }
+    }
+    let out = doc.to_string();
+    // Fail when the new text does not list the repo.
+    if !lists(list.of(&Config::parse(&out)?), &wanted) {
+        return Err(invalid(
+            "config",
+            format!("could not add {wanted} to {}", list.key()),
+        ));
+    }
+    Ok(out)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WindowState {
     pub x: i32,
@@ -271,5 +475,174 @@ mod tests {
         };
         assert!(w.visible_on(&[(0, 0, 1920, 1080)]));
         assert!(!w.visible_on(&[(2000, 0, 1920, 1080)]));
+    }
+
+    #[test]
+    fn repos_are_added_only_under_a_configured_owner() {
+        let c = Config::parse(
+            r#"repos = ["https://github.com/Acme/one", "acme/two", "other-org/lib"]
+               hidden_auto_repos = ["https://github.com/acme/hidden"]"#,
+        )
+        .unwrap();
+        assert_eq!(c.owners(), vec!["Acme", "other-org"]);
+        assert!(c.auto_repos, "on by default");
+        assert!(c.may_add("acme/three"));
+        assert!(c.may_add("OTHER-ORG/tool"));
+        assert!(!c.may_add("stranger/three"), "an owner the config lacks");
+        assert!(!c.may_add("ACME/Two"), "already configured");
+        assert!(!c.may_add("acme/hidden"));
+        assert!(!c.may_add("not a repo"));
+        let off = Config::parse("auto_repos = false\nrepos = [\"acme/one\"]").unwrap();
+        assert!(!off.may_add("acme/three"));
+    }
+
+    #[test]
+    fn keep_and_hide_add_to_the_lists_and_keep_the_comments() {
+        let kept = add_to_list(
+            TEMPLATE,
+            RepoList::Watched,
+            "https://github.com/storytold/newcraft",
+        )
+        .unwrap();
+        assert!(kept.contains("# Repositories to watch"));
+        assert!(kept.contains("  \"storytold/figcraft\",\n  \"storytold/newcraft\",\n]"));
+        let c = Config::parse(&kept).unwrap();
+        assert_eq!(
+            c.repos.last().map(String::as_str),
+            Some("storytold/newcraft")
+        );
+        assert_eq!(c.repos.len(), DEFAULT_REPOS.len() + 1);
+        assert_eq!(
+            add_to_list(&kept, RepoList::Watched, "Storytold/NewCraft").unwrap(),
+            kept,
+            "already listed"
+        );
+
+        let hidden = add_to_list(&kept, RepoList::Hidden, "storytold/scratch").unwrap();
+        assert!(hidden.contains("hidden_auto_repos = [\"storytold/scratch\"]"));
+        let c = Config::parse(&hidden).unwrap();
+        assert_eq!(c.hidden_auto_repos, vec!["storytold/scratch"]);
+        assert!(!c.may_add("storytold/scratch"));
+
+        // A comment above the last repo stays where it is, once.
+        let commented = "repos = [\n  \"a/one\",\n  # libraries\n  \"a/lib\",\n]\n";
+        assert_eq!(
+            add_to_list(commented, RepoList::Watched, "a/two").unwrap(),
+            "repos = [\n  \"a/one\",\n  # libraries\n  \"a/lib\",\n  \"a/two\",\n]\n"
+        );
+        assert_eq!(
+            add_to_list("repos = [\"a/one\"]\n", RepoList::Watched, "a/two").unwrap(),
+            "repos = [\"a/one\", \"a/two\"]\n"
+        );
+    }
+
+    #[test]
+    fn a_list_without_a_trailing_comma_or_with_a_comment_on_its_last_line_keeps_its_shape() {
+        let add = |text: &str| add_to_list(text, RepoList::Watched, "a/two").unwrap();
+        assert_eq!(
+            add("repos = [\n  \"a/one\",\n  \"a/lib\"\n]\n"),
+            "repos = [\n  \"a/one\",\n  \"a/lib\",\n  \"a/two\",\n]\n"
+        );
+        assert_eq!(
+            add("repos = [\n  \"a/one\",\n  \"a/lib\", # libraries\n]\n"),
+            "repos = [\n  \"a/one\",\n  \"a/lib\", # libraries\n  \"a/two\",\n]\n",
+            "the comment stays on the line of the repo it follows"
+        );
+        assert_eq!(
+            add("repos = [\n  \"a/one\",\n  \"a/lib\" # libraries\n]\n"),
+            "repos = [\n  \"a/one\",\n  \"a/lib\", # libraries\n  \"a/two\",\n]\n"
+        );
+        assert_eq!(
+            add("repos = [\n  \"a/one\",\n  \"a/lib\", # libraries\n  # the end\n]\n"),
+            "repos = [\n  \"a/one\",\n  \"a/lib\", # libraries\n  \"a/two\",\n  # the end\n]\n"
+        );
+        // The last repo on the bracket's line, with a comment after it.
+        for text in [
+            "repos = [\"a/one\", # one\n]\n",
+            "repos = [\"a/one\" # one\n]\n",
+        ] {
+            let out = add(text);
+            assert_eq!(out, "repos = [\"a/one\", # one\n  \"a/two\",\n]\n");
+            assert_eq!(Config::parse(&out).unwrap().repos, ["a/one", "a/two"]);
+        }
+    }
+
+    #[test]
+    fn a_list_the_file_lacks_is_followed_by_a_blank_line_before_a_table() {
+        let out = add_to_list("[window]\nwidth = 900.0\n", RepoList::Hidden, "a/two").unwrap();
+        assert_eq!(
+            out,
+            "hidden_auto_repos = [\n  \"a/two\",\n]\n\n[window]\nwidth = 900.0\n"
+        );
+        let spaced = "poll_minutes = 5.0\n\n[window]\nwidth = 900.0\n";
+        let out = add_to_list(spaced, RepoList::Hidden, "a/two").unwrap();
+        assert_eq!(
+            out,
+            "poll_minutes = 5.0\nhidden_auto_repos = [\n  \"a/two\",\n]\n\n[window]\nwidth = 900.0\n",
+            "one blank line, not two"
+        );
+    }
+
+    #[test]
+    fn a_list_the_file_lacks_starts_from_the_repos_it_reads_as() {
+        let text = "# mine\npoll_minutes = 5.0\n\n[window]\nwidth = 900.0\n";
+        let out = add_to_list(text, RepoList::Watched, "storytold/newcraft").unwrap();
+        assert!(out.starts_with("# mine\npoll_minutes = 5.0\n"));
+        let c = Config::parse(&out).unwrap();
+        let mut want: Vec<String> = DEFAULT_REPOS.iter().map(|s| s.to_string()).collect();
+        want.push("storytold/newcraft".into());
+        assert_eq!(c.repos, want, "the defaults stay");
+        assert_eq!((c.poll_minutes, c.window.width), (5.0, 900.0));
+        let out = add_to_list(text, RepoList::Hidden, "storytold/scratch").unwrap();
+        assert_eq!(
+            Config::parse(&out).unwrap().hidden_auto_repos,
+            vec!["storytold/scratch"]
+        );
+        assert!(add_to_list("repos = [", RepoList::Watched, "a/b").is_err());
+        assert!(add_to_list("", RepoList::Watched, "not a repo").is_err());
+    }
+
+    #[test]
+    fn keep_and_hide_survive_a_reload_and_keep_the_files_permissions() {
+        let dir = std::env::temp_dir().join(format!("craft-config-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.toml");
+        std::fs::write(&path, "# keep me\nrepos = [\"acme/one\"]\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        }
+        Config::add_to_file(&path, RepoList::Watched, "acme/two").unwrap();
+        Config::add_to_file(&path, RepoList::Hidden, "acme/three").unwrap();
+        let c = Config::load_from(&path).unwrap();
+        assert_eq!(c.repos, vec!["acme/one", "acme/two"]);
+        assert_eq!(c.hidden_auto_repos, vec!["acme/three"]);
+        assert!(std::fs::read_to_string(&path)
+            .unwrap()
+            .starts_with("# keep me\n"));
+        assert!(!path.with_extension("tmp").exists());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o600);
+            // Through a symlink, the file it points at is written.
+            let link = dir.join("link.toml");
+            std::os::unix::fs::symlink(&path, &link).unwrap();
+            Config::add_to_file(&link, RepoList::Watched, "acme/four").unwrap();
+            assert!(std::fs::symlink_metadata(&link).unwrap().is_symlink());
+            assert_eq!(Config::load_from(&path).unwrap().repos.len(), 3);
+        }
+        let fresh = dir.join("missing.toml");
+        Config::add_to_file(&fresh, RepoList::Hidden, "storytold/scratch").unwrap();
+        let c = Config::load_from(&fresh).unwrap();
+        assert_eq!(
+            c.repos.len(),
+            DEFAULT_REPOS.len(),
+            "written from the template"
+        );
+        assert_eq!(c.hidden_auto_repos, vec!["storytold/scratch"]);
+        std::fs::remove_dir_all(&dir).ok();
     }
 }
