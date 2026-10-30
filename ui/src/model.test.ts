@@ -6,6 +6,9 @@ import {
 } from './model.ts';
 import type { Activity, RepoEntry, RepoStats, UrgentIssue } from './model.ts';
 
+import { figurePct, formatPct, parityTip, parityUrl } from './model.ts';
+import type { Figure, Parity } from './model.ts';
+
 const entry = (repo: string, stats: Partial<RepoStats> | null, fetched_at: string | null = '2026-10-08T12:00:00Z'): RepoEntry =>
   ({ repo: `o/${repo}`, stats: stats as RepoStats | null, fetched_at });
 
@@ -217,6 +220,92 @@ test('token status', () => {
   );
   assert.equal(tokenStatus({ source: null, rejected: false }).text, 'No GitHub token');
   assert.equal(tokenStatus({ source: null, rejected: false }).bad, true);
+});
+
+// ───────────────────────────── parity ─────────────────────────────
+
+const figure = (pct: number, extra: Partial<Extract<Figure, { state: 'ok' }>> = {}): Figure => ({
+  state: 'ok', pct, low: null, high: null, label: 'Feature breadth', text: `~${pct}%`, kind: 'estimated', basis: 'estimated',
+  path: 'ROADMAP.md', line: 7, from: null, ...extra,
+});
+
+const unread = { state: 'absent', why: 'Not read yet' } as const;
+
+const parity = (p: Partial<Parity> = {}): Parity => ({
+  version: 1, commit: 'c0ffee', roadmap_oid: 'r1', parity_doc: true, na: null, breadth: figure(80), ready: figure(50),
+  last_reviewed: '2026-10-10', breadth_alts: [], menu_breadth: unread, menu_hint: null, mainstream: unread, essentials: unread,
+  to_alpha: unread, to_beta: unread, to_full: unread, stage: unread, files: [], notes: [], ...p,
+});
+
+test('parity columns sort by percentage with missing numbers last, and have no total', () => {
+  const absent: Figure = { state: 'absent', why: 'No ROADMAP.md at HEAD' };
+  const list: RepoEntry[] = [
+    { ...entry('a', {}), parity: parity({ ready: figure(61) }) },
+    { ...entry('b', {}), parity: parity({ breadth: figure(81.1), ready: absent }) },
+    { ...entry('c', {}), parity: null },
+    { ...entry('d', {}), parity: parity({ ready: figure(70) }) },
+  ];
+  assert.equal(defaultDir('parity_ready'), 'desc');
+  assert.equal(names(sortEntries(list, 'parity_ready', 'desc')), 'dabc');
+  assert.equal(names(sortEntries(list, 'parity_ready', 'asc')), 'adbc');
+  assert.equal(names(sortEntries(list, 'parity_breadth', 'desc')), 'badc');
+  assert.equal(value(list[1]!, 'parity_breadth'), 81.1);
+  assert.equal(value(list[1]!, 'parity_ready'), null);
+  assert.equal(value(list[2]!, 'parity_ready'), null, 'not read yet');
+  assert.equal(figurePct({ state: 'unreadable', why: 'x', raw: 'most', path: 'ROADMAP.md', line: 3 }), null);
+  const t = totals(list);
+  assert.equal(t.parity_ready, undefined, 'percentages are not summed');
+  assert.equal(t.parity_breadth, undefined);
+  assert.equal(formatPct(76.96), '77%');
+  assert.equal(formatPct(81.1), '81.1%');
+});
+
+test('a parity tooltip gives the row, its basis and the review date, or why there is no number', () => {
+  const ok = parity({
+    ready: figure(75, { label: 'Feature depth (weighted by use)', text: '~75%', kind: 'estimated', from: 'Feature depth row (no Ready for real work row)' }),
+    breadth: figure(88, { text: '~88%', kind: 'measured in part: menus 348/375', basis: 'partly' }),
+  });
+  assert.equal(parityTip(ok, 'breadth'), [
+    'Feature breadth: ~88%', 'Partly measured · measured in part: menus 348/375',
+    'ROADMAP.md last reviewed 2026-10-10', 'Click to open docs/target-app-parity.md on GitHub',
+  ].join('\n'));
+  assert.match(parityTip(ok, 'ready'), /^Feature depth \(weighted by use\): ~75%\nEstimated · estimated\nSource: Feature depth row \(no Ready for real work row\)\n/);
+  const bad = parity({
+    parity_doc: false, last_reviewed: null,
+    breadth: { state: 'unreadable', why: 'No percentage in the Value cell of Feature breadth', raw: 'most of it', path: 'ROADMAP.md', line: 9 },
+  });
+  assert.equal(parityTip(bad, 'breadth'), [
+    'No percentage in the Value cell of Feature breadth', 'ROADMAP.md line 9: most of it',
+    'ROADMAP.md has no Last reviewed date', 'Click to open ROADMAP.md on GitHub',
+  ].join('\n'));
+  const why = 'No ROADMAP.md or docs/target-app-parity.md at HEAD';
+  const none = parity({ roadmap_oid: null, parity_doc: false, na: why, breadth: { state: 'absent', why } });
+  assert.equal(parityTip(none, 'breadth'), why);
+  assert.equal(parityTip(null, 'breadth'), 'Not read yet');
+  const tap = 'docs/target-app-parity.md';
+  const fromTap = parity({
+    roadmap_oid: null, last_reviewed: null, breadth: figure(88, { path: tap, line: 5 }), ready: figure(60, { path: tap, line: 6 }),
+    files: [{ path: tap, oid: 't1', reviewed: '2026-10-12', updated: null, generated: null, target: null, date_lines: 1, line: 3, why: null }],
+  });
+  assert.equal(parityTip(fromTap, 'breadth'), [
+    'Feature breadth: ~88%', 'Estimated · estimated', `${tap} last reviewed 2026-10-12`, `Click to open ${tap} on GitHub`,
+  ].join('\n'), 'a figure from the parity document gives that document\'s review date');
+  assert.match(parityTip({ ...fromTap, files: [] }, 'ready'), new RegExp(`\n${tap} has no Last reviewed date\n`));
+  const tapAbsent = { ...fromTap, ready: { state: 'absent', why: 'No Ready for real work row' } as const };
+  assert.equal(parityTip(tapAbsent, 'ready'), [
+    'No Ready for real work row', `${tap} last reviewed 2026-10-12`, `Click to open ${tap} on GitHub`,
+  ].join('\n'), 'an absent figure without a ROADMAP.md gives the parity document\'s review date');
+});
+
+test('a parity cell links to the parity document at the commit read, else to its ROADMAP.md row', () => {
+  const p = parity();
+  assert.equal(parityUrl('o/app', p, p.breadth), 'https://github.com/o/app/blob/c0ffee/docs/target-app-parity.md');
+  const roadmapOnly = parity({ parity_doc: false });
+  assert.equal(parityUrl('o/app', roadmapOnly, roadmapOnly.breadth), 'https://github.com/o/app/blob/c0ffee/ROADMAP.md?plain=1#L7');
+  const absent: Figure = { state: 'absent', why: 'x' };
+  assert.equal(parityUrl('o/app', roadmapOnly, absent), 'https://github.com/o/app/blob/c0ffee/ROADMAP.md');
+  assert.equal(parityUrl('o/app', parity({ parity_doc: false, roadmap_oid: null }), absent), null);
+  assert.equal(parityUrl('o/app', parity({ commit: null }), absent), 'https://github.com/o/app/blob/HEAD/docs/target-app-parity.md');
 });
 
 test('columns: unique keys, every recent column titled with its span', () => {

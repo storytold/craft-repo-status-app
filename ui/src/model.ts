@@ -54,6 +54,104 @@ export interface RepoStats {
   critical_issues: number;
   urgent: UrgentIssue[];
   icon_oid: string | null;
+  /** The commit at the head of the default branch. */
+  head_oid: string | null;
+  /** Blob ids of the parity documents at the head of the default branch, by path. */
+  parity_oids: Record<string, string>;
+}
+
+// Parity: mirrors crates/craft-core/src/parity/mod.rs.
+
+/** The basis a number's Kind or How cell states. */
+export type Basis = 'measured' | 'partly' | 'estimated' | 'unknown';
+
+/** A file in the repo and a line in it, from 1. */
+export interface Src { path: string; line: number }
+
+/** A parsed value: read, missing from the document, or present but not in a form the parser reads. */
+export type Cell<T> =
+  | { state: 'ok'; v: T; src: Src; from?: string | null }
+  | { state: 'absent'; why: string }
+  | { state: 'unreadable'; why: string; raw: string; src: Src };
+
+export interface Hours {
+  lo: number;
+  hi: number;
+  approx: boolean;
+  basis: string | null;
+  note: string | null;
+  raw: string;
+  counted_in: string | null;
+}
+
+export interface Fraction { done: number; total: number }
+
+/** One headline percentage: read, missing from the document, or present but not in a form the parser reads. */
+export type Figure =
+  | {
+    state: 'ok';
+    pct: number;
+    low: number | null;
+    high: number | null;
+    /** The row's label and its Value and Kind cells, without markup. */
+    label: string;
+    text: string;
+    kind: string;
+    basis: Basis;
+    /** The file and its line, from 1. */
+    path: string;
+    line: number;
+    /** Where the number came from when it is not the row it names. */
+    from: string | null;
+  }
+  | { state: 'absent'; why: string }
+  | { state: 'unreadable'; why: string; raw: string; path: string; line: number };
+
+export interface StageStep { stage: string; points: number | null; hours: Hours | null; text: string }
+export interface Stage { name: string; steps: StageStep[] }
+
+/** One parity document and its dates (`YYYY-MM-DD`). */
+export interface DocFile {
+  path: string;
+  oid: string;
+  reviewed: string | null;
+  updated: string | null;
+  generated: string | null;
+  target: string | null;
+  date_lines: number;
+  line: number | null;
+  /** Set when the file has no date line. */
+  why: string | null;
+}
+
+/** A note the parser adds about a document, such as two sources that disagree. */
+export interface Note { level: 'info' | 'warn'; text: string; src: Src | null }
+
+/** What the app shows from a repo's parity documents. */
+export interface Parity {
+  version: number;
+  /** The commit the files were read at. */
+  commit: string | null;
+  roadmap_oid: string | null;
+  /** Whether docs/target-app-parity.md exists at that commit. */
+  parity_doc: boolean;
+  /** Why the repo has no parity numbers. */
+  na: string | null;
+  breadth: Figure;
+  ready: Figure;
+  /** The newest Last reviewed date in ROADMAP.md, YYYY-MM-DD. */
+  last_reviewed: string | null;
+  breadth_alts: Figure[];
+  menu_breadth: Figure;
+  menu_hint: Fraction | null;
+  mainstream: Figure;
+  essentials: Figure;
+  to_alpha: Cell<Hours>;
+  to_beta: Cell<Hours>;
+  to_full: Cell<Hours>;
+  stage: Cell<Stage>;
+  files: DocFile[];
+  notes: Note[];
 }
 
 export interface RepoEntry {
@@ -63,6 +161,8 @@ export interface RepoEntry {
   last_attempt_at?: Time | null;
   error?: string | null;
   inaccessible?: boolean;
+  /** The parity numbers; null (or absent, from an older build) until read. */
+  parity?: Parity | null;
   icon?: string | null;
   icon_oid?: string | null;
 }
@@ -133,8 +233,11 @@ export const windowById = (id: string): ActivityWindow =>
 
 // ───────────────────────────── columns ─────────────────────────────
 
-/** `age` is a timestamp shown and sorted by how long ago it was: ascending puts the newest first. */
-export type Kind = 'text' | 'num' | 'date' | 'age' | 'version';
+/**
+ * `age` is a timestamp shown and sorted by how long ago it was: ascending puts the newest first.
+ * `pct` sorts as a number but has no footer total.
+ */
+export type Kind = 'text' | 'num' | 'pct' | 'date' | 'age' | 'version';
 export type Value = string | number | null;
 
 export interface Column {
@@ -175,6 +278,8 @@ export const COLUMNS: readonly Column[] = [
   { key: 'recent_merged', recent: 'prs_merged', label: 'Merged', kind: 'num', group: RECENT, title: 'Pull requests merged {span}' },
   { key: 'recent_issues', recent: 'issues_opened', label: 'Issues', kind: 'num', group: RECENT, title: 'Issues opened {span}' },
   { key: 'recent_people', recent: 'people', label: 'People', kind: 'num', group: RECENT, title: 'People who committed to main {span} (all time: GitHub’s contributor count)' },
+  { key: 'parity_breadth', label: 'Breadth', kind: 'pct', group: 'Parity', title: 'Feature breadth from the Headline numbers of ROADMAP.md (or docs/target-app-parity.md): how much of the target app’s feature set exists', get: (e) => figurePct(e.parity?.breadth) },
+  { key: 'parity_ready', label: 'Ready', kind: 'pct', group: 'Parity', title: 'Ready for real work from ROADMAP.md’s Headline numbers; without that row, from its Readiness by audience table, the headline table of docs/target-app-parity.md, or Feature depth', get: (e) => figurePct(e.parity?.ready) },
   { key: 'latest_build', label: 'Build', kind: 'version', group: 'Builds', title: 'Most recent published release' },
   { key: 'latest_build_at', label: 'Built', kind: 'date', group: 'Builds', title: 'When the most recent release was published' },
   { key: 'commits_since_build', label: 'Unreleased', kind: 'num', group: 'Builds', title: 'Commits on main since the most recent release (~ means estimated: the release’s commit isn’t on main)', get: (e) => e.stats?.since_build?.commits ?? null },
@@ -376,4 +481,72 @@ export function urgentAcross(
   }
   all.sort((a, b) => b.score - a.score || Date.parse(b.created_at ?? '0') - Date.parse(a.created_at ?? '0'));
   return all.slice(0, limit);
+}
+
+// ───────────────────────────── parity ─────────────────────────────
+
+/** The `Parity` field each parity column shows. */
+export type ParityField = 'breadth' | 'ready';
+export const PARITY_FIGURES: Readonly<Record<string, ParityField>> = { parity_breadth: 'breadth', parity_ready: 'ready' };
+
+/** A figure's percentage; null when it is missing or unread. */
+export function figurePct(f: Figure | null | undefined): number | null {
+  return f?.state === 'ok' ? f.pct : null;
+}
+
+/** "77%", or "81.1%" when the document gives a decimal. */
+export const formatPct = (pct: number): string => `${Math.round(pct * 10) / 10}%`;
+
+const BASIS_TEXT: Readonly<Record<Basis, string>> = {
+  measured: 'Measured', partly: 'Partly measured', estimated: 'Estimated', unknown: 'Basis not stated',
+};
+
+/**
+ * The Last reviewed date of the file figure `f` was read from, for its tooltip.
+ * An absent figure names ROADMAP.md, or docs/target-app-parity.md when the repo
+ * has no ROADMAP.md; null when it has neither file.
+ */
+function reviewLine(p: Parity, f: Figure): string | null {
+  let src = 'ROADMAP.md';
+  if (f.state !== 'absent') src = f.path;
+  else if (!p.roadmap_oid && p.parity_doc) src = 'docs/target-app-parity.md';
+  if (src !== 'ROADMAP.md') {
+    const reviewed = p.files.find((x) => x.path === src)?.reviewed;
+    return reviewed ? `${src} last reviewed ${reviewed}` : `${src} has no Last reviewed date`;
+  }
+  if (!p.roadmap_oid) return null;
+  return p.last_reviewed ? `ROADMAP.md last reviewed ${p.last_reviewed}` : 'ROADMAP.md has no Last reviewed date';
+}
+
+/**
+ * Where a click on a parity cell goes: docs/target-app-parity.md on GitHub at
+ * the commit read, or without that document the figure's row in ROADMAP.md,
+ * shown as source (`?plain=1`); null when the repo has neither file.
+ */
+export function parityUrl(repo: string, p: Parity, f: Figure): string | null {
+  const at = encodeURIComponent(p.commit ?? 'HEAD');
+  if (p.parity_doc) return `https://github.com/${repo}/blob/${at}/docs/target-app-parity.md`;
+  if (!p.roadmap_oid) return null;
+  if (f.state === 'absent') return `https://github.com/${repo}/blob/${at}/ROADMAP.md`;
+  const path = f.path.split('/').map(encodeURIComponent).join('/');
+  return `https://github.com/${repo}/blob/${at}/${path}?plain=1#L${f.line}`;
+}
+
+/** The tooltip of a parity cell: the row and its basis, or why there is no number, and the review date. */
+export function parityTip(p: Parity | null | undefined, field: ParityField): string {
+  if (!p) return 'Not read yet';
+  const f = p[field];
+  const lines: string[] = [];
+  if (f.state === 'ok') {
+    lines.push(`${f.label}: ${f.text}`, f.kind ? `${BASIS_TEXT[f.basis]} · ${f.kind}` : BASIS_TEXT[f.basis]);
+    if (f.from) lines.push(`Source: ${f.from}`);
+  } else {
+    lines.push(f.why);
+    if (f.state === 'unreadable') lines.push(`${f.path} line ${f.line}: ${f.raw}`);
+  }
+  const review = reviewLine(p, f);
+  if (review) lines.push(review);
+  if (p.parity_doc) lines.push('Click to open docs/target-app-parity.md on GitHub');
+  else if (p.roadmap_oid) lines.push('Click to open ROADMAP.md on GitHub');
+  return lines.join('\n');
 }

@@ -2,10 +2,13 @@
 // picks the Tauri API, or a browser stand-in, and calls `start`.
 
 import {
+  PARITY_FIGURES, figurePct, formatPct, parityTip, parityUrl,
   COLUMNS, RECENT, WINDOWS, MANUAL, windowById, value, orderedEntries, nextSort, dropIndex,
   freshness, ago, totals, urgentAcross, tokenStatus, isRefreshing, isThirdParty,
 } from './model.ts';
-import type { Column, Meta, RepoEntry, Snapshot, Sort } from './model.ts';
+import type {
+  Column, Meta, RepoEntry, Snapshot, Sort, ParityField,
+} from './model.ts';
 
 /** What the UI needs from the host: Tauri commands and events, window chrome. */
 export interface Api {
@@ -92,6 +95,23 @@ export function start(api: Api): () => void {
     criticalOnly: load('criticalOnly', false),
   };
 
+  /** A Breadth or Ready cell shows the percentage, or a dash whose tooltip
+   * gives the reason, with an amber dot when the row exists but did not
+   * parse. A click opens docs/target-app-parity.md on GitHub, or the
+   * figure's row in ROADMAP.md when the repo has no such document. */
+  function parityCell(entry: RepoEntry, field: ParityField): HTMLElement {
+    const p = entry.parity;
+    const pct = figurePct(p?.[field]);
+    const text = pct === null ? '—' : formatPct(pct);
+    const title = parityTip(p, field);
+    if (!p) return el('span', { class: 'muted', title }, text);
+    const f = p[field];
+    const url = parityUrl(entry.repo, p, f);
+    const cls = f.state === 'ok' ? '' : 'muted';
+    const shown = url ? link(text, url, cls) : el('span', { class: 'muted' }, text);
+    return el('span', { class: 'parity', title }, f.state === 'unreadable' && el('span', { class: 'warn-dot', 'aria-hidden': 'true' }), shown);
+  }
+
   function openUrl(url: string, ev?: Event): void {
     ev?.stopPropagation();
     api.invoke('open_url', { url }).catch((e: unknown) => console.warn(e));
@@ -115,6 +135,8 @@ export function start(api: Api): () => void {
   function cell(entry: RepoEntry, col: Column): Node {
     const v = value(entry, col.key, state.window);
     const s = entry.stats;
+    const parity = PARITY_FIGURES[col.key];
+    if (parity && !entry.inaccessible) return parityCell(entry, parity);
     if (col.key === 'name') {
       const tip = entry.error
         ? `Last attempt failed: ${entry.error}`
