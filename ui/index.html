@@ -16,6 +16,7 @@
       <nav class="views" role="tablist">
         <button class="view" data-view="repos" role="tab">Repos <span class="badge" id="repo-count"></span></button>
         <button class="view" data-view="urgent" role="tab">Fix first <span class="badge hot" id="urgent-count"></span></button>
+        <button class="view" data-view="parity" role="tab">Parity <span class="badge hot" id="parity-count"></span></button>
       </nav>
       <div class="status" data-tauri-drag-region>
         <span id="fresh-pill" class="pill"></span>
@@ -41,6 +42,20 @@
         <tbody id="tbody"></tbody>
         <tfoot id="tfoot"></tfoot>
       </table>
+    </main>
+
+    <main id="parity-view" hidden>
+      <div class="parity-bar">
+        <div class="segmented" role="tablist" aria-label="Parity view">
+          <button class="seg" data-pview="apps" role="tab">Apps</button>
+          <button class="seg" data-pview="gaps" role="tab">All gaps</button>
+        </div>
+        <div class="parity-filters" id="parity-filters"></div>
+      </div>
+      <div class="parity-body">
+        <div class="parity-main" id="parity-main"></div>
+        <aside class="parity-detail" id="parity-detail" aria-label="App detail" hidden></aside>
+      </div>
     </main>
 
     <main id="urgent-view" hidden>

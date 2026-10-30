@@ -30,6 +30,10 @@ poll_minutes = 30.0
 # Data older than this is flagged STALE in the window (never less than poll_minutes).
 stale_minutes = 60.0
 
+# The Parity tab shows a repo's review age in amber when its parity documents
+# were last reviewed more than this many days ago (1 to 365).
+parity_review_warn_days = 14
+
 # Used only if $CRAFT_STATUS_GITHUB_TOKEN, $GITHUB_TOKEN and $GH_TOKEN are all
 # unset; leave empty to fall back to `gh auth token`. Never commit a real token:
 # this file lives in your home directory, not in the repository.
