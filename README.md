@@ -163,7 +163,12 @@ make test       # Rust + UI tests
 make check      # clippy + rustfmt + tsc type-check
 make snapshot   # fetch once, print a table, write ui/dev-snapshot.json
 make preview    # serve ui/ in a browser against that snapshot (no Tauri needed)
+make web        # fetch snapshot and package static web assets into _site/
 ```
 
 To start the app at login, `make install` adds
 `~/Library/LaunchAgents/ai.storyteller.craft-status.plist`.
+
+## Web version and GitHub Actions
+
+A GitHub Actions workflow (`.github/workflows/publish-web.yml`) runs on push to `main`, every 15 minutes on a schedule, and via `workflow_dispatch`. It compiles the TypeScript UI, runs Rust and UI tests, fetches fresh repo status via `craft-fetch`, and publishes the static web app to GitHub Pages and as a workflow artifact.
