@@ -37,7 +37,11 @@
 
     <main id="repos-view">
       <table id="table">
-        <thead id="thead"></thead>
+        <!-- Replaced by the live header on first render; present so the table has real headers
+             in the markup (and a readable no-script fallback). -->
+        <thead id="thead">
+          <tr><th scope="col">Repository</th><th scope="col">Status</th></tr>
+        </thead>
         <tbody id="tbody"></tbody>
         <tfoot id="tfoot"></tfoot>
       </table>
