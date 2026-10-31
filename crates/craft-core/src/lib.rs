@@ -35,6 +35,10 @@ pub enum Error {
 pub type Result<T> = std::result::Result<T, Error>;
 
 /// Write via a temp file + rename so readers never see a half-written file.
+///
+/// # Errors
+///
+/// Returns `Error::Io` when the parent directory, temporary file, or rename cannot be written.
 pub fn atomic_write(path: &std::path::Path, text: &str) -> Result<()> {
     let io = |source| Error::Io {
         path: path.display().to_string(),
