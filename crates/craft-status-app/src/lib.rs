@@ -12,7 +12,7 @@ use std::sync::{mpsc, Mutex};
 use std::time::{Duration, Instant, SystemTime};
 
 use chrono::{DateTime, Local, Timelike, Utc};
-use craft_core::{Cache, Config, Schedule, Snapshot, TokenStatus, WindowState};
+use craft_core::{Cache, Config, Schedule, SharedCache, Snapshot, TokenStatus, WindowState};
 use craft_github::{resolve_token, Error as GhError, GitHub, RawActivity};
 use serde::Serialize;
 use tauri::menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem};
@@ -46,6 +46,9 @@ const BACKOFF_MAX: i64 = 60 * 60;
 /// Below this many GraphQL points left, pause for `LOW_BUDGET_PAUSE`.
 const BUDGET_FLOOR: u64 = 150;
 const LOW_BUDGET_PAUSE: i64 = 30 * 60;
+/// How long to wait for Craft PR Review to finish talking to GitHub (it gives way
+/// between requests) before going ahead anyway: this app is never starved.
+const LEASE_PATIENCE: Duration = Duration::from_secs(180);
 /// Ignore manual refreshes this soon after the previous one.
 const MANUAL_DEBOUNCE: i64 = 15;
 /// After the window gains focus, wait this long (past any Mission Control
@@ -58,6 +61,7 @@ pub struct AppState {
     config_mtime: Mutex<Option<SystemTime>>,
     snapshot: Mutex<Snapshot>,
     cache: Option<Cache>,
+    shared: Option<SharedCache>,
     refresh_tx: Mutex<Option<mpsc::Sender<Wake>>>,
     window_state: Mutex<Option<WindowState>>,
     window_dirty: AtomicBool,
@@ -274,7 +278,15 @@ fn fetch_into_snapshot(app: &AppHandle, cfg: &Config, repo: &str) -> Result<(), 
         .as_deref()
         .map(|d| RawActivity::load(d, repo))
         .unwrap_or_default();
-    let result = gh.fetch_repo(repo, now, &mut raw);
+    // The shared cache is optional; without one, fetch into a throwaway ledger.
+    let fallback = SharedCache::at(std::env::temp_dir().join("craft-github-cache"));
+    let shared = state.shared.as_ref().unwrap_or(&fallback);
+    let lease = shared.lease(LEASE_PATIENCE);
+    if lease.is_none() {
+        eprintln!("{repo}: the shared GitHub lease is still held; fetching anyway");
+    }
+    let result = gh.fetch_repo(repo, now, &mut raw, shared);
+    drop(lease);
     if let (Ok(_), Some(dir)) = (&result, &raw_dir) {
         if let Err(e) = raw.save(dir, repo) {
             eprintln!("{repo}: could not save raw cache: {e}");
@@ -390,6 +402,11 @@ fn step(app: &AppHandle, pacing: &mut Pacing) {
         snap.sync_repos(&cfg.repos);
         snap.poll_secs = cfg.poll_secs();
         snap.stale_after_secs = cfg.stale_secs();
+        // Craft PR Review was rate-limited on this account: hold off too.
+        let shared_backoff = state.shared.as_ref().and_then(|s| s.budget().backoff(now));
+        if let Some(until) = shared_backoff {
+            pacing.not_before = Some(pacing.not_before.map_or(until, |t| t.max(until)));
+        }
         let paused = pacing.not_before.is_some_and(|t| now < t);
         // Rows refreshed by hand go first.
         let due = (!paused)
@@ -416,6 +433,14 @@ fn step(app: &AppHandle, pacing: &mut Pacing) {
                 let mut resume = now + chrono::Duration::seconds(backoff);
                 if let Some(end) = rate_limit_end(&until, now) {
                     resume = resume.max(end);
+                }
+                // Craft PR Review shares the account: it should stop too.
+                if let Err(e) = state
+                    .shared
+                    .as_ref()
+                    .map_or(Ok(()), |s| s.note_backoff(resume))
+                {
+                    eprintln!("could not share the backoff: {e}");
                 }
                 let msg = format!("Rate limited by GitHub; pausing until {}", clock(resume));
                 (resume - now, Some(msg))
@@ -893,6 +918,7 @@ pub fn run() {
         config_mtime: Mutex::new(config_mtime()),
         snapshot: Mutex::new(snapshot),
         cache,
+        shared: SharedCache::default_location().ok(),
         refresh_tx: Mutex::new(Some(tx)),
         window_state: Mutex::new(None),
         window_dirty: AtomicBool::new(false),
