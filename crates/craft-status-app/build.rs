@@ -25,7 +25,9 @@ fn build_ui() {
             root.display()
         );
     }
-    let status = Command::new("npm")
+    // On Windows npm is a batch shim, which Command only finds by full name.
+    let npm = if cfg!(windows) { "npm.cmd" } else { "npm" };
+    let status = Command::new(npm)
         .args(["run", "--silent", "build"])
         .current_dir(&root)
         .status()
