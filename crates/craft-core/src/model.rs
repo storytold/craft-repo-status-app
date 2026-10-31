@@ -123,6 +123,7 @@ pub struct RepoEntry {
 }
 
 impl RepoEntry {
+    #[must_use]
     pub fn new(repo: &str) -> Self {
         RepoEntry {
             repo: repo.to_string(),
@@ -130,6 +131,7 @@ impl RepoEntry {
         }
     }
 
+    #[must_use]
     pub fn name(&self) -> &str {
         self.repo.rsplit('/').next().unwrap_or(&self.repo)
     }
@@ -137,6 +139,7 @@ impl RepoEntry {
     /// No data yet, or stats from an older build that lack a field the UI
     /// shows: today, a recent-activity window (all time included, and since
     /// the release for repos with one).
+    #[must_use]
     pub fn is_hole(&self) -> bool {
         self.fetched_at.is_none()
             || self.stats.as_ref().is_some_and(|s| {
@@ -152,6 +155,7 @@ impl RepoEntry {
     /// When this repo should next be fetched: at once if it's a hole or older
     /// than a manual refresh, else once its data is `refresh_secs` old; never
     /// sooner than `retry_secs` after a failed attempt.
+    #[must_use]
     pub fn due_at(&self, schedule: &Schedule) -> Time {
         let due = match self.fetched_at {
             Some(t) if !self.is_hole() && schedule.forced_since.is_none_or(|f| t >= f) => {
@@ -165,6 +169,7 @@ impl RepoEntry {
         }
     }
 
+    #[must_use]
     pub fn is_stale(&self, now: Time, stale_after_secs: i64) -> bool {
         match self.fetched_at {
             Some(t) => (now - t).num_seconds() > stale_after_secs,
@@ -221,6 +226,7 @@ pub struct TokenStatus {
 
 impl Snapshot {
     /// The time of the oldest data on screen; `None` if some repo has none.
+    #[must_use]
     pub fn oldest_data_at(&self) -> Option<Time> {
         self.repos
             .iter()
@@ -234,6 +240,7 @@ impl Snapshot {
 
     /// The repo to fetch next at `now`: holes first, in config order, then
     /// whichever due repo has the oldest data. `None` when nothing is due.
+    #[must_use]
     pub fn next_due(&self, now: Time, schedule: &Schedule) -> Option<&RepoEntry> {
         self.repos
             .iter()
@@ -266,10 +273,12 @@ impl Snapshot {
     }
 
     /// When the next repo falls due; `None` with nothing configured.
+    #[must_use]
     pub fn next_due_at(&self, schedule: &Schedule) -> Option<Time> {
         self.repos.iter().map(|e| e.due_at(schedule)).min()
     }
 
+    #[must_use]
     pub fn is_stale(&self, now: Time) -> bool {
         self.repos.is_empty()
             || self
@@ -286,8 +295,7 @@ impl Snapshot {
             .map(|w| {
                 old.iter()
                     .position(|e| e.repo.eq_ignore_ascii_case(w))
-                    .map(|i| old.swap_remove(i))
-                    .unwrap_or_else(|| RepoEntry::new(w))
+                    .map_or_else(|| RepoEntry::new(w), |i| old.swap_remove(i))
             })
             .collect();
     }
@@ -298,8 +306,8 @@ mod tests {
     use super::*;
     use chrono::Duration;
 
-    fn at(mins_ago: i64, now: Time) -> Option<Time> {
-        Some(now - Duration::minutes(mins_ago))
+    fn at(mins_ago: i64, now: Time) -> Time {
+        now - Duration::minutes(mins_ago)
     }
 
     #[test]
@@ -312,11 +320,11 @@ mod tests {
         assert!(s.is_stale(now), "nothing configured counts as stale");
         s.sync_repos(&["a/x".into(), "a/y".into()]);
         assert!(s.is_stale(now), "never fetched");
-        s.repos[0].fetched_at = at(2, now);
-        s.repos[1].fetched_at = at(5, now);
+        s.repos[0].fetched_at = Some(at(2, now));
+        s.repos[1].fetched_at = Some(at(5, now));
         assert!(!s.is_stale(now));
-        assert_eq!(s.oldest_data_at(), at(5, now));
-        s.repos[1].fetched_at = at(16, now);
+        assert_eq!(s.oldest_data_at(), Some(at(5, now)));
+        s.repos[1].fetched_at = Some(at(16, now));
         assert!(s.is_stale(now));
         assert!(!s.repos[0].is_stale(now, s.stale_after_secs));
         s.repos[1].fetched_at = None;
@@ -363,9 +371,9 @@ mod tests {
         };
         let mut s = Snapshot::default();
         s.sync_repos(&["o/fresh".into(), "o/old".into(), "o/older".into()]);
-        s.repos[0].fetched_at = at(5, now);
-        s.repos[1].fetched_at = at(40, now);
-        s.repos[2].fetched_at = at(50, now);
+        s.repos[0].fetched_at = Some(at(5, now));
+        s.repos[1].fetched_at = Some(at(40, now));
+        s.repos[2].fetched_at = Some(at(50, now));
         let next =
             |s: &Snapshot, sched: &Schedule| s.next_due(now, sched).map(|e| e.name().to_string());
         assert_eq!(next(&s, &sched).as_deref(), Some("older"));
@@ -381,11 +389,11 @@ mod tests {
         s.repos[3].fetched_at = Some(now);
         s.repos[2].fetched_at = Some(now);
         s.repos[1].error = Some("network".into());
-        s.repos[1].last_attempt_at = at(1, now);
+        s.repos[1].last_attempt_at = Some(at(1, now));
         assert_eq!(next(&s, &sched), None, "a failed repo waits out its retry");
         assert_eq!(
             s.next_due_at(&sched),
-            at(1, now).map(|t| t + Duration::minutes(10))
+            Some(at(1, now) + Duration::minutes(10))
         );
 
         let forced = Schedule {

@@ -180,7 +180,7 @@ fn mentions_version(title: &str, mm: &str) -> bool {
         let after_ok = match after {
             None => true,
             Some(c) if !c.is_ascii_digit() => true,
-            Some(b'0') => !b.get(i + mm.len() + 1).is_some_and(|c| c.is_ascii_digit()),
+            Some(b'0') => !b.get(i + mm.len() + 1).is_some_and(u8::is_ascii_digit),
             _ => false,
         };
         before_ok && after_ok
@@ -188,6 +188,10 @@ fn mentions_version(title: &str, mm: &str) -> bool {
 }
 
 /// `None` when the issue is closed-in-spirit (wontfix, duplicate, invalid).
+#[expect(
+    clippy::cast_precision_loss,
+    reason = "Reaction and comment counts are intentionally converted to approximate f64 engagement scores"
+)]
 pub fn score_issue(
     issue: &IssueInput,
     now: DateTime<Utc>,
@@ -288,6 +292,7 @@ pub fn score_issue(
 
 /// Returns the top `keep` issues (score > 0, best first, ties → newest), the
 /// repo urgency (sum of the top five scores) and the count of critical issues.
+#[must_use]
 pub fn rank_issues(
     issues: &[IssueInput],
     now: DateTime<Utc>,
@@ -431,9 +436,8 @@ mod tests {
         assert_eq!(ranked.len(), 3);
         assert!(ranked.iter().all(|u| u.critical));
         assert!(ranked.windows(2).all(|w| w[0].score >= w[1].score));
-        assert_eq!(
-            urgency,
-            4.0 * 50.0,
+        assert!(
+            (urgency - 4.0 * 50.0).abs() < f64::EPSILON,
             "4 crashes at 50 (40 + user 10), features score 0"
         );
     }
