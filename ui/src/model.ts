@@ -220,21 +220,31 @@ export type Dir = 'asc' | 'desc';
 /** The table's order: by a column, or `MANUAL` (the rows as last dragged). */
 export type Sort = { key: string; dir?: Dir };
 
-/** `v0.10.2-rc.1` → [0, 10, 2, -1, 1] so pre-releases sort below the release. */
-export function versionKey(tag: string): number[] {
-  const m = String(tag).replace(/^v/i, '').match(/^(\d+)(?:\.(\d+))?(?:\.(\d+))?(?:-([A-Za-z]*)\.?(\d+)?)?/);
+/** Core version, release flag, then prerelease identifiers; build metadata is ignored. */
+export function versionKey(tag: string): (number | string)[] {
+  const m = String(tag).replace(/^v/i, '').match(/^(\d+)(?:\.(\d+))?(?:\.(\d+))?(?:-([\dA-Za-z-]+(?:\.[\dA-Za-z-]+)*))?/);
   if (!m) return [-1];
-  return [+m[1]!, +(m[2] ?? 0), +(m[3] ?? 0), m[4] !== undefined ? -1 : 0, +(m[5] ?? 0)];
+  return [+m[1]!, +(m[2] ?? 0), +(m[3] ?? 0), m[4] !== undefined ? -1 : 0, ...(m[4]?.split('.') ?? [])];
 }
 
-function cmpArrays(a: number[], b: number[]): number {
-  for (let i = 0; i < Math.max(a.length, b.length); i++) {
-    const d = (a[i] ?? 0) - (b[i] ?? 0);
-    if (d) return d;
+/** Compare version keys by core numbers, release flag, then SemVer prerelease identifiers. */
+function cmpArrays(a: (number | string)[], b: (number | string)[]): number {
+  for (let i = 0; i < Math.min(a.length, b.length); i++) {
+    const av = a[i], bv = b[i];
+    if (av === bv) continue;
+    if (typeof av === 'number' && typeof bv === 'number') return av - bv;
+    const as = String(av), bs = String(bv);
+    const an = /^\d+$/.test(as), bn = /^\d+$/.test(bs);
+    if (an !== bn) return Number(bn) - Number(an);
+    // Compare numeric identifiers without losing precision to Number.
+    if (an && as.length !== bs.length) return as.length - bs.length;
+    if (as < bs) return -1;
+    if (as > bs) return 1;
   }
-  return 0;
+  return a.length - b.length;
 }
 
+/** Compare column values using the column's text, date, age, numeric or version order. */
 function cmpValues(kind: Kind, a: string | number, b: string | number): number {
   switch (kind) {
     case 'text': return String(a).localeCompare(String(b), undefined, { sensitivity: 'base', numeric: true });
