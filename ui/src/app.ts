@@ -3,7 +3,7 @@
 
 import {
   COLUMNS, RECENT, WINDOWS, MANUAL, windowById, value, orderedEntries, nextSort, dropIndex,
-  freshness, ago, totals, urgentAcross, tokenStatus, isRefreshing, isThirdParty,
+  freshness, ago, formatRate, totals, urgentAcross, tokenStatus, isRefreshing, isThirdParty,
 } from './model.ts';
 import type { Column, Meta, RepoEntry, Snapshot, Sort } from './model.ts';
 
@@ -158,6 +158,12 @@ export function start(api: Api): () => void {
         const text = `${lag.basis === 'exact' ? '' : '~'}${num(v)}`;
         return el('span', { title: tip }, from ? link(text, gh(entry.repo, `/compare/${encodeURIComponent(from)}...HEAD`), v ? '' : 'zero') : text);
       }
+      case 'latest_build_rate':
+        if (v === null) return el('span', { class: 'muted' }, '—');
+        return el('span', {
+          class: v ? '' : 'zero',
+          title: `${num(s.latest_build_downloads)} downloads of ${s.latest_build}, out ${ago(s.latest_build_at, Date.parse(String(entry.fetched_at)))} when counted`,
+        }, formatRate(Number(v)));
       case 'latest_build':
         if (!v) return el('span', { class: 'muted' }, '—');
         return el('span', {}, link(String(v), gh(entry.repo, `/releases/tag/${encodeURIComponent(v)}`)),
