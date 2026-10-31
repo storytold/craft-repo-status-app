@@ -12,6 +12,10 @@ pub struct Cache {
 
 impl Cache {
     /// `~/Library/Caches/craft-status/snapshot.json` (or the platform equivalent).
+    ///
+    /// # Errors
+    ///
+    /// Returns `Error::NoHome` when no cache or home directory can be determined.
     pub fn default_location() -> Result<Cache> {
         let dir = dirs::cache_dir()
             .or_else(|| dirs::home_dir().map(|h| h.join(".cache")))
@@ -19,19 +23,23 @@ impl Cache {
         Ok(Cache::at(dir.join("craft-status").join("snapshot.json")))
     }
 
+    #[must_use]
     pub fn at(path: PathBuf) -> Cache {
         Cache { path }
     }
 
+    #[must_use]
     pub fn path(&self) -> &Path {
         &self.path
     }
 
     /// The directory holding the snapshot, where other cached data lives too.
+    #[must_use]
     pub fn dir(&self) -> &Path {
         self.path.parent().unwrap_or(&self.path)
     }
 
+    #[must_use]
     pub fn load(&self) -> Option<Snapshot> {
         let text = std::fs::read_to_string(&self.path).ok()?;
         let mut s: Snapshot = serde_json::from_str(&text).ok()?;
@@ -39,6 +47,10 @@ impl Cache {
         Some(s)
     }
 
+    /// # Errors
+    ///
+    /// Returns `Error::Json` when serialization fails or an I/O error when the snapshot cannot
+    /// be written atomically.
     pub fn save(&self, s: &Snapshot) -> Result<()> {
         atomic_write(&self.path, &serde_json::to_string(s)?)
     }
