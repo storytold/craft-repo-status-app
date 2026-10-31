@@ -259,6 +259,36 @@ test('the Fetched column shows each repo’s data age and sorts by it, freshest 
   assert.deepEqual(h.rows(), ['beta', 'alpha', 'delta', 'gamma']);
 });
 
+test('the Build DL Rate column sits left of Build DLs and sorts across units', async () => {
+  const fetched = '2026-10-08T12:00:00Z';
+  const dayAgo = '2026-10-07T12:00:00Z';
+  const out = (latest_build_downloads: number): Partial<RepoStats> => ({ latest_build_downloads, latest_build_at: dayAgo });
+  const h = await setup({ snap: snapshot([
+    repo('alpha', out(8640), { fetched_at: fetched }),
+    repo('beta', out(172800), { fetched_at: fetched }),
+    repo('gamma', { latest_build: null, latest_build_at: null }, { fetched_at: fetched }),
+    repo('delta', out(0), { fetched_at: fetched }),
+    repo('pending', null, { fetched_at: null }),
+  ]) });
+  const i = COLUMNS.findIndex((c) => c.key === 'latest_build_rate');
+  const heads = [...h.doc.querySelectorAll('thead tr.cols th')].map((th) => th.textContent);
+  assert.equal(heads[i], 'Build DL Rate');
+  assert.equal(heads[i + 1], 'Build DLs');
+  const rate = (name: string) => h.row(name).cells[i]!;
+  assert.equal(rate('alpha').textContent, '6.0/m');
+  assert.equal(rate('beta').textContent, '2.0/s');
+  assert.equal(rate('gamma').textContent, '—');
+  assert.equal(rate('delta').textContent, '0.0/d');
+  assert.ok(rate('delta').querySelector('.zero'));
+  assert.equal(rate('pending').textContent, '—');
+  assert.equal(rate('alpha').querySelector('span')!.title, '8,640 downloads of v1.0.0, out 1d when counted');
+  assert.equal(h.doc.querySelector('tfoot tr')!.children[i]!.textContent, '', 'no total');
+  header(h, 'Build DL Rate').click();
+  assert.deepEqual(h.rows(), ['beta', 'alpha', 'delta', 'gamma', 'pending']);
+  header(h, 'Build DL Rate').click();
+  assert.deepEqual(h.rows(), ['delta', 'alpha', 'beta', 'gamma', 'pending']);
+});
+
 test('a row’s refresh button refetches only that repo, and spins while it waits', async () => {
   const h = await setup();
   const button = () => h.row('gamma').querySelector<HTMLButtonElement>('.row-refresh')!;

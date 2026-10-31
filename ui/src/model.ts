@@ -133,8 +133,12 @@ export const windowById = (id: string): ActivityWindow =>
 
 // ───────────────────────────── columns ─────────────────────────────
 
-/** `age` is a timestamp shown and sorted by how long ago it was: ascending puts the newest first. */
-export type Kind = 'text' | 'num' | 'date' | 'age' | 'version';
+/**
+ * `age` is a timestamp shown and sorted by how long ago it was: ascending puts
+ * the newest first. `rate` is a number per second: it sorts like `num`, whatever
+ * unit it displays in, but has no footer total.
+ */
+export type Kind = 'text' | 'num' | 'rate' | 'date' | 'age' | 'version';
 export type Value = string | number | null;
 
 export interface Column {
@@ -159,6 +163,18 @@ export interface Column {
  */
 export const RECENT = 'recent';
 
+/**
+ * Downloads per second of the latest build, from its release to the fetch that
+ * counted them (not to now, which would sag the rate between polls). `null`
+ * without a build, or when the clocks leave it no time to measure.
+ */
+export function buildRate(entry: RepoEntry): number | null {
+  const s = entry.stats;
+  if (!s?.latest_build_at || !entry.fetched_at || typeof s.latest_build_downloads !== 'number') return null;
+  const secs = (Date.parse(entry.fetched_at) - Date.parse(s.latest_build_at)) / 1000;
+  return secs > 0 ? s.latest_build_downloads / secs : null;
+}
+
 export const COLUMNS: readonly Column[] = [
   { key: 'name', label: 'Repo', kind: 'text', group: '', get: (e) => e.repo.split('/').pop() ?? e.repo },
   { key: 'fetched', label: 'Fetched', kind: 'age', group: '', title: 'Time since this repo’s data was last fetched in full (failed polls keep the older time)', get: (e) => e.fetched_at ?? null },
@@ -178,6 +194,7 @@ export const COLUMNS: readonly Column[] = [
   { key: 'latest_build', label: 'Build', kind: 'version', group: 'Builds', title: 'Most recent published release' },
   { key: 'latest_build_at', label: 'Built', kind: 'date', group: 'Builds', title: 'When the most recent release was published' },
   { key: 'commits_since_build', label: 'Unreleased', kind: 'num', group: 'Builds', title: 'Commits on main since the most recent release (~ means estimated: the release’s commit isn’t on main)', get: (e) => e.stats?.since_build?.commits ?? null },
+  { key: 'latest_build_rate', label: 'Build DL Rate', kind: 'rate', group: 'Builds', title: 'Build DLs divided by how long the most recent release had been out when they were counted', get: buildRate },
   { key: 'latest_build_downloads', label: 'Build DLs', kind: 'num', group: 'Builds', title: 'Downloads of the most recent release, all OSes and package types (checksums and update deltas excluded)' },
   { key: 'downloads_total', label: 'Total DLs', kind: 'num', group: 'Builds', title: 'Downloads across every published release' },
 ];
@@ -349,7 +366,15 @@ export function compact(n: number | null | undefined): string {
   return `${(n / 1e6).toFixed(1)}M`;
 }
 
-/** Column totals for the footer row (counts only; dates and versions blank). */
+/** A per-second rate in the largest unit that keeps it at 1 or more: "1.7/s", "5.6/m", "3.2/h", "0.4/d". */
+export function formatRate(perSec: number): string {
+  if (perSec >= 1) return `${perSec.toFixed(1)}/s`;
+  if (perSec * 60 >= 1) return `${(perSec * 60).toFixed(1)}/m`;
+  if (perSec * 3600 >= 1) return `${(perSec * 3600).toFixed(1)}/h`;
+  return `${(perSec * 86400).toFixed(1)}/d`;
+}
+
+/** Column totals for the footer row (counts only; rates, dates and versions blank). */
 export function totals(entries: readonly RepoEntry[], window: string = DEFAULT_WINDOW): Record<string, number> {
   const out: Record<string, number> = {};
   for (const c of COLUMNS) {
