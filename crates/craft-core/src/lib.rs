@@ -10,7 +10,7 @@ pub mod shared;
 pub mod urgency;
 
 pub use cache::Cache;
-pub use config::{Config, WindowState};
+pub use config::{category_of, Config, RepoCategory, WindowState};
 pub use model::{
     Activity, RepoEntry, RepoStats, Schedule, Snapshot, TokenStatus, UrgentIssue, ALL_TIME,
     SINCE_RELEASE, WINDOWS,

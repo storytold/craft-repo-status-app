@@ -269,6 +269,17 @@ test('columns: unique keys, every recent column titled with its span', () => {
   assert.equal(COLUMNS[0]!.key, 'name', 'the sticky first column is the repo');
 });
 
+test('the Type column sorts by its words, repos without a type last', () => {
+  const e = [
+    { ...entry('a', {}), category: 'tooling' as const },
+    { ...entry('b', {}), category: 'other' as const },
+    { ...entry('c', {}), category: 'app' as const },
+    entry('d', {}),
+  ];
+  assert.deepEqual(sortEntries(e, 'category', 'asc').map((x) => x.repo), ['o/c', 'o/a', 'o/b', 'o/d']);
+  assert.equal(value(e[2]!, 'category'), 'App');
+});
+
 test('repos outside our org are third party', () => {
   assert.equal(isThirdParty('storytold/photocraft'), false);
   assert.equal(isThirdParty('Storytold/photocraft'), false, 'owners ignore case');

@@ -2,8 +2,10 @@
 # The app re-reads this file before every poll; changes apply without a restart
 # (window/tray/shortcut changes apply on the next poll or relaunch).
 
-# Repositories to watch: "owner/name" or full GitHub URLs.
+# Repositories to watch: "owner/name" or full GitHub URLs. The Type column comes
+# from the app's own list of these repos; any other repo you add shows as "—".
 repos = [
+  # Apps
   "storytold/photocraft",
   "storytold/lightcraft",
   "storytold/filmcraft",
@@ -16,10 +18,23 @@ repos = [
   "storytold/gridcraft",
   "storytold/cadcraft",
   "storytold/soundcraft",
-  "storytold/craft-libs",
-  "storytold/craft-launcher",
   "storytold/figcraft",
+  "storytold/craft-launcher",
   "tangency-labs/solidcraft",  # third party
+  # Libraries
+  "storytold/craft-libs",
+  "storytold/craft-i18n",
+  "storytold/craft-ai-integrations",
+  "storytold/indd-utils",
+  # Assets and test data
+  "storytold/craft-fonts",
+  "storytold/photocraft-corpus",
+  "storytold/craft-launcher-assets",
+  # CI
+  "storytold/craft-common-actions",
+  # Tooling
+  "storytold/craft-contrib",
+  "storytold/craft-skills",
 ]
 
 # How old a repo's data gets before it's refetched (minutes, at least 1).

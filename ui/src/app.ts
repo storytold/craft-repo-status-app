@@ -126,6 +126,7 @@ export function start(api: Api): () => void {
       const age = v ? el('span', { title: `Fetched ${localTime(String(v))}` }, ago(String(v))) : el('span', { class: 'muted', title: 'Not fetched yet' }, '—');
       return el('span', { class: 'fetched' }, age, rowRefresh(entry));
     }
+    if (col.key === 'category') return v ? el('span', { class: 'category' }, String(v)) : el('span', { class: 'muted' }, '—');
     if (!s) return entry.inaccessible ? document.createTextNode('') : el('span', { class: 'muted' }, '—');
     switch (col.key) {
       case 'urgency': {

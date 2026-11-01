@@ -56,8 +56,21 @@ export interface RepoStats {
   icon_oid: string | null;
 }
 
+export type RepoCategory = 'app' | 'library' | 'assets' | 'ci' | 'tooling' | 'other';
+
+/** The Type column's words; a repo that isn't in the app's own list has none. */
+export const CATEGORY_LABEL: Readonly<Record<RepoCategory, string | null>> = {
+  app: 'App',
+  library: 'Library',
+  assets: 'Assets',
+  ci: 'CI',
+  tooling: 'Tooling',
+  other: null,
+};
+
 export interface RepoEntry {
   repo: string;
+  category?: RepoCategory;
   stats: RepoStats | null;
   fetched_at: Time | null;
   last_attempt_at?: Time | null;
@@ -178,6 +191,7 @@ export function buildRate(entry: RepoEntry): number | null {
 export const COLUMNS: readonly Column[] = [
   { key: 'name', label: 'Repo', kind: 'text', group: '', get: (e) => e.repo.split('/').pop() ?? e.repo },
   { key: 'fetched', label: 'Fetched', kind: 'age', group: '', title: 'Time since this repo’s data was last fetched in full (failed polls keep the older time)', get: (e) => e.fetched_at ?? null },
+  { key: 'category', label: 'Type', kind: 'text', group: '', title: 'What the repo is: app, library, assets, CI or tooling', get: (e) => CATEGORY_LABEL[e.category ?? 'other'] },
   { key: 'urgency', label: 'Urgency', kind: 'num', group: 'Fix first', title: 'Sum of the top five open-issue urgency scores' },
   { key: 'critical_issues', label: 'Critical', kind: 'num', group: 'Fix first', title: 'Open issues that mention a crash, hang, freeze, data loss, launch failure or security problem' },
   { key: 'open_prs', label: 'PRs', kind: 'num', group: 'Open', title: 'Open pull requests' },
