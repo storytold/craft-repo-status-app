@@ -446,7 +446,8 @@ fn skip_unchanged(
         eprintln!("the shared GitHub lease is still held; probing anyway");
     }
     let probed_at = Utc::now();
-    let probes = match gh.probe(&repos) {
+    // Without the lease, the probe leaves the shared budget to the PR poller.
+    let probes = match gh.probe(&repos, lease.as_ref().map(|_| shared)) {
         Ok((probes, budget)) => {
             if budget.graphql_remaining.is_some() {
                 state.snapshot.lock().unwrap().rate_limit_remaining = budget.graphql_remaining;
@@ -1267,6 +1268,15 @@ mod tests {
         }
     }
 
+    /// A shared PR ledger walked at `walked_at`, reaching back a year.
+    fn walked_ledger(walked_at: DateTime<Utc>) -> PrLedger {
+        PrLedger {
+            walked_at: Some(walked_at),
+            covers_from: Some(walked_at - CDuration::days(365)),
+            ..Default::default()
+        }
+    }
+
     fn probe(head: &str) -> Probe {
         Probe {
             head_oid: Some(head.into()),
@@ -1285,7 +1295,7 @@ mod tests {
         let mut snap = snap_with(&[40, 50, 60], now);
         for e in &mut snap.repos {
             e.stats = Some(
-                craft_github::restat(&raw_fetched(now, &probe("h")), &PrLedger::default(), now)
+                craft_github::restat(&raw_fetched(now, &probe("h")), &walked_ledger(now), now)
                     .unwrap(),
             );
         }
@@ -1302,7 +1312,7 @@ mod tests {
             (
                 repo.to_string(),
                 raw,
-                PrLedger::default(),
+                walked_ledger(fetched_at(mins)),
                 Some(probe(head)),
             )
         };
@@ -1349,7 +1359,7 @@ mod tests {
         let raw = raw_fetched(fetched_at, &probe("a"));
         // Opened 3 h 55 min before the probe: inside the 4-hour window then,
         // outside it ten minutes later.
-        let mut ledger = PrLedger::default();
+        let mut ledger = walked_ledger(fetched_at);
         ledger.prs.insert(
             7,
             craft_core::LedgerPr {
@@ -1385,11 +1395,11 @@ mod tests {
             merged_at: merged.map(|m| now - CDuration::minutes(m)),
             ..Default::default()
         };
-        let mut ledger = PrLedger::default();
+        let mut ledger = walked_ledger(fetched_at);
         ledger.prs.insert(1, pr(20, None));
         ledger.prs.insert(2, pr(50, None));
         ledger.prs.insert(3, pr(4 * 24 * 60, Some(2 * 24 * 60)));
-        let checks = vec![("o/r0".into(), raw, ledger, Some(probe("a")))];
+        let checks = vec![("o/r0".into(), raw.clone(), ledger, Some(probe("a")))];
         let (restated, _) = restat_unchanged(&mut snap, checks, now);
         assert_eq!(restated, ["o/r0"]);
         let stats = snap.repos[0].stats.clone().unwrap();
@@ -1397,6 +1407,15 @@ mod tests {
         assert_eq!(stats.recent["7d"].prs_opened, 3);
         assert_eq!(stats.recent["7d"].prs_merged, 1);
         assert_eq!(stats.recent["4h"].prs_merged, 0);
+        // Without its ledger the repo is fetched, and keeps the counts it has.
+        let checks = vec![("o/r0".into(), raw, PrLedger::default(), Some(probe("a")))];
+        let (restated, left) = restat_unchanged(&mut snap, checks, now + CDuration::minutes(1));
+        assert!(restated.is_empty());
+        assert_eq!(left, [("o/r0".to_string(), probe("a"))]);
+        assert_eq!(
+            snap.repos[0].stats.as_ref().unwrap().recent["7d"].prs_opened,
+            3
+        );
     }
 
     #[test]

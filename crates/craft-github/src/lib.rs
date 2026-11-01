@@ -263,8 +263,14 @@ impl GitHub {
 
     /// A [`Probe`] of each of `repos`, in order, from one request per
     /// [`PROBE_CHUNK`] repos. An error in any answer fails the whole probe,
-    /// as does a repository GitHub can't find or show.
-    pub fn probe(&self, repos: &[String]) -> Result<(Vec<Option<Probe>>, Budget)> {
+    /// as does a repository GitHub can't find or show. Each answer's rate-limit
+    /// reading goes to `shared`'s budget for the PR poller; pass `shared` only
+    /// while holding the shared lease.
+    pub fn probe(
+        &self,
+        repos: &[String],
+        shared: Option<&SharedCache>,
+    ) -> Result<(Vec<Option<Probe>>, Budget)> {
         let mut out = Vec::with_capacity(repos.len());
         let mut budget = Budget::default();
         for chunk in repos.chunks(PROBE_CHUNK) {
@@ -276,9 +282,14 @@ impl GitHub {
             }
             let data = self.graphql(&probe_query(chunk.len()), Value::Object(vars))?;
             out.extend(parse_probe(&data, chunk.len()));
-            if let Some(left) = data["rateLimit"]["remaining"].as_u64() {
+            let left = data["rateLimit"]["remaining"].as_u64();
+            if let Some(left) = left {
                 budget.graphql_remaining =
                     Some(budget.graphql_remaining.map_or(left, |r| r.min(left)));
+            }
+            let reset_at = time(&data["rateLimit"]["resetAt"]);
+            if let Some(Err(e)) = shared.map(|s| s.note_budget(left, reset_at, Utc::now())) {
+                eprintln!("could not save the shared budget: {e}");
             }
         }
         Ok((out, budget))
@@ -981,10 +992,15 @@ fn commits_match_counts(
 pub fn restat(raw: &RawActivity, ledger: &PrLedger, now: DateTime<Utc>) -> Option<RepoStats> {
     let last = raw.last.as_ref()?;
     let release_at = summarize_releases(&last.releases).latest_at;
-    let mut main = last.main.clone();
-    aged_window_counts(&mut main, &raw.commits, last.at, now, release_at);
     // What a fetch at `now` would hold after pruning.
     let since = activity_start(now, release_at);
+    // A ledger that doesn't reach back to `since` (deleted, corrupt or never
+    // walked) would count too few PRs: fetch instead, which walks it.
+    if !(ledger.walked_at.is_some() && ledger.covers_from.is_some_and(|c| c <= since)) {
+        return None;
+    }
+    let mut main = last.main.clone();
+    aged_window_counts(&mut main, &raw.commits, last.at, now, release_at);
     let authors: Vec<CommitAuthor> = raw
         .commits
         .values()
@@ -1897,7 +1913,11 @@ mod tests {
                 .enumerate()
                 .map(|(i, t)| (i as u64, *t)),
         );
-        let mut ledger = PrLedger::default();
+        let mut ledger = PrLedger {
+            walked_at: Some(p.now),
+            covers_from: Some(p.now - chrono::Duration::days(365)),
+            ..Default::default()
+        };
         for (i, at) in p.events.prs_opened.iter().enumerate() {
             ledger.prs.insert(
                 i as u64,
@@ -1941,6 +1961,14 @@ mod tests {
             p.now,
         );
         assert_eq!(restat(&raw, &ledger, p.now), Some(fetched));
+        // A ledger that is gone, or doesn't reach back far enough, sends the
+        // repo to a fetch instead of counting no PRs.
+        assert_eq!(restat(&raw, &PrLedger::default(), p.now), None);
+        let short = PrLedger {
+            covers_from: Some(p.now - chrono::Duration::hours(1)),
+            ..ledger
+        };
+        assert_eq!(restat(&raw, &short, p.now), None);
     }
 
     #[test]
@@ -2002,6 +2030,8 @@ mod tests {
                     },
                 ),
             ]),
+            walked_at: Some(then),
+            covers_from: Some(t("2026-09-01T00:00:00Z")),
             ..Default::default()
         };
         let held = raw.clone();
