@@ -184,19 +184,39 @@ function closeHelp(): boolean {
   return Boolean(open);
 }
 
+/** The explanation behind the (?) button: what every status and flag means. */
+function helpPanel(): HTMLElement {
+  const close = (): void => { closeHelp(); };
+  const table = (head: string[], rows: (Child | Child[])[][]): HTMLElement => el('table', { class: 'help-table' },
+    el('thead', {}, el('tr', {}, head.map((h) => el('th', { class: 'left' }, h)))),
+    el('tbody', {}, rows.map((cells) => el('tr', {}, cells.map((c) => el('td', { class: 'left' }, c))))));
+  return el('div', { class: 'help-overlay', id: 'help-panel', role: 'dialog', 'aria-label': 'What the statuses mean', onclick: (e: Event) => { if (e.target === e.currentTarget) close(); } },
+    el('div', { class: 'help-box' },
+      el('div', { class: 'help-head' }, el('h2', {}, 'What the statuses mean'), el('button', { class: 'btn', id: 'help-close', onclick: close }, 'Close')),
+      el('p', {}, 'Each PR has one status, worked out from independent facts. Read the table from the top: the first row that matches wins, and – means that column doesn\'t matter. A problem is any flag marked Yes below. Running means CI or CodeRabbit is still going, or GitHub hasn\'t worked out mergeability.'),
+      table(['Status', ...HELP_COLUMNS, 'What it means'], STATUS_HELP.map((h) => [stateBadge(h.state), ...h.when, h.meaning])),
+      el('h3', {}, 'Flags'),
+      el('p', {}, 'Flags are independent, and a PR shows all that apply. Approved is a flag, not a status: an approved PR with conflicts is Conflicted, with the Approved flag beside it.'),
+      table(['Flag', 'What it means', 'Counts as a problem?'], FLAG_HELP.map((f) => [el('span', { class: `flag ${f.cls}` }, f.label), f.meaning, f.problem])),
+      el('h3', {}, 'Possibly related'),
+      el('p', {}, 'These never change a status: they are judgments or loose matches, and in a duplicate pair one PR is usually the one you want. Links go both ways. Click a number to jump to that row, or ⌘-click to open that PR. Hover for how sure anyone is and why.'),
+      table(['Kind', 'Shown beside the title?', 'Found by', 'What it means'], RELATED_HELP.map((h) => [h.label, h.flag ? 'Yes' : 'No', h.source, h.meaning]))));
+}
+
 function emptyTableMessage(hasRows: boolean, from: 'repo' | 'queue'): string {
   if (hasRows) return 'No PRs match.';
   if (from === 'queue') return 'Nothing to act on yet. PRs show up here once they have been inspected and nothing is in the way.';
   return 'No open PRs, or not listed yet.';
 }
 
+function pointsBadge(points: number): HTMLElement {
+  const up = points > 0;
+  return el('span', { class: `pts ${up ? 'up' : 'down'}` }, `${up ? '+' : ''}${points}`);
+}
+
 function reasonList(reasons: Reason[], showPoints: boolean): HTMLElement {
   return el('ul', { class: 'reasons' }, reasons.map((r) => {
-    const up = r.points > 0;
-    const points = showPoints && r.points !== 0
-      ? el('span', { class: `pts ${up ? 'up' : 'down'}` }, `${up ? '+' : ''}${r.points}`)
-      : null;
-    return el('li', {}, el('span', {}, r.text), points);
+    return el('li', {}, el('span', {}, r.text), showPoints && r.points !== 0 ? pointsBadge(r.points) : null);
   }));
 }
 
@@ -617,25 +637,6 @@ export function startPrs(api: Api, initial: Route = { view: 'apps' }): PrTab {
     ...PR_COLUMNS.slice(1),
   ];
 
-  /** The explanation behind the (?) button: what every status and flag means. */
-  function helpPanel(): HTMLElement {
-    const close = (): void => { closeHelp(); };
-    const table = (head: string[], rows: (Child | Child[])[][]): HTMLElement => el('table', { class: 'help-table' },
-      el('thead', {}, el('tr', {}, head.map((h) => el('th', { class: 'left' }, h)))),
-      el('tbody', {}, rows.map((cells) => el('tr', {}, cells.map((c) => el('td', { class: 'left' }, c))))));
-    return el('div', { class: 'help-overlay', id: 'help-panel', role: 'dialog', 'aria-label': 'What the statuses mean', onclick: (e: Event) => { if (e.target === e.currentTarget) close(); } },
-      el('div', { class: 'help-box' },
-        el('div', { class: 'help-head' }, el('h2', {}, 'What the statuses mean'), el('button', { class: 'btn', id: 'help-close', onclick: close }, 'Close')),
-        el('p', {}, 'Each PR has one status, worked out from independent facts. Read the table from the top: the first row that matches wins, and – means that column doesn\'t matter. A problem is any flag marked Yes below. Running means CI or CodeRabbit is still going, or GitHub hasn\'t worked out mergeability.'),
-        table(['Status', ...HELP_COLUMNS, 'What it means'], STATUS_HELP.map((h) => [stateBadge(h.state), ...h.when, h.meaning])),
-        el('h3', {}, 'Flags'),
-        el('p', {}, 'Flags are independent, and a PR shows all that apply. Approved is a flag, not a status: an approved PR with conflicts is Conflicted, with the Approved flag beside it.'),
-        table(['Flag', 'What it means', 'Counts as a problem?'], FLAG_HELP.map((f) => [el('span', { class: `flag ${f.cls}` }, f.label), f.meaning, f.problem])),
-        el('h3', {}, 'Possibly related'),
-        el('p', {}, 'These never change a status: they are judgments or loose matches, and in a duplicate pair one PR is usually the one you want. Links go both ways. Click a number to jump to that row, or ⌘-click to open that PR. Hover for how sure anyone is and why.'),
-        table(['Kind', 'Shown beside the title?', 'Found by', 'What it means'], RELATED_HELP.map((h) => [h.label, h.flag ? 'Yes' : 'No', h.source, h.meaning]))));
-  }
-
   function renderTable(slot: HTMLElement, rows: PrRow[], from: 'repo' | 'queue', groups: Group[]): void {
     const columns = from === 'queue' ? QUEUE_COLUMNS : PR_COLUMNS;
     const cell = (c: Column<PrRow>, r: PrRow): Node | string => (c.key === 'app' ? shortName(r.repo) : prCell(r, c));
@@ -831,7 +832,8 @@ export function startPrs(api: Api, initial: Route = { view: 'apps' }): PrTab {
       el('button', { class: 'btn', disabled: !can || asked, 'data-ask': 'quick', onclick: () => ask(false), title: 'Reads the description, files and CodeRabbit findings' }, a ? 'Reassess' : 'Assess now'),
       el('button', { class: 'btn', disabled: !can || asked, 'data-ask': 'deep', onclick: () => ask(true), title: 'Also reads the diff' }, 'Read the diff'),
       asked ? el('span', { class: 'muted' }, 'Asked Claude…') : null);
-    const how = a?.at ? `${a.deep ? 'read the diff' : 'metadata only'} · ${ago(a.at)}` : '';
+    const depth = a?.deep ? 'read the diff' : 'metadata only';
+    const how = a?.at ? `${depth} · ${ago(a.at)}` : '';
     return el('section', { class: 'card', id: 'claude-card' },
       el('h2', {}, 'Claude', el('span', { title: 'Advisory. It can make a PR look harder, but it can\'t change its status or raise its quality.' }, how)),
       claudeBody(pr, can), buttons);
@@ -843,7 +845,7 @@ export function startPrs(api: Api, initial: Route = { view: 'apps' }): PrTab {
     const done = d.findings.length - active.length;
     const none = d.rabbit === 'reviewed' ? 'Nothing unresolved.' : 'No findings.';
     return el('section', { class: 'card', id: 'findings' },
-      el('h2', {}, 'CodeRabbit', el('span', {}, `${RABBIT_STATE[d.rabbit]}${done ? ` · ${done} resolved or outdated` : ''}`)),
+      el('h2', {}, 'CodeRabbit', el('span', {}, [RABBIT_STATE[d.rabbit], done ? `${done} resolved or outdated` : ''].filter(Boolean).join(' · '))),
       active.length ? el('ul', { class: 'findings' }, active.map(findingItem)) : el('p', { class: 'muted' }, none),
       d.threads_total > d.findings.length + d.human_threads_open
         ? el('p', { class: 'muted' }, `Only the first threads were read; there are ${d.threads_total} in all.`) : null);

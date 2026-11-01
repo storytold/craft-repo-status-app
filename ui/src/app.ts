@@ -248,8 +248,9 @@ export function start(api: Api, prRoute?: Route): () => void {
       $('tbody').replaceChildren(el('tr', {}, el('td', { colspan: COLUMNS.length, class: 'empty' }, why)));
     }
     const t = totals(shown, state.window);
+    const total = (c: Column): string => (c.kind === 'num' ? num(Math.round(t[c.key] ?? 0)) : '');
     $('tfoot').replaceChildren(el('tr', {}, COLUMNS.map((c, i) =>
-      el('td', { class: groupStart(i) }, i === 0 ? `${shown.length} repos` : c.kind === 'num' ? num(Math.round(t[c.key] ?? 0)) : ''))));
+      el('td', { class: groupStart(i) }, i === 0 ? `${shown.length} repos` : total(c)))));
   }
 
   // ───────────────────────────── row dragging ─────────────────────────────
@@ -368,9 +369,10 @@ export function start(api: Api, prRoute?: Route): () => void {
     const failing = snap.repos.filter((r) => r.error);
     // A snapshot-wide problem (a broken config, a rate limit) matters on every tab.
     const failures = failing.map((r) => `${shortName(r.repo)} (${r.error})`).join('; ');
+    const noun = failing.length > 1 ? 'repos' : 'repo';
     const msgs = [
       snap.error,
-      state.view !== 'prs' && failing.length ? `${failing.length} repo${failing.length > 1 ? 's' : ''} failed last poll: ${failures}` : null,
+      state.view !== 'prs' && failing.length ? `${failing.length} ${noun} failed last poll: ${failures}` : null,
     ].filter(Boolean);
     $('banner').hidden = !msgs.length;
     $('banner').textContent = msgs.join(' — ');
