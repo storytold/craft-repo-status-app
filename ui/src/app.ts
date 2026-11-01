@@ -3,7 +3,7 @@
 
 import {
   COLUMNS, RECENT, WINDOWS, MANUAL, windowById, value, orderedEntries, nextSort, dropIndex,
-  freshness, ago, totals, urgentAcross, tokenStatus, isRefreshing, formatNum, displayValue, changedCells,
+  freshness, ago, totals, urgentAcross, tokenStatus, isRefreshing, isThirdParty, formatNum, displayValue, changedCells,
 } from './model.ts';
 import type { Column, Meta, RepoEntry, RepoStats, Snapshot, Sort, Value } from './model.ts';
 
@@ -150,14 +150,19 @@ export function start(api: Api): () => void {
     return el('span', { class: 'app-icon none', 'aria-hidden': 'true' }, shortName(entry.repo).charAt(0).toUpperCase());
   }
 
+  /** A "3P" tag for repos outside our own GitHub org; null for ours. */
+  const thirdPartyTag = (repo: string): HTMLElement | null =>
+    isThirdParty(repo) ? el('span', { class: 'third-party', title: `Third-party app (${repo.split('/')[0]})` }, '3P') : null;
+
   /** Cell content for a column; its text is `displayValue`'s, which the highlight compares. */
   function cell(entry: RepoEntry, col: Column, now: number): Node {
     const v = value(entry, col.key, state.window);
     const text = displayValue(entry, col.key, state.window, now);
     const s = entry.stats;
     if (col.key === 'name') {
-      return el('span', { class: 'repo', title: repoTip(entry) }, el('span', { class: 'dot' }), appIcon(entry), link(text, gh(entry.repo)));
+      return el('span', { class: 'repo', title: repoTip(entry) }, el('span', { class: 'dot' }), appIcon(entry), link(text, gh(entry.repo)), thirdPartyTag(entry.repo));
     }
+    if (col.key === 'category') return el('span', { class: v ? 'category' : 'muted' }, text);
     if (!s) return entry.inaccessible ? document.createTextNode(text) : el('span', { class: 'muted' }, text);
     switch (col.key) {
       case 'urgency': {
@@ -170,6 +175,12 @@ export function start(api: Api): () => void {
       case 'recent_commits': case 'recent_prs': case 'recent_merged': case 'recent_issues': case 'recent_people':
         return recentCell(s, v, text, now);
       case 'commits_since_build': return sinceBuildCell(entry.repo, s, v, text);
+      case 'latest_build_rate':
+        if (v === null) return el('span', { class: 'muted' }, text);
+        return el('span', {
+          class: v ? '' : 'zero',
+          title: `${num(s.latest_build_downloads)} downloads of ${s.latest_build}, out ${ago(s.latest_build_at, Date.parse(String(entry.fetched_at)))} when counted`,
+        }, text);
       case 'latest_build': return latestBuildCell(entry.repo, s, v, text);
     }
     if (col.kind === 'date') return dateCell(col.key, v, text, now);
@@ -503,7 +514,7 @@ export function start(api: Api): () => void {
       const a = Math.min(1, u.score / 90) * 0.5;
       return el('li', { class: `urgent-item${u.critical ? ' critical' : ''}`, onclick: () => openUrl(u.url), title: u.url },
         el('span', { class: 'score', style: `background: rgb(var(--hot-rgb) / ${a.toFixed(2)})` }, String(u.score)),
-        el('span', { class: 'u-repo' }, appIcon(snap.repos.find((r) => r.repo === u.repo) ?? { repo: u.repo }), shortName(u.repo)),
+        el('span', { class: 'u-repo' }, appIcon(snap.repos.find((r) => r.repo === u.repo) ?? { repo: u.repo }), shortName(u.repo), thirdPartyTag(u.repo)),
         el('div', { class: 'u-title' },
           el('span', { class: 'num' }, `#${u.number}`), el('span', { class: 'text' }, u.title),
           el('div', { class: 'reasons' }, u.reasons.map((r) => el('span', { class: `reason${SEVERE.test(r) ? ' sev' : ''}` }, r)),

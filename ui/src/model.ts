@@ -56,8 +56,21 @@ export interface RepoStats {
   icon_oid: string | null;
 }
 
+export type RepoCategory = 'app' | 'library' | 'assets' | 'ci' | 'tooling' | 'other';
+
+/** The Type column's words; a repo that isn't in the app's own list has none. */
+export const CATEGORY_LABEL: Readonly<Record<RepoCategory, string | null>> = {
+  app: 'App',
+  library: 'Library',
+  assets: 'Assets',
+  ci: 'CI',
+  tooling: 'Tooling',
+  other: null,
+};
+
 export interface RepoEntry {
   repo: string;
+  category?: RepoCategory;
   stats: RepoStats | null;
   fetched_at: Time | null;
   last_attempt_at?: Time | null;
@@ -133,8 +146,12 @@ export const windowById = (id: string): ActivityWindow =>
 
 // ───────────────────────────── columns ─────────────────────────────
 
-/** `age` is a timestamp shown and sorted by how long ago it was: ascending puts the newest first. */
-export type Kind = 'text' | 'num' | 'date' | 'age' | 'version';
+/**
+ * `age` is a timestamp shown and sorted by how long ago it was: ascending puts
+ * the newest first. `rate` is a number per second: it sorts like `num`, whatever
+ * unit it displays in, but has no footer total.
+ */
+export type Kind = 'text' | 'num' | 'rate' | 'date' | 'age' | 'version';
 export type Value = string | number | null;
 
 export interface Column {
@@ -159,9 +176,22 @@ export interface Column {
  */
 export const RECENT = 'recent';
 
+/**
+ * Downloads per second of the latest build, from its release to the fetch that
+ * counted them (not to now, which would sag the rate between polls). `null`
+ * without a build, or when the clocks leave it no time to measure.
+ */
+export function buildRate(entry: RepoEntry): number | null {
+  const s = entry.stats;
+  if (!s?.latest_build_at || !entry.fetched_at || typeof s.latest_build_downloads !== 'number') return null;
+  const secs = (Date.parse(entry.fetched_at) - Date.parse(s.latest_build_at)) / 1000;
+  return secs > 0 ? s.latest_build_downloads / secs : null;
+}
+
 export const COLUMNS: readonly Column[] = [
   { key: 'name', label: 'Repo', kind: 'text', group: '', get: (e) => e.repo.split('/').pop() ?? e.repo },
   { key: 'fetched', label: 'Fetched', kind: 'age', group: '', title: 'Time since this repo’s data was last fetched in full (failed polls keep the older time)', get: (e) => e.fetched_at ?? null },
+  { key: 'category', label: 'Type', kind: 'text', group: '', title: 'What the repo is: app, library, assets, CI or tooling', get: (e) => CATEGORY_LABEL[e.category ?? 'other'] },
   { key: 'urgency', label: 'Urgency', kind: 'num', group: 'Fix first', title: 'Sum of the top five open-issue urgency scores' },
   { key: 'critical_issues', label: 'Critical', kind: 'num', group: 'Fix first', title: 'Open issues that mention a crash, hang, freeze, data loss, launch failure or security problem' },
   { key: 'open_prs', label: 'PRs', kind: 'num', group: 'Open', title: 'Open pull requests' },
@@ -178,6 +208,7 @@ export const COLUMNS: readonly Column[] = [
   { key: 'latest_build', label: 'Build', kind: 'version', group: 'Builds', title: 'Most recent published release' },
   { key: 'latest_build_at', label: 'Built', kind: 'date', group: 'Builds', title: 'When the most recent release was published' },
   { key: 'commits_since_build', label: 'Unreleased', kind: 'num', group: 'Builds', title: 'Commits on main since the most recent release (~ means estimated: the release’s commit isn’t on main)', get: (e) => e.stats?.since_build?.commits ?? null },
+  { key: 'latest_build_rate', label: 'Build DL Rate', kind: 'rate', group: 'Builds', title: 'Build DLs divided by how long the most recent release had been out when they were counted', get: buildRate },
   { key: 'latest_build_downloads', label: 'Build DLs', kind: 'num', group: 'Builds', title: 'Downloads of the most recent release, all OSes and package types (checksums and update deltas excluded)' },
   { key: 'downloads_total', label: 'Total DLs', kind: 'num', group: 'Builds', title: 'Downloads across every published release' },
 ];
@@ -281,6 +312,17 @@ export function dropIndex(mids: readonly number[], y: number): number {
   return i === -1 ? mids.length : i;
 }
 
+// ───────────────────────────── ownership ─────────────────────────────
+
+/** GitHub owners whose repos are our own apps; anything else is third party. */
+export const FIRST_PARTY_OWNERS: readonly string[] = ['storytold'];
+
+/** `owner/name` belongs to someone outside FIRST_PARTY_OWNERS. */
+export function isThirdParty(repo: string): boolean {
+  const owner = repo.split('/')[0]?.toLowerCase() ?? '';
+  return !FIRST_PARTY_OWNERS.includes(owner);
+}
+
 // ───────────────────────────── freshness ─────────────────────────────
 
 export function isStale(entry: RepoEntry, staleAfterSecs: number, now: number = Date.now()): boolean {
@@ -338,6 +380,14 @@ export function compact(n: number | null | undefined): string {
   return `${(n / 1e6).toFixed(1)}M`;
 }
 
+/** A per-second rate in the largest unit that keeps it at 1 or more: "1.7/s", "5.6/m", "3.2/h", "0.4/d". */
+export function formatRate(perSec: number): string {
+  if (perSec >= 1) return `${perSec.toFixed(1)}/s`;
+  if (perSec * 60 >= 1) return `${(perSec * 60).toFixed(1)}/m`;
+  if (perSec * 3600 >= 1) return `${(perSec * 3600).toFixed(1)}/h`;
+  return `${(perSec * 86400).toFixed(1)}/d`;
+}
+
 /** A count with thousands separators: 1,234. */
 export const formatNum = (n: Value | undefined): string => Number(n ?? 0).toLocaleString('en-US');
 
@@ -352,9 +402,11 @@ export function displayValue(entry: RepoEntry, key: string, window: string, now:
   const col = COLUMN[key];
   if (key === 'name') return String(v);
   if (col?.kind === 'age') return v ? ago(String(v), now) : '—';
+  if (key === 'category') return v ? String(v) : '—';
   if (!s) return entry.inaccessible ? '' : '—';
   switch (key) {
     case 'urgency': return String(Math.round(Number(v)));
+    case 'latest_build_rate': return v === null ? '—' : formatRate(Number(v));
     case 'commits_since_build': return lagText(s, v);
     case 'latest_build': return buildText(s, v);
   }
@@ -390,7 +442,7 @@ export function changedCells(prev: RepoEntry | undefined, next: RepoEntry, windo
     && displayValue(prev, c.key, window, now) !== displayValue(next, c.key, window, now)).map((c) => c.key);
 }
 
-/** Column totals for the footer row (counts only; dates and versions blank). */
+/** Column totals for the footer row (counts only; rates, dates and versions blank). */
 export function totals(entries: readonly RepoEntry[], window: string = DEFAULT_WINDOW): Record<string, number> {
   const out: Record<string, number> = {};
   for (const c of COLUMNS) {

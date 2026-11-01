@@ -9,16 +9,21 @@
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Mutex};
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 
 use chrono::{DateTime, Local, Timelike, Utc};
-use craft_core::{Cache, Config, Schedule, Snapshot, TokenStatus, WindowState};
+use craft_core::{Cache, Config, Schedule, SharedCache, Snapshot, TokenStatus, WindowState};
 use craft_github::{resolve_token, Error as GhError, GitHub, RawActivity};
 use serde::Serialize;
 use tauri::menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
-use tauri::{AppHandle, Emitter, LogicalSize, Manager, State, WebviewWindow, Wry};
+use tauri::{
+    AppHandle, Emitter, LogicalSize, Manager, RunEvent, State, WebviewWindow, WebviewWindowBuilder,
+    Wry,
+};
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
+
+mod shrink;
 
 const MAIN: &str = "main";
 const TRAY: &str = "main";
@@ -41,17 +46,33 @@ const BACKOFF_MAX: i64 = 60 * 60;
 /// Below this many GraphQL points left, pause for `LOW_BUDGET_PAUSE`.
 const BUDGET_FLOOR: u64 = 150;
 const LOW_BUDGET_PAUSE: i64 = 30 * 60;
+/// How long to wait for Craft PR Review to finish talking to GitHub (it gives way
+/// between requests) before going ahead anyway: this app is never starved.
+const LEASE_PATIENCE: Duration = Duration::from_secs(180);
 /// Ignore manual refreshes this soon after the previous one.
 const MANUAL_DEBOUNCE: i64 = 15;
+/// After the window gains focus, wait this long (past any Mission Control
+/// exit animation) before checking it for the half-size glitch, and again
+/// before acting on it.
+const SHRINK_SETTLE: Duration = Duration::from_millis(1500);
 
 pub struct AppState {
     config: Mutex<Config>,
     config_mtime: Mutex<Option<SystemTime>>,
     snapshot: Mutex<Snapshot>,
     cache: Option<Cache>,
+    shared: Option<SharedCache>,
     refresh_tx: Mutex<Option<mpsc::Sender<Wake>>>,
     window_state: Mutex<Option<WindowState>>,
     window_dirty: AtomicBool,
+    /// The main window is being destroyed to be recreated (see `shrink`);
+    /// the app must not exit for want of windows meanwhile.
+    rebuilding: AtomicBool,
+    /// Show the recreated window once its UI is ready, even if
+    /// `start_hidden`.
+    show_on_ready: AtomicBool,
+    shrink_check_pending: AtomicBool,
+    last_rebuild: Mutex<Option<Instant>>,
 }
 
 struct TrayItems {
@@ -140,7 +161,7 @@ fn set_always_on_top(app: AppHandle, on: bool) {
 #[tauri::command]
 fn window_ready(app: AppHandle, state: State<AppState>) {
     let start_hidden = state.config.lock().unwrap().window.start_hidden;
-    if !start_hidden {
+    if !start_hidden || state.show_on_ready.swap(false, Ordering::Relaxed) {
         if let Some(w) = app.get_webview_window(MAIN) {
             show_window(&w);
         }
@@ -257,7 +278,15 @@ fn fetch_into_snapshot(app: &AppHandle, cfg: &Config, repo: &str) -> Result<(), 
         .as_deref()
         .map(|d| RawActivity::load(d, repo))
         .unwrap_or_default();
-    let result = gh.fetch_repo(repo, now, &mut raw);
+    // The shared cache is optional; without one, fetch into a throwaway ledger.
+    let fallback = SharedCache::at(std::env::temp_dir().join("craft-github-cache"));
+    let shared = state.shared.as_ref().unwrap_or(&fallback);
+    let lease = shared.lease(LEASE_PATIENCE);
+    if lease.is_none() {
+        eprintln!("{repo}: the shared GitHub lease is still held; fetching anyway");
+    }
+    let result = gh.fetch_repo(repo, now, &mut raw, shared);
+    drop(lease);
     if let (Ok(_), Some(dir)) = (&result, &raw_dir) {
         if let Err(e) = raw.save(dir, repo) {
             eprintln!("{repo}: could not save raw cache: {e}");
@@ -373,6 +402,11 @@ fn step(app: &AppHandle, pacing: &mut Pacing) {
         snap.sync_repos(&cfg.repos);
         snap.poll_secs = cfg.poll_secs();
         snap.stale_after_secs = cfg.stale_secs();
+        // Craft PR Review was rate-limited on this account: hold off too.
+        let shared_backoff = state.shared.as_ref().and_then(|s| s.budget().backoff(now));
+        if let Some(until) = shared_backoff {
+            pacing.not_before = Some(pacing.not_before.map_or(until, |t| t.max(until)));
+        }
         let paused = pacing.not_before.is_some_and(|t| now < t);
         // Rows refreshed by hand go first.
         let due = (!paused)
@@ -399,6 +433,14 @@ fn step(app: &AppHandle, pacing: &mut Pacing) {
                 let mut resume = now + chrono::Duration::seconds(backoff);
                 if let Some(end) = rate_limit_end(&until, now) {
                     resume = resume.max(end);
+                }
+                // Craft PR Review shares the account: it should stop too.
+                if let Err(e) = state
+                    .shared
+                    .as_ref()
+                    .map_or(Ok(()), |s| s.note_backoff(resume))
+                {
+                    eprintln!("could not share the backoff: {e}");
                 }
                 let msg = format!("Rate limited by GitHub; pausing until {}", clock(resume));
                 (resume - now, Some(msg))
@@ -545,6 +587,8 @@ fn show_window(w: &WebviewWindow) {
 /// the current desktop.
 fn toggle_window(app: &AppHandle) {
     let Some(w) = app.get_webview_window(MAIN) else {
+        // Only if recreating it failed earlier; try again.
+        recreate_main_window(app);
         return;
     };
     if w.is_visible().unwrap_or(false) && w.is_focused().unwrap_or(false) {
@@ -651,7 +695,7 @@ fn flush_window_state(app: &AppHandle) {
     }
 }
 
-fn restore_window(app: &tauri::App, cfg: &Config) {
+fn restore_window(app: &AppHandle, cfg: &Config) {
     let Some(w) = app.get_webview_window(MAIN) else {
         return;
     };
@@ -676,6 +720,107 @@ fn restore_window(app: &tauri::App, cfg: &Config) {
         let _ = w.set_size(LogicalSize::new(cfg.window.width, cfg.window.height));
         let _ = w.center();
     }
+}
+
+/// Watch for the half-size glitch (see `shrink`) shortly after the window
+/// gains focus. It has to persist across two checks, so a Mission Control
+/// thumbnail in passing never counts, and then the window is recreated: a
+/// fresh WindowServer window starts without the stale scale, whatever left
+/// it there.
+fn schedule_shrink_check(app: &AppHandle) {
+    let state = app.state::<AppState>();
+    if state.shrink_check_pending.swap(true, Ordering::Relaxed) {
+        return;
+    }
+    let app = app.clone();
+    let spawned = std::thread::Builder::new()
+        .name("shrink-check".into())
+        .spawn(move || {
+            let confirmed = (0..2).all(|_| {
+                std::thread::sleep(SHRINK_SETTLE);
+                shrunk_now(&app)
+            });
+            if confirmed {
+                let later = app.clone();
+                let _ = app.run_on_main_thread(move || rebuild_main_window(&later));
+            }
+            app.state::<AppState>()
+                .shrink_check_pending
+                .store(false, Ordering::Relaxed);
+        });
+    if spawned.is_err() {
+        state.shrink_check_pending.store(false, Ordering::Relaxed);
+    }
+}
+
+/// `shrink::window_shrunk` on the main thread; false if it can't tell.
+fn shrunk_now(app: &AppHandle) -> bool {
+    let (tx, rx) = mpsc::channel();
+    let handle = app.clone();
+    let asked = app.run_on_main_thread(move || {
+        let shrunk = handle
+            .get_webview_window(MAIN)
+            .is_some_and(|w| shrink::window_shrunk(&w));
+        let _ = tx.send(shrunk);
+    });
+    asked.is_ok() && rx.recv_timeout(Duration::from_secs(5)).unwrap_or(false)
+}
+
+/// Destroy the main window, remembering its (correct) AppKit geometry; the
+/// `Destroyed` handler recreates it. Main thread.
+fn rebuild_main_window(app: &AppHandle) {
+    let state = app.state::<AppState>();
+    let Ok(mut last) = state.last_rebuild.lock() else {
+        return;
+    };
+    let now = Instant::now();
+    if !shrink::may_rebuild(*last, now) {
+        return;
+    }
+    let Some(w) = app.get_webview_window(MAIN) else {
+        return;
+    };
+    *last = Some(now);
+    drop(last);
+    eprintln!("main window is shown shrunk; recreating it");
+    note_window_geometry(app);
+    flush_window_state(app);
+    state.rebuilding.store(true, Ordering::Relaxed);
+    if let Err(e) = w.destroy() {
+        eprintln!("could not destroy the shrunk window: {e}");
+        state.rebuilding.store(false, Ordering::Relaxed);
+    }
+}
+
+/// Build the main window afresh from tauri.conf.json, at the remembered
+/// geometry. It shows itself once its UI is ready (`window_ready`). Main
+/// thread.
+fn recreate_main_window(app: &AppHandle) {
+    let state = app.state::<AppState>();
+    if app.get_webview_window(MAIN).is_none() {
+        // Before building: the new UI may report ready at any point after.
+        state.show_on_ready.store(true, Ordering::Relaxed);
+        let built = app
+            .config()
+            .app
+            .windows
+            .iter()
+            .find(|c| c.label == MAIN)
+            .map(|c| WebviewWindowBuilder::from_config(app, c).and_then(|b| b.build()));
+        match built {
+            Some(Ok(_)) => {
+                let cfg = state.config.lock().map(|c| c.clone()).unwrap_or_default();
+                restore_window(app, &cfg);
+                apply_window_config(app, &cfg);
+            }
+            Some(Err(e)) => eprintln!("could not recreate the main window: {e}"),
+            None => eprintln!("no {MAIN:?} window in tauri.conf.json"),
+        }
+        if app.get_webview_window(MAIN).is_none() {
+            state.show_on_ready.store(false, Ordering::Relaxed);
+        }
+    }
+    state.rebuilding.store(false, Ordering::Relaxed);
 }
 
 fn build_tray(app: &tauri::App, cfg: &Config) -> tauri::Result<()> {
@@ -773,9 +918,14 @@ pub fn run() {
         config_mtime: Mutex::new(config_mtime()),
         snapshot: Mutex::new(snapshot),
         cache,
+        shared: SharedCache::default_location().ok(),
         refresh_tx: Mutex::new(Some(tx)),
         window_state: Mutex::new(None),
         window_dirty: AtomicBool::new(false),
+        rebuilding: AtomicBool::new(false),
+        show_on_ready: AtomicBool::new(false),
+        shrink_check_pending: AtomicBool::new(false),
+        last_rebuild: Mutex::new(None),
     };
 
     tauri::Builder::default()
@@ -802,7 +952,7 @@ pub fn run() {
                 app.set_activation_policy(tauri::ActivationPolicy::Accessory);
             }
 
-            restore_window(app, &cfg);
+            restore_window(app.handle(), &cfg);
             build_tray(app, &cfg)?;
             apply_window_config(app.handle(), &cfg);
             update_tray(app.handle());
@@ -826,14 +976,46 @@ pub fn run() {
             }
             tauri::WindowEvent::Focused(focused) => {
                 let _ = window.emit(EV_FOCUS, *focused);
+                if *focused && window.label() == MAIN {
+                    schedule_shrink_check(window.app_handle());
+                }
+            }
+            tauri::WindowEvent::Destroyed if window.label() == MAIN => {
+                let app = window.app_handle().clone();
+                if app.state::<AppState>().rebuilding.load(Ordering::Relaxed) {
+                    // Not from inside this event, nor queued onto the main
+                    // thread: a webview built there never loads its page.
+                    // From another thread, Tauri builds it on the event loop.
+                    let later = app.clone();
+                    let spawned = std::thread::Builder::new()
+                        .name("recreate-window".into())
+                        .spawn(move || recreate_main_window(&later));
+                    if spawned.is_err() {
+                        app.state::<AppState>()
+                            .rebuilding
+                            .store(false, Ordering::Relaxed);
+                    }
+                }
             }
             tauri::WindowEvent::Resized(_) | tauri::WindowEvent::Moved(_) => {
                 note_window_geometry(window.app_handle())
             }
             _ => {}
         })
-        .run(tauri::generate_context!())
-        .expect("error while running Craft Status");
+        .build(tauri::generate_context!())
+        .expect("error while running Craft Status")
+        .run(|app, event| {
+            // Destroying the only window asks to exit (code None); a
+            // window rebuild must survive that. Quit (code Some) still exits.
+            if let RunEvent::ExitRequested {
+                code: None, api, ..
+            } = event
+            {
+                if app.state::<AppState>().rebuilding.load(Ordering::Relaxed) {
+                    api.prevent_exit();
+                }
+            }
+        });
 }
 
 #[cfg(test)]

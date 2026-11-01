@@ -27,3 +27,11 @@
 - `make test`: Rust tests + `npm test` (UI tests)
 - `make check`: clippy, rustfmt, `npm run typecheck`
 - `make preview`: the UI in a browser against `ui/dev-snapshot.json`
+
+## Shared with Craft PR Review
+
+`../craft-pr-review-tool` depends on `craft-core` and `craft-github` by path, and
+the two apps share `~/Library/Caches/craft-github-cache/`. Changes to
+`craft_core::shared`, `Config`, `GitHub::sync_ledger` or `resolve_token` affect
+both: build and test that repo too. Hold the lease (`SharedCache::lease`) around
+anything that talks to GitHub or updates a ledger.
