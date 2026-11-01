@@ -62,7 +62,6 @@ pub struct BuildLag {
 }
 
 /// Assets that are not something a person downloads to run the app.
-#[must_use]
 pub fn is_counted_asset(name: &str) -> bool {
     const SKIP_SUFFIXES: &[&str] = &[
         ".zsync",
@@ -95,7 +94,6 @@ fn downloads(r: &Release) -> u64 {
 
 /// Latest = newest published, non-draft release (prereleases count: they are
 /// builds too). Drafts are invisible to users and are ignored entirely.
-#[must_use]
 pub fn summarize_releases(releases: &[Release]) -> ReleaseSummary {
     let published: Vec<&Release> = releases.iter().filter(|r| !r.draft).collect();
     let latest = published
