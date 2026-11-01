@@ -15,9 +15,10 @@ const api: Api = TAURI
     }
   : {
       async invoke<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
-        if (cmd === 'get_snapshot') return (await fetch('dev-snapshot.json')).json() as Promise<T>;
+        if (cmd === 'get_snapshot') return (await fetch('dev-snapshot.json', { cache: 'no-cache' })).json() as Promise<T>;
         if (cmd === 'get_meta') return { opacity: 0.96, always_on_top: false, shortcut: 'CmdOrCtrl+Shift+G' } as T;
         if (cmd === 'open_url') window.open(String(args?.url), '_blank');
+        if (cmd === 'refresh_now') window.location.reload();
         return null as T;
       },
       listen() {},
