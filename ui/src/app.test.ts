@@ -202,6 +202,19 @@ test('a cancelled drag restores the previous order', async () => {
   assert.equal(stored(h, 'order'), null);
 });
 
+test('the Type column names what each repo is, even before its first fetch', async () => {
+  const h = await setup({ snap: snapshot([
+    repo('lib', {}, { repo: 'storytold/lib', category: 'library' }),
+    repo('new', null, { repo: 'storytold/new', category: 'ci', fetched_at: null }),
+    repo('mine', {}, { repo: 'someone/mine', category: 'other' }),
+  ]) });
+  const i = COLUMNS.findIndex((c) => c.key === 'category');
+  const type = (r: string) => h.doc.querySelector<HTMLTableRowElement>(`tr[data-repo="${r}"]`)!.cells[i]!.textContent;
+  assert.equal(type('storytold/lib'), 'Library');
+  assert.equal(type('storytold/new'), 'CI');
+  assert.equal(type('someone/mine'), '—');
+});
+
 test('third-party repos are tagged 3P in the table and the urgent list', async () => {
   const h = await setup({ snap: snapshot([
     repo('ours', { urgency: 10, urgent: [issue(1, 10, false)] }, { repo: 'storytold/ours' }),

@@ -23,6 +23,10 @@ cache, and tells you what to fix first. Everything runs locally: no server.
 
 ## What it shows
 
+The default list covers the apps and also libraries, assets, CI and tooling repos.
+The **Type** column says which is which (`DEFAULT_REPOS` in
+`crates/craft-core/src/config.rs`); repos you add yourself show `—`.
+
 Every column sorts. Click a header; click it again to reverse the order. Repos
 with no data always sort last. Or drag rows into your own order (say, by
 priority): dropping one clears the sort, and the order is remembered until you
