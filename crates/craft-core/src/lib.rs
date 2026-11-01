@@ -8,16 +8,20 @@ pub mod config;
 pub mod model;
 pub mod parity;
 pub mod releases;
+pub mod shared;
 pub mod urgency;
 
 pub use cache::Cache;
-pub use config::{Config, WindowState};
+pub use config::{category_of, Config, RepoCategory, WindowState};
 pub use model::{
     Activity, RepoEntry, RepoStats, Schedule, Snapshot, TokenStatus, UrgentIssue, ALL_TIME,
     SINCE_RELEASE, WINDOWS,
 };
 pub use parity::{Figure, Parity};
 pub use releases::{summarize_releases, Asset, BuildLag, LagBasis, Release, ReleaseSummary};
+pub use shared::{
+    ledger_from_old_raw, Lease, LedgerPr, PrLedger, SharedBudget, SharedCache, WalkPlan,
+};
 pub use urgency::{rank_issues, score_issue, IssueInput, Scored};
 
 #[derive(Debug, thiserror::Error)]
@@ -46,7 +50,8 @@ pub fn atomic_write(path: &std::path::Path, text: &str) -> Result<()> {
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir).map_err(io)?;
     }
-    let tmp = path.with_extension("tmp");
+    // Per process, since Craft PR Review writes some of the same files.
+    let tmp = path.with_extension(format!("tmp{}", std::process::id()));
     std::fs::write(&tmp, text).map_err(io)?;
     std::fs::rename(&tmp, path).map_err(io)
 }

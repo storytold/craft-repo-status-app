@@ -203,6 +203,32 @@ test('a cancelled drag restores the previous order', async () => {
   assert.equal(stored(h, 'order'), null);
 });
 
+test('the Type column names what each repo is, even before its first fetch', async () => {
+  const h = await setup({ snap: snapshot([
+    repo('lib', {}, { repo: 'storytold/lib', category: 'library' }),
+    repo('new', null, { repo: 'storytold/new', category: 'ci', fetched_at: null }),
+    repo('mine', {}, { repo: 'someone/mine', category: 'other' }),
+  ]) });
+  const i = COLUMNS.findIndex((c) => c.key === 'category');
+  const type = (r: string) => h.doc.querySelector<HTMLTableRowElement>(`tr[data-repo="${r}"]`)!.cells[i]!.textContent;
+  assert.equal(type('storytold/lib'), 'Library');
+  assert.equal(type('storytold/new'), 'CI');
+  assert.equal(type('someone/mine'), '—');
+});
+
+test('third-party repos are tagged 3P in the table and the urgent list', async () => {
+  const h = await setup({ snap: snapshot([
+    repo('ours', { urgency: 10, urgent: [issue(1, 10, false)] }, { repo: 'storytold/ours' }),
+    repo('theirs', { urgency: 20, urgent: [issue(2, 20, false)] }, { repo: 'tangency-labs/theirs' }),
+  ]) });
+  const tag = (repo: string) => h.doc.querySelector(`tr[data-repo="${repo}"] .third-party`);
+  assert.equal(tag('storytold/ours'), null);
+  assert.equal(tag('tangency-labs/theirs')?.textContent, '3P');
+  assert.equal(tag('tangency-labs/theirs')?.getAttribute('title'), 'Third-party app (tangency-labs)');
+  h.doc.querySelector<HTMLElement>('[data-view="urgent"]')!.click();
+  assert.equal(h.doc.querySelectorAll('.urgent-item .third-party').length, 1);
+});
+
 test('clicking a row, or barely moving it, opens its urgent issues', async () => {
   const h = await setup();
   const row = h.row('alpha');
@@ -305,6 +331,36 @@ test('the Fetched column shows each repo’s data age and sorts by it, freshest 
   assert.deepEqual(h.rows(), ['delta', 'alpha', 'beta', 'gamma'], 'oldest data first, never-fetched last');
   header(h, 'Fetched').click();
   assert.deepEqual(h.rows(), ['beta', 'alpha', 'delta', 'gamma']);
+});
+
+test('the Build DL Rate column sits left of Build DLs and sorts across units', async () => {
+  const fetched = '2026-10-08T12:00:00Z';
+  const dayAgo = '2026-10-07T12:00:00Z';
+  const out = (latest_build_downloads: number): Partial<RepoStats> => ({ latest_build_downloads, latest_build_at: dayAgo });
+  const h = await setup({ snap: snapshot([
+    repo('alpha', out(8640), { fetched_at: fetched }),
+    repo('beta', out(172800), { fetched_at: fetched }),
+    repo('gamma', { latest_build: null, latest_build_at: null }, { fetched_at: fetched }),
+    repo('delta', out(0), { fetched_at: fetched }),
+    repo('pending', null, { fetched_at: null }),
+  ]) });
+  const i = COLUMNS.findIndex((c) => c.key === 'latest_build_rate');
+  const heads = [...h.doc.querySelectorAll('thead tr.cols th')].map((th) => th.textContent);
+  assert.equal(heads[i], 'Build DL Rate');
+  assert.equal(heads[i + 1], 'Build DLs');
+  const rate = (name: string) => h.row(name).cells[i]!;
+  assert.equal(rate('alpha').textContent, '6.0/m');
+  assert.equal(rate('beta').textContent, '2.0/s');
+  assert.equal(rate('gamma').textContent, '—');
+  assert.equal(rate('delta').textContent, '0.0/d');
+  assert.ok(rate('delta').querySelector('.zero'));
+  assert.equal(rate('pending').textContent, '—');
+  assert.equal(rate('alpha').querySelector('span')!.title, '8,640 downloads of v1.0.0, out 1d when counted');
+  assert.equal(h.doc.querySelector('tfoot tr')!.children[i]!.textContent, '', 'no total');
+  header(h, 'Build DL Rate').click();
+  assert.deepEqual(h.rows(), ['beta', 'alpha', 'delta', 'gamma', 'pending']);
+  header(h, 'Build DL Rate').click();
+  assert.deepEqual(h.rows(), ['delta', 'alpha', 'beta', 'gamma', 'pending']);
 });
 
 test('a row’s refresh button refetches only that repo, and spins while it waits', async () => {
