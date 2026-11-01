@@ -6,7 +6,7 @@ INSTALLED  := /Applications/$(APP_NAME).app
 AGENT_ID   := ai.storyteller.craft-status
 AGENT      := $(HOME)/Library/LaunchAgents/$(AGENT_ID).plist
 
-.PHONY: dev run build bundle install uninstall test check ui snapshot preview icons clean
+.PHONY: dev run build bundle install uninstall test check ui snapshot dump preview icons clean
 
 dev: node_modules ## tauri dev, recompiling ui/src/ on change (live-reloads ui/)
 	npm run --silent watch & trap 'kill $$!' EXIT; cd $(APP_DIR) && cargo tauri dev
@@ -49,7 +49,10 @@ check: node_modules ## lints
 snapshot:       ## fetch once from GitHub into ui/dev-snapshot.json (prints a table)
 	cargo run -q -p craft-github --bin craft-fetch -- --snapshot ui/dev-snapshot.json
 
-preview: snapshot ui ## open the UI in a browser against the dev snapshot
+dump:           ## write the cached PR views to ui/dev-data.json, fetching nothing
+	cargo run -q -p pr-github --bin pr-fetch -- --dump ui/dev-data.json
+
+preview: snapshot dump ui ## open the UI in a browser against the dev data
 	@echo "http://127.0.0.1:8766/index.html  (Ctrl+C to stop)"
 	python3 -m http.server 8766 --bind 127.0.0.1 --directory ui
 

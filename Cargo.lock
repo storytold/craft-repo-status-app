@@ -463,6 +463,9 @@ dependencies = [
  "craft-core",
  "craft-github",
  "objc2",
+ "pr-claude",
+ "pr-core",
+ "pr-github",
  "serde",
  "serde_json",
  "tauri",
@@ -2467,6 +2470,43 @@ name = "powerfmt"
 version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4a6394b9e965e73d0a289ee54f589087e2c676aedf60885baf52c76b771e4958"
+
+[[package]]
+name = "pr-claude"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "dirs",
+ "pr-core",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.21",
+]
+
+[[package]]
+name = "pr-core"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "craft-core",
+ "dirs",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.21",
+ "toml 1.1.7+spec-1.1.0",
+]
+
+[[package]]
+name = "pr-github"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "craft-core",
+ "craft-github",
+ "pr-core",
+ "reqwest 0.12.28",
+ "serde_json",
+]
 
 [[package]]
 name = "precomputed-hash"

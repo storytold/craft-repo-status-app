@@ -69,3 +69,59 @@ close_to_tray = true
 
 [shortcuts]
 toggle_window = "CmdOrCtrl+Shift+G"   # "" disables
+
+# ───── The PR tab ─────
+# Every setting here is optional. The PR tab covers the repos above, less third
+# parties and exclude_repos.
+[pr_review]
+# Repos owned by anyone else are third party (solidcraft): they stay on the
+# Downloads and Fix first tabs, but their PRs aren't fetched or reviewed.
+first_party_owners = ["storytold"]
+# First-party repos to leave out of the PR tab, as "owner/name".
+exclude_repos = []
+
+# How often each repo's open-PR list is brought up to date (minutes).
+poll_minutes = 30.0
+# How often the whole list is rewalked (hours). Only this picks up CI and
+# merge-conflict changes on PRs nobody touched: GitHub doesn't count those as updates.
+full_list_hours = 4.0
+# Data older than this is flagged STALE (minutes; never less than poll_minutes).
+stale_minutes = 90.0
+
+# GitHub's GraphQL budget is 5000 points an hour for the account. Inspecting PRs
+# and walking merge history stop at this many points an hour; keeping the lists
+# current does not.
+max_points_per_hour = 2500
+# All PR fetching pauses below this many points left, well above the 150 where the
+# Downloads tab's polling pauses, so PR review always gives way first.
+budget_floor = 1000
+
+# Authors with more than this many PRs landed across the craft apps are "frequent".
+frequent_over = 30
+# Quality score (0-100) that counts as "high quality".
+high_quality = 75
+# Whether a contributors/people.toml entry makes someone core, as well as write
+# access. Contributors may add their own entry, so turn this off for a stricter list.
+people_toml_is_core = true
+# Paths that deserve a closer look when someone without write access changes them.
+sensitive_paths = [
+  ".github/workflows/", ".github/actions/", ".github/CODEOWNERS", "CODEOWNERS",
+  "build.rs", ".cargo/config", "deny.toml", ".coderabbit.yaml",
+  "sonar-project.properties", "Dockerfile", "tauri.conf.json", "/capabilities/",
+]
+
+[pr_review.claude]
+# Claude runs through the Claude Code CLI, using its login. No tools, no MCP.
+enabled = true
+# Path to the claude binary; empty looks in the usual install locations.
+binary = ""
+model = "claude-opus-5-5"
+effort = "low"
+# PRs summarized per call.
+batch_size = 12
+# Hard limits on background calls. Asking for one PR by hand counts toward the
+# dollar limit too, but isn't refused by it.
+max_runs_per_hour = 12
+max_usd_per_day = 5.0
+# How often each repo's overlapping PRs are regrouped (hours).
+group_refresh_hours = 24.0
