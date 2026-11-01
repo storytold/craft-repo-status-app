@@ -23,6 +23,10 @@ cache, and tells you what to fix first. Everything runs locally: no server.
 
 ## What it shows
 
+The default list covers the apps and also libraries, assets, CI and tooling repos.
+The **Type** column says which is which (`DEFAULT_REPOS` in
+`crates/craft-core/src/config.rs`); any repo not named there shows `—`.
+
 Every column sorts. Click a header; click it again to reverse the order. Repos
 with no data always sort last. Or drag rows into your own order (say, by
 priority): dropping one clears the sort, and the order is remembered until you
@@ -129,14 +133,28 @@ scored.
 - `⌘R` or the ⟳ button makes every repo due at once; they are still fetched
   one at a time, stalest first, and a rate-limit pause still holds.
 - Two caches in `~/Library/Caches/craft-status/` survive restarts:
-  - `raw/<owner>@<repo>.json`: each repo's commit authors, PRs and issues
-    from the last week (or since the latest build). Each poll fetches only
-    what's new since the previous one, and refetches from scratch every six
-    hours to drop deleted issues and pick up late-dated commits. It also
-    keeps the ETags and results of the Main CI requests.
+  - `raw/<owner>@<repo>.json`: each repo's commit authors and issues from the
+    last week (or since the latest build). Each poll fetches only what's new
+    since the previous one, and refetches from scratch every six hours to drop
+    deleted issues and pick up late-dated commits. It also keeps the ETags and
+    results of the Main CI requests.
   - `snapshot.json`: what the window shows, saved after each repo. On launch
     the window shows it at once, marked `STALE` if it's old. Repos whose
     data is still fresh aren't refetched at launch.
+- A third cache, `~/Library/Caches/craft-github-cache/`, is shared with
+  [Craft PR Review](../craft-pr-review-tool), which uses this app's config and
+  token. Everything in it can be deleted.
+  - `prs/<owner>@<repo>.json`: a ledger of each repo's PRs, which is where this
+    app's PR counts come from. One walk, most recently updated first, serves both
+    apps, and a ledger either of them walked in the last 5 minutes isn't walked
+    again. A repo's first ledger is seeded from what its `raw/` file held about
+    PRs, so upgrading doesn't refetch the last week.
+  - `lease.lock`: a file lock held while talking to GitHub, so the apps take turns
+    and can't overwrite each other's updates. This app waits up to 3 minutes for
+    it, then goes ahead anyway; Craft PR Review gives way. It releases if an app
+    dies.
+  - `budget.json`: the last rate-limit reading and any backoff. When GitHub
+    rate-limits either app, both pause.
 - The GitHub token comes from the first of `$CRAFT_STATUS_GITHUB_TOKEN`,
   `$GITHUB_TOKEN` and `$GH_TOKEN` that is set, then from `github_token` in the
   config, then from `gh auth token`. The app is started by launchd, not a
