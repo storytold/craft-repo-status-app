@@ -123,7 +123,6 @@ pub struct RepoEntry {
 }
 
 impl RepoEntry {
-    #[must_use]
     pub fn new(repo: &str) -> Self {
         RepoEntry {
             repo: repo.to_string(),
@@ -131,7 +130,6 @@ impl RepoEntry {
         }
     }
 
-    #[must_use]
     pub fn name(&self) -> &str {
         self.repo.rsplit('/').next().unwrap_or(&self.repo)
     }
@@ -139,7 +137,6 @@ impl RepoEntry {
     /// No data yet, or stats from an older build that lack a field the UI
     /// shows: today, a recent-activity window (all time included, and since
     /// the release for repos with one).
-    #[must_use]
     pub fn is_hole(&self) -> bool {
         self.fetched_at.is_none()
             || self.stats.as_ref().is_some_and(|s| {
@@ -155,7 +152,6 @@ impl RepoEntry {
     /// When this repo should next be fetched: at once if it's a hole or older
     /// than a manual refresh, else once its data is `refresh_secs` old; never
     /// sooner than `retry_secs` after a failed attempt.
-    #[must_use]
     pub fn due_at(&self, schedule: &Schedule) -> Time {
         let due = match self.fetched_at {
             Some(t) if !self.is_hole() && schedule.forced_since.is_none_or(|f| t >= f) => {
@@ -169,7 +165,6 @@ impl RepoEntry {
         }
     }
 
-    #[must_use]
     pub fn is_stale(&self, now: Time, stale_after_secs: i64) -> bool {
         match self.fetched_at {
             Some(t) => (now - t).num_seconds() > stale_after_secs,
@@ -226,7 +221,6 @@ pub struct TokenStatus {
 
 impl Snapshot {
     /// The time of the oldest data on screen; `None` if some repo has none.
-    #[must_use]
     pub fn oldest_data_at(&self) -> Option<Time> {
         self.repos
             .iter()
@@ -240,7 +234,6 @@ impl Snapshot {
 
     /// The repo to fetch next at `now`: holes first, in config order, then
     /// whichever due repo has the oldest data. `None` when nothing is due.
-    #[must_use]
     pub fn next_due(&self, now: Time, schedule: &Schedule) -> Option<&RepoEntry> {
         self.repos
             .iter()
@@ -273,12 +266,10 @@ impl Snapshot {
     }
 
     /// When the next repo falls due; `None` with nothing configured.
-    #[must_use]
     pub fn next_due_at(&self, schedule: &Schedule) -> Option<Time> {
         self.repos.iter().map(|e| e.due_at(schedule)).min()
     }
 
-    #[must_use]
     pub fn is_stale(&self, now: Time) -> bool {
         self.repos.is_empty()
             || self

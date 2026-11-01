@@ -114,7 +114,6 @@ impl Default for Shortcuts {
 }
 
 /// `https://github.com/o/r(.git)(/…)` or `o/r` → `o/r`.
-#[must_use]
 pub fn normalize_repo(s: &str) -> Option<String> {
     let s = s.trim();
     let s = s
@@ -186,7 +185,6 @@ impl Config {
         Self::load_from(&path)
     }
 
-    #[must_use]
     #[expect(
         clippy::cast_possible_truncation,
         reason = "Minute values are converted to whole seconds with the existing saturating f64-to-i64 cast"
@@ -195,7 +193,6 @@ impl Config {
         (self.poll_minutes * 60.0) as i64
     }
 
-    #[must_use]
     #[expect(
         clippy::cast_possible_truncation,
         reason = "Minute values are converted to whole seconds with the existing saturating f64-to-i64 cast"
@@ -227,7 +224,6 @@ impl WindowState {
         Ok(dirs::home_dir().ok_or(Error::NoHome)?.join(STATE_FILE_NAME))
     }
 
-    #[must_use]
     pub fn load() -> Option<WindowState> {
         let text = std::fs::read_to_string(Self::path().ok()?).ok()?;
         let f: StateFile = toml::from_str(&text).ok()?;
@@ -249,7 +245,6 @@ impl WindowState {
     }
 
     /// Whether enough of the window to grab is on one of the monitors `(x, y, w, h)`.
-    #[must_use]
     #[expect(
         clippy::cast_possible_wrap,
         reason = "Preserve the existing two's-complement coordinate arithmetic for out-of-range window values"

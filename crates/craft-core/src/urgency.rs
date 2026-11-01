@@ -292,7 +292,6 @@ pub fn score_issue(
 
 /// Returns the top `keep` issues (score > 0, best first, ties → newest), the
 /// repo urgency (sum of the top five scores) and the count of critical issues.
-#[must_use]
 pub fn rank_issues(
     issues: &[IssueInput],
     now: DateTime<Utc>,

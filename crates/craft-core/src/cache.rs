@@ -23,23 +23,19 @@ impl Cache {
         Ok(Cache::at(dir.join("craft-status").join("snapshot.json")))
     }
 
-    #[must_use]
     pub fn at(path: PathBuf) -> Cache {
         Cache { path }
     }
 
-    #[must_use]
     pub fn path(&self) -> &Path {
         &self.path
     }
 
     /// The directory holding the snapshot, where other cached data lives too.
-    #[must_use]
     pub fn dir(&self) -> &Path {
         self.path.parent().unwrap_or(&self.path)
     }
 
-    #[must_use]
     pub fn load(&self) -> Option<Snapshot> {
         let text = std::fs::read_to_string(&self.path).ok()?;
         let mut s: Snapshot = serde_json::from_str(&text).ok()?;
