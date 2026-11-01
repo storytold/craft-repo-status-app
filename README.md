@@ -56,8 +56,8 @@ sort by a column again.
 | Fix first | **Urgency** (the sum of the top five open-issue scores) · **Critical** (open issues naming a crash, hang, freeze, data loss, launch failure or security problem) |
 | Open | open PRs · open issues · oldest open PR |
 | Latest | last commit to `main` · newest issue · newest PR |
-| Activity (dropdown) | commits to `main` · PRs opened · PRs merged · issues opened · people committing to `main` |
-| Builds | most recent release tag · its publish date · **Unreleased** (commits on `main` since it) · its downloads · downloads across all releases |
+| Activity (dropdown) | commits to `main` · PRs opened · PRs merged · issues opened · people committing to `main` · **Total DLs** (downloads across all releases; only under All time) |
+| Downloads | the latest release's tag · its publish date · its download rate and downloads · **Unreleased** (commits on `main` since it) |
 
 - **Activity** covers the window picked in that group's header: the last
   10 min, 30 min, hour, 4 h (the default), 12 h, day or week, since the last
