@@ -1,6 +1,13 @@
 [workspace]
 resolver = "2"
-members = ["crates/craft-core", "crates/craft-github", "crates/craft-status-app"]
+members = [
+    "crates/craft-core",
+    "crates/craft-github",
+    "crates/pr-core",
+    "crates/pr-github",
+    "crates/pr-claude",
+    "crates/craft-status-app",
+]
 
 [workspace.package]
 version = "0.1.0"
@@ -8,6 +15,11 @@ edition = "2021"
 license = "MIT"
 
 [workspace.dependencies]
+craft-core = { path = "crates/craft-core" }
+craft-github = { path = "crates/craft-github" }
+pr-core = { path = "crates/pr-core" }
+pr-github = { path = "crates/pr-github" }
+pr-claude = { path = "crates/pr-claude" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 toml = "1"

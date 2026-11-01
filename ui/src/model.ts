@@ -113,6 +113,8 @@ export interface Meta {
   platform?: string;
   version?: string;
   shortcut?: string;
+  frequent_over?: number;
+  high_quality?: number;
 }
 
 // ───────────────────────────── windows ─────────────────────────────
@@ -192,6 +194,12 @@ export const COLUMNS: readonly Column[] = [
   { key: 'name', label: 'Repo', kind: 'text', group: '', get: (e) => e.repo.split('/').pop() ?? e.repo },
   { key: 'fetched', label: 'Fetched', kind: 'age', group: '', title: 'Time since this repo’s data was last fetched in full (failed polls keep the older time)', get: (e) => e.fetched_at ?? null },
   { key: 'category', label: 'Type', kind: 'text', group: '', title: 'What the repo is: app, library, assets, CI or tooling', get: (e) => CATEGORY_LABEL[e.category ?? 'other'] },
+  { key: 'latest_build_rate', label: 'Build DL Rate', kind: 'rate', group: 'Downloads', title: 'Build DLs divided by how long the most recent release had been out when they were counted', get: buildRate },
+  { key: 'latest_build_downloads', label: 'Build DLs', kind: 'num', group: 'Downloads', title: 'Downloads of the most recent release, all OSes and package types (checksums and update deltas excluded)' },
+  { key: 'downloads_total', label: 'Total DLs', kind: 'num', group: 'Downloads', title: 'Downloads across every published release' },
+  { key: 'latest_build', label: 'Build', kind: 'version', group: 'Downloads', title: 'Most recent published release' },
+  { key: 'latest_build_at', label: 'Built', kind: 'date', group: 'Downloads', title: 'When the most recent release was published' },
+  { key: 'commits_since_build', label: 'Unreleased', kind: 'num', group: 'Downloads', title: 'Commits on main since the most recent release (~ means estimated: the release’s commit isn’t on main)', get: (e) => e.stats?.since_build?.commits ?? null },
   { key: 'urgency', label: 'Urgency', kind: 'num', group: 'Fix first', title: 'Sum of the top five open-issue urgency scores' },
   { key: 'critical_issues', label: 'Critical', kind: 'num', group: 'Fix first', title: 'Open issues that mention a crash, hang, freeze, data loss, launch failure or security problem' },
   { key: 'open_prs', label: 'PRs', kind: 'num', group: 'Open', title: 'Open pull requests' },
@@ -205,12 +213,6 @@ export const COLUMNS: readonly Column[] = [
   { key: 'recent_merged', recent: 'prs_merged', label: 'Merged', kind: 'num', group: RECENT, title: 'Pull requests merged {span}' },
   { key: 'recent_issues', recent: 'issues_opened', label: 'Issues', kind: 'num', group: RECENT, title: 'Issues opened {span}' },
   { key: 'recent_people', recent: 'people', label: 'People', kind: 'num', group: RECENT, title: 'People who committed to main {span} (all time: GitHub’s contributor count)' },
-  { key: 'latest_build', label: 'Build', kind: 'version', group: 'Builds', title: 'Most recent published release' },
-  { key: 'latest_build_at', label: 'Built', kind: 'date', group: 'Builds', title: 'When the most recent release was published' },
-  { key: 'commits_since_build', label: 'Unreleased', kind: 'num', group: 'Builds', title: 'Commits on main since the most recent release (~ means estimated: the release’s commit isn’t on main)', get: (e) => e.stats?.since_build?.commits ?? null },
-  { key: 'latest_build_rate', label: 'Build DL Rate', kind: 'rate', group: 'Builds', title: 'Build DLs divided by how long the most recent release had been out when they were counted', get: buildRate },
-  { key: 'latest_build_downloads', label: 'Build DLs', kind: 'num', group: 'Builds', title: 'Downloads of the most recent release, all OSes and package types (checksums and update deltas excluded)' },
-  { key: 'downloads_total', label: 'Total DLs', kind: 'num', group: 'Builds', title: 'Downloads across every published release' },
 ];
 
 export const COLUMN: Readonly<Record<string, Column>> = Object.fromEntries(COLUMNS.map((c) => [c.key, c]));
@@ -321,6 +323,46 @@ export const FIRST_PARTY_OWNERS: readonly string[] = ['storytold'];
 export function isThirdParty(repo: string): boolean {
   const owner = repo.split('/')[0]?.toLowerCase() ?? '';
   return !FIRST_PARTY_OWNERS.includes(owner);
+}
+
+// ───────────────────────────── which repos show ─────────────────────────────
+
+/** A kind of repo the toggles beside the tabs can hide. */
+export interface RepoKind {
+  id: string;
+  label: string;
+  includes(repo: string, category: RepoCategory | undefined): boolean;
+}
+
+const ofCategory = (category: RepoCategory) => (_: string, c: RepoCategory | undefined): boolean => c === category;
+
+export const REPO_KINDS: readonly RepoKind[] = [
+  { id: 'third_party', label: '3rd party', includes: (repo) => isThirdParty(repo) },
+  { id: 'app', label: 'Apps', includes: ofCategory('app') },
+  { id: 'library', label: 'Libraries', includes: ofCategory('library') },
+  { id: 'assets', label: 'Assets', includes: ofCategory('assets') },
+  { id: 'ci', label: 'CI', includes: ofCategory('ci') },
+  { id: 'tooling', label: 'Tooling', includes: ofCategory('tooling') },
+];
+
+/** Whether any kind this repo is has been hidden: a third-party app goes with either toggle. */
+export function isRepoHidden(repo: string, category: RepoCategory | undefined, hidden: readonly string[]): boolean {
+  return REPO_KINDS.some((k) => hidden.includes(k.id) && k.includes(repo, category));
+}
+
+/** `hidden` with `id` flipped. */
+export function toggleKind(hidden: readonly string[], id: string): string[] {
+  return hidden.includes(id) ? hidden.filter((k) => k !== id) : [...hidden, id];
+}
+
+/**
+ * The manual order after dragging among the visible rows: hidden repos keep their
+ * places in `all` (the previous order), and the visible ones fill the rest as dragged.
+ */
+export function reorderVisible(all: readonly string[], visible: readonly string[]): string[] {
+  const shown = new Set(visible);
+  const next = visible[Symbol.iterator]();
+  return all.map((repo) => (shown.has(repo) ? next.next().value ?? repo : repo));
 }
 
 // ───────────────────────────── freshness ─────────────────────────────

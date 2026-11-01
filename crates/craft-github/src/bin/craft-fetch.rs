@@ -6,7 +6,7 @@ use chrono::Utc;
 use craft_core::{Cache, Config, LagBasis, RepoEntry, SharedCache, Snapshot, ALL_TIME};
 use craft_github::{resolve_token, Error, GitHub, RawActivity};
 
-/// How long to wait for Craft PR Review to finish talking to GitHub.
+/// How long to wait for the PR poller to finish talking to GitHub.
 const LEASE_PATIENCE: std::time::Duration = std::time::Duration::from_secs(180);
 
 fn main() {
