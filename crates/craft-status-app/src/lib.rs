@@ -1,7 +1,8 @@
-//! Tauri shell around `craft-core` + `craft-github`: the poll loop, the
-//! on-disk cache, tray icon, global shortcut and window management.
+//! Tauri shell: the status poll loop (`craft-core` + `craft-github`), its on-disk
+//! cache, tray icon, global shortcut and window management. The PR tab's commands
+//! and threads are in `pr`.
 //!
-//! One background thread owns polling. Every `poll_minutes` (and on demand)
+//! One background thread owns status polling. Every `poll_minutes` (and on demand)
 //! it fetches all repositories one at a time, publishing the snapshot to the
 //! UI and the cache after each repository lands. Before a fetch, one probe
 //! request finds the due repositories that have not changed since their last
@@ -12,16 +13,26 @@
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Mutex};
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 
 use chrono::{DateTime, Local, Timelike, Utc};
-use craft_core::{Cache, Config, Schedule, Snapshot, TokenStatus, WindowState};
+use craft_core::{
+    Cache, Config, PrLedger, Schedule, SharedCache, Snapshot, TokenStatus, WindowState,
+};
 use craft_github::{can_skip, resolve_token, restat, Error as GhError, GitHub, Probe, RawActivity};
 use serde::Serialize;
 use tauri::menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
-use tauri::{AppHandle, Emitter, LogicalSize, Manager, State, WebviewWindow, Wry};
+use tauri::{
+    AppHandle, Emitter, LogicalSize, Manager, RunEvent, State, WebviewWindow, WebviewWindowBuilder,
+    Wry,
+};
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
+
+use pr::PrReview;
+
+mod pr;
+mod shrink;
 
 const MAIN: &str = "main";
 const TRAY: &str = "main";
@@ -44,17 +55,33 @@ const BACKOFF_MAX: i64 = 60 * 60;
 /// Below this many GraphQL points left, pause for `LOW_BUDGET_PAUSE`.
 const BUDGET_FLOOR: u64 = 150;
 const LOW_BUDGET_PAUSE: i64 = 30 * 60;
+/// How long to wait for the PR poller to finish talking to GitHub (it gives way
+/// between requests) before going ahead anyway: this poller is never starved.
+const LEASE_PATIENCE: Duration = Duration::from_secs(180);
 /// Ignore manual refreshes this soon after the previous one.
 const MANUAL_DEBOUNCE: i64 = 15;
+/// After the window gains focus, wait this long (past any Mission Control
+/// exit animation) before checking it for the half-size glitch, and again
+/// before acting on it.
+const SHRINK_SETTLE: Duration = Duration::from_millis(1500);
 
 pub struct AppState {
     config: Mutex<Config>,
     config_mtime: Mutex<Option<SystemTime>>,
     snapshot: Mutex<Snapshot>,
     cache: Option<Cache>,
+    shared: Option<SharedCache>,
     refresh_tx: Mutex<Option<mpsc::Sender<Wake>>>,
     window_state: Mutex<Option<WindowState>>,
     window_dirty: AtomicBool,
+    /// The main window is being destroyed to be recreated (see `shrink`);
+    /// the app must not exit for want of windows meanwhile.
+    rebuilding: AtomicBool,
+    /// Show the recreated window once its UI is ready, even if
+    /// `start_hidden`.
+    show_on_ready: AtomicBool,
+    shrink_check_pending: AtomicBool,
+    last_rebuild: Mutex<Option<Instant>>,
 }
 
 struct TrayItems {
@@ -71,11 +98,14 @@ struct Meta {
     platform: &'static str,
     version: &'static str,
     shortcut: String,
+    frequent_over: u64,
+    high_quality: u8,
 }
 
 fn meta(app: &AppHandle) -> Meta {
     let state = app.state::<AppState>();
     let cfg = state.config.lock().unwrap();
+    let pr_cfg = app.state::<PrReview>().config.lock().unwrap().clone();
     Meta {
         config_path: Config::path()
             .map(|p| p.display().to_string())
@@ -90,6 +120,8 @@ fn meta(app: &AppHandle) -> Meta {
         platform: std::env::consts::OS,
         version: env!("CARGO_PKG_VERSION"),
         shortcut: cfg.shortcuts.toggle_window.clone(),
+        frequent_over: pr_cfg.frequent_over,
+        high_quality: pr_cfg.high_quality,
     }
 }
 
@@ -143,7 +175,7 @@ fn set_always_on_top(app: AppHandle, on: bool) {
 #[tauri::command]
 fn window_ready(app: AppHandle, state: State<AppState>) {
     let start_hidden = state.config.lock().unwrap().window.start_hidden;
-    if !start_hidden {
+    if !start_hidden || state.show_on_ready.swap(false, Ordering::Relaxed) {
         if let Some(w) = app.get_webview_window(MAIN) {
             show_window(&w);
         }
@@ -206,8 +238,10 @@ fn reload_config_if_changed(app: &AppHandle) {
         return;
     }
     *state.config_mtime.lock().unwrap() = mtime;
-    match Config::load_or_create() {
-        Ok(cfg) => {
+    // One file holds both pollers' settings, so a broken one keeps both's old ones.
+    let loaded = Config::load_or_create().and_then(|c| Ok((c, pr_core::Config::load()?)));
+    match loaded {
+        Ok((cfg, pr_cfg)) => {
             {
                 let mut snap = state.snapshot.lock().unwrap();
                 snap.sync_repos(&cfg.repos);
@@ -222,8 +256,10 @@ fn reload_config_if_changed(app: &AppHandle) {
                 }
             }
             *state.config.lock().unwrap() = cfg.clone();
+            *app.state::<PrReview>().config.lock().unwrap() = pr_cfg;
             apply_window_config(app, &cfg);
             let _ = app.emit(EV_META, meta(app));
+            pr::emit_changed(app);
         }
         Err(e) => {
             state.snapshot.lock().unwrap().error = Some(format!("Config error: {e}"));
@@ -244,6 +280,12 @@ struct Pacing {
     /// Probes that found a repo changed, each kept until that repo's fetch
     /// succeeds. Those repos aren't probed again in the meantime.
     probes: Vec<(String, Probe)>,
+}
+
+/// The shared cache to use when [`AppState::shared`] is `None`: a throwaway one
+/// in the temporary directory.
+fn fallback_shared() -> SharedCache {
+    SharedCache::at(std::env::temp_dir().join("craft-github-cache"))
 }
 
 /// Fetch `repo` into the snapshot, keeping `probe` (taken before the fetch)
@@ -269,7 +311,15 @@ fn fetch_into_snapshot(
         .as_deref()
         .map(|d| RawActivity::load(d, repo))
         .unwrap_or_default();
-    let result = gh.fetch_repo(repo, now, &mut raw, probe);
+    // The shared cache is optional; without one, fetch into a throwaway ledger.
+    let fallback = fallback_shared();
+    let shared = state.shared.as_ref().unwrap_or(&fallback);
+    let lease = shared.lease(LEASE_PATIENCE);
+    if lease.is_none() {
+        eprintln!("{repo}: the shared GitHub lease is still held; fetching anyway");
+    }
+    let result = gh.fetch_repo(repo, now, &mut raw, shared, probe);
+    drop(lease);
     if let (Ok(_), Some(dir)) = (&result, &raw_dir) {
         if let Err(e) = raw.save(dir, repo) {
             eprintln!("{repo}: could not save raw cache: {e}");
@@ -389,6 +439,12 @@ fn skip_unchanged(
     let Ok(gh) = token.and_then(|t| GitHub::new(t.value)) else {
         return Ok((0, Vec::new()));
     };
+    let fallback = fallback_shared();
+    let shared = state.shared.as_ref().unwrap_or(&fallback);
+    let lease = shared.lease(LEASE_PATIENCE);
+    if lease.is_none() {
+        eprintln!("the shared GitHub lease is still held; probing anyway");
+    }
     let probed_at = Utc::now();
     let probes = match gh.probe(&repos) {
         Ok((probes, budget)) => {
@@ -408,9 +464,11 @@ fn skip_unchanged(
         .zip(probes)
         .map(|(repo, probe)| {
             let raw = RawActivity::load(&dir, &repo);
-            (repo, raw, probe)
+            let ledger = shared.load_ledger(&repo);
+            (repo, raw, ledger, probe)
         })
         .collect();
+    drop(lease);
     let (restated, left) = {
         let mut snap = state.snapshot.lock().unwrap();
         let (restated, left) = restat_unchanged(&mut snap, checks, probed_at);
@@ -436,20 +494,20 @@ fn unprobed(candidates: Vec<String>, pending: &[(String, Probe)]) -> Vec<String>
 }
 
 /// Measures again, at `probed_at` (when the probe was sent), each of
-/// `checks` (a repo, its raw cache and its probe) whose probe shows that
-/// nothing changed since its last fetch. Such a repo keeps its `fetched_at`,
-/// and its `checked_at` becomes `probed_at`. Returns the repos measured
-/// again, and the probes of the others.
+/// `checks` (a repo, its raw cache, its shared PR ledger and its probe) whose
+/// probe shows that nothing changed since its last fetch. Such a repo keeps
+/// its `fetched_at`, and its `checked_at` becomes `probed_at`. Returns the
+/// repos measured again, and the probes of the others.
 fn restat_unchanged(
     snap: &mut Snapshot,
-    checks: Vec<(String, RawActivity, Option<Probe>)>,
+    checks: Vec<(String, RawActivity, PrLedger, Option<Probe>)>,
     probed_at: DateTime<Utc>,
 ) -> (Vec<String>, Vec<(String, Probe)>) {
     let mut restated = Vec::new();
     let mut left = Vec::new();
-    for (repo, raw, probe) in checks {
+    for (repo, raw, ledger, probe) in checks {
         let stats = can_skip(&raw, probe.as_ref(), probed_at)
-            .then(|| restat(&raw, probed_at))
+            .then(|| restat(&raw, &ledger, probed_at))
             .flatten();
         match (stats, snap.repos.iter_mut().find(|e| e.repo == repo)) {
             (Some(stats), Some(entry)) => {
@@ -497,8 +555,7 @@ fn step(app: &AppHandle, pacing: &mut Pacing) {
         forced_since: pacing.forced_since,
     };
     let now = Utc::now();
-    let paused = pacing.not_before.is_some_and(|t| now < t);
-    {
+    let paused = {
         let mut snap = state.snapshot.lock().unwrap();
         snap.sync_repos(&cfg.repos);
         snap.poll_secs = cfg.poll_secs();
@@ -506,7 +563,13 @@ fn step(app: &AppHandle, pacing: &mut Pacing) {
         pacing
             .probes
             .retain(|(r, _)| snap.repos.iter().any(|e| e.repo == *r));
-    }
+        // The PR poller was rate-limited on this account: hold off too.
+        let shared_backoff = state.shared.as_ref().and_then(|s| s.budget().backoff(now));
+        if let Some(until) = shared_backoff {
+            pacing.not_before = Some(pacing.not_before.map_or(until, |t| t.max(until)));
+        }
+        pacing.not_before.is_some_and(|t| now < t)
+    };
     // Due repos that one probe finds unchanged are measured again instead of
     // fetched. After a step that only probes, the pacing below runs as after
     // a fetch.
@@ -564,6 +627,14 @@ fn step(app: &AppHandle, pacing: &mut Pacing) {
                 let mut resume = now + chrono::Duration::seconds(backoff);
                 if let Some(end) = rate_limit_end(&until, now) {
                     resume = resume.max(end);
+                }
+                // The PR poller shares the account: it should stop too.
+                if let Err(e) = state
+                    .shared
+                    .as_ref()
+                    .map_or(Ok(()), |s| s.note_backoff(resume))
+                {
+                    eprintln!("could not share the backoff: {e}");
                 }
                 let msg = format!("Rate limited by GitHub; pausing until {}", clock(resume));
                 (resume - now, Some(msg))
@@ -710,6 +781,8 @@ fn show_window(w: &WebviewWindow) {
 /// the current desktop.
 fn toggle_window(app: &AppHandle) {
     let Some(w) = app.get_webview_window(MAIN) else {
+        // Only if recreating it failed earlier; try again.
+        recreate_main_window(app);
         return;
     };
     if w.is_visible().unwrap_or(false) && w.is_focused().unwrap_or(false) {
@@ -774,10 +847,14 @@ fn tray_tooltip(snap: &Snapshot, now: DateTime<Utc>) -> String {
 }
 
 fn update_tray(app: &AppHandle) {
-    let tip = tray_tooltip(
+    let mut tip = tray_tooltip(
         &app.state::<AppState>().snapshot.lock().unwrap(),
         Utc::now(),
     );
+    let prs = app.state::<PrReview>().tray_line.lock().unwrap().clone();
+    if !prs.is_empty() {
+        tip = format!("{tip} · {prs}");
+    }
     if let Some(tray) = app.tray_by_id(TRAY) {
         let _ = tray.set_tooltip(Some(tip));
     }
@@ -816,7 +893,7 @@ fn flush_window_state(app: &AppHandle) {
     }
 }
 
-fn restore_window(app: &tauri::App, cfg: &Config) {
+fn restore_window(app: &AppHandle, cfg: &Config) {
     let Some(w) = app.get_webview_window(MAIN) else {
         return;
     };
@@ -841,6 +918,107 @@ fn restore_window(app: &tauri::App, cfg: &Config) {
         let _ = w.set_size(LogicalSize::new(cfg.window.width, cfg.window.height));
         let _ = w.center();
     }
+}
+
+/// Watch for the half-size glitch (see `shrink`) shortly after the window
+/// gains focus. It has to persist across two checks, so a Mission Control
+/// thumbnail in passing never counts, and then the window is recreated: a
+/// fresh WindowServer window starts without the stale scale, whatever left
+/// it there.
+fn schedule_shrink_check(app: &AppHandle) {
+    let state = app.state::<AppState>();
+    if state.shrink_check_pending.swap(true, Ordering::Relaxed) {
+        return;
+    }
+    let app = app.clone();
+    let spawned = std::thread::Builder::new()
+        .name("shrink-check".into())
+        .spawn(move || {
+            let confirmed = (0..2).all(|_| {
+                std::thread::sleep(SHRINK_SETTLE);
+                shrunk_now(&app)
+            });
+            if confirmed {
+                let later = app.clone();
+                let _ = app.run_on_main_thread(move || rebuild_main_window(&later));
+            }
+            app.state::<AppState>()
+                .shrink_check_pending
+                .store(false, Ordering::Relaxed);
+        });
+    if spawned.is_err() {
+        state.shrink_check_pending.store(false, Ordering::Relaxed);
+    }
+}
+
+/// `shrink::window_shrunk` on the main thread; false if it can't tell.
+fn shrunk_now(app: &AppHandle) -> bool {
+    let (tx, rx) = mpsc::channel();
+    let handle = app.clone();
+    let asked = app.run_on_main_thread(move || {
+        let shrunk = handle
+            .get_webview_window(MAIN)
+            .is_some_and(|w| shrink::window_shrunk(&w));
+        let _ = tx.send(shrunk);
+    });
+    asked.is_ok() && rx.recv_timeout(Duration::from_secs(5)).unwrap_or(false)
+}
+
+/// Destroy the main window, remembering its (correct) AppKit geometry; the
+/// `Destroyed` handler recreates it. Main thread.
+fn rebuild_main_window(app: &AppHandle) {
+    let state = app.state::<AppState>();
+    let Ok(mut last) = state.last_rebuild.lock() else {
+        return;
+    };
+    let now = Instant::now();
+    if !shrink::may_rebuild(*last, now) {
+        return;
+    }
+    let Some(w) = app.get_webview_window(MAIN) else {
+        return;
+    };
+    *last = Some(now);
+    drop(last);
+    eprintln!("main window is shown shrunk; recreating it");
+    note_window_geometry(app);
+    flush_window_state(app);
+    state.rebuilding.store(true, Ordering::Relaxed);
+    if let Err(e) = w.destroy() {
+        eprintln!("could not destroy the shrunk window: {e}");
+        state.rebuilding.store(false, Ordering::Relaxed);
+    }
+}
+
+/// Build the main window afresh from tauri.conf.json, at the remembered
+/// geometry. It shows itself once its UI is ready (`window_ready`). Main
+/// thread.
+fn recreate_main_window(app: &AppHandle) {
+    let state = app.state::<AppState>();
+    if app.get_webview_window(MAIN).is_none() {
+        // Before building: the new UI may report ready at any point after.
+        state.show_on_ready.store(true, Ordering::Relaxed);
+        let built = app
+            .config()
+            .app
+            .windows
+            .iter()
+            .find(|c| c.label == MAIN)
+            .map(|c| WebviewWindowBuilder::from_config(app, c).and_then(|b| b.build()));
+        match built {
+            Some(Ok(_)) => {
+                let cfg = state.config.lock().map(|c| c.clone()).unwrap_or_default();
+                restore_window(app, &cfg);
+                apply_window_config(app, &cfg);
+            }
+            Some(Err(e)) => eprintln!("could not recreate the main window: {e}"),
+            None => eprintln!("no {MAIN:?} window in tauri.conf.json"),
+        }
+        if app.get_webview_window(MAIN).is_none() {
+            state.show_on_ready.store(false, Ordering::Relaxed);
+        }
+    }
+    state.rebuilding.store(false, Ordering::Relaxed);
 }
 
 fn build_tray(app: &tauri::App, cfg: &Config) -> tauri::Result<()> {
@@ -890,7 +1068,10 @@ fn build_tray(app: &tauri::App, cfg: &Config) -> tauri::Result<()> {
         .show_menu_on_left_click(false)
         .on_menu_event(|app, event| match event.id.as_ref() {
             "toggle" => toggle_window(app),
-            "refresh" => wake_poller(&app.state::<AppState>(), Wake::All),
+            "refresh" => {
+                wake_poller(&app.state::<AppState>(), Wake::All);
+                pr::refresh_all(&app.state::<PrReview>());
+            }
             "on_top" => {
                 let checked = app
                     .try_state::<TrayItems>()
@@ -931,6 +1112,7 @@ pub fn run() {
     snapshot.sync_repos(&config.repos);
     snapshot.poll_secs = config.poll_secs();
     snapshot.stale_after_secs = config.stale_secs();
+    let (pr_review, pr_threads) = pr::init(&config, &snapshot);
 
     let (tx, rx) = mpsc::channel();
     let state = AppState {
@@ -938,14 +1120,20 @@ pub fn run() {
         config_mtime: Mutex::new(config_mtime()),
         snapshot: Mutex::new(snapshot),
         cache,
+        shared: SharedCache::default_location().ok(),
         refresh_tx: Mutex::new(Some(tx)),
         window_state: Mutex::new(None),
         window_dirty: AtomicBool::new(false),
+        rebuilding: AtomicBool::new(false),
+        show_on_ready: AtomicBool::new(false),
+        shrink_check_pending: AtomicBool::new(false),
+        last_rebuild: Mutex::new(None),
     };
 
     tauri::Builder::default()
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .manage(state)
+        .manage(pr_review)
         .invoke_handler(tauri::generate_handler![
             get_snapshot,
             get_meta,
@@ -958,6 +1146,14 @@ pub fn run() {
             hide_window,
             log,
             quit,
+            pr::get_pr_overview,
+            pr::get_pr_repo,
+            pr::get_pr_queue,
+            pr::get_pr,
+            pr::refresh_prs,
+            pr::refresh_pr_repo,
+            pr::refresh_pr,
+            pr::analyze_pr,
         ])
         .setup(move |app| {
             let cfg = app.state::<AppState>().config.lock().unwrap().clone();
@@ -967,11 +1163,12 @@ pub fn run() {
                 app.set_activation_policy(tauri::ActivationPolicy::Accessory);
             }
 
-            restore_window(app, &cfg);
+            restore_window(app.handle(), &cfg);
             build_tray(app, &cfg)?;
             apply_window_config(app.handle(), &cfg);
             update_tray(app.handle());
             spawn_poller(app.handle().clone(), rx);
+            pr::spawn(app.handle().clone(), pr_threads);
             Ok(())
         })
         .on_window_event(|window, event| match event {
@@ -991,14 +1188,46 @@ pub fn run() {
             }
             tauri::WindowEvent::Focused(focused) => {
                 let _ = window.emit(EV_FOCUS, *focused);
+                if *focused && window.label() == MAIN {
+                    schedule_shrink_check(window.app_handle());
+                }
+            }
+            tauri::WindowEvent::Destroyed if window.label() == MAIN => {
+                let app = window.app_handle().clone();
+                if app.state::<AppState>().rebuilding.load(Ordering::Relaxed) {
+                    // Not from inside this event, nor queued onto the main
+                    // thread: a webview built there never loads its page.
+                    // From another thread, Tauri builds it on the event loop.
+                    let later = app.clone();
+                    let spawned = std::thread::Builder::new()
+                        .name("recreate-window".into())
+                        .spawn(move || recreate_main_window(&later));
+                    if spawned.is_err() {
+                        app.state::<AppState>()
+                            .rebuilding
+                            .store(false, Ordering::Relaxed);
+                    }
+                }
             }
             tauri::WindowEvent::Resized(_) | tauri::WindowEvent::Moved(_) => {
                 note_window_geometry(window.app_handle())
             }
             _ => {}
         })
-        .run(tauri::generate_context!())
-        .expect("error while running Craft Status");
+        .build(tauri::generate_context!())
+        .expect("error while running Craft Status")
+        .run(|app, event| {
+            // Destroying the only window asks to exit (code None); a
+            // window rebuild must survive that. Quit (code Some) still exits.
+            if let RunEvent::ExitRequested {
+                code: None, api, ..
+            } = event
+            {
+                if app.state::<AppState>().rebuilding.load(Ordering::Relaxed) {
+                    api.prevent_exit();
+                }
+            }
+        });
 }
 
 #[cfg(test)]
@@ -1055,7 +1284,10 @@ mod tests {
         };
         let mut snap = snap_with(&[40, 50, 60], now);
         for e in &mut snap.repos {
-            e.stats = Some(craft_github::restat(&raw_fetched(now, &probe("h")), now).unwrap());
+            e.stats = Some(
+                craft_github::restat(&raw_fetched(now, &probe("h")), &PrLedger::default(), now)
+                    .unwrap(),
+            );
         }
         let due = snap.skip_candidates(now, &schedule);
         assert_eq!(due, ["o/r0", "o/r1", "o/r2"]);
@@ -1067,7 +1299,12 @@ mod tests {
         // A repo fetched `mins` ago at head `before`, and now at head `head`.
         let check = |repo: &str, mins, before: &str, head: &str| {
             let raw = raw_fetched(fetched_at(mins), &probe(before));
-            (repo.to_string(), raw, Some(probe(head)))
+            (
+                repo.to_string(),
+                raw,
+                PrLedger::default(),
+                Some(probe(head)),
+            )
         };
         let checks = vec![
             check("o/r0", 40, "a", "a"),
@@ -1109,23 +1346,57 @@ mod tests {
         let now = Utc::now();
         let mut snap = snap_with(&[40], now);
         let fetched_at = now - CDuration::minutes(40);
-        let mut raw = raw_fetched(fetched_at, &probe("a"));
+        let raw = raw_fetched(fetched_at, &probe("a"));
         // Opened 3 h 55 min before the probe: inside the 4-hour window then,
         // outside it ten minutes later.
-        raw.prs_opened
-            .insert(7, now - CDuration::minutes(3 * 60 + 55));
-        let checks = vec![("o/r0".into(), raw.clone(), Some(probe("a")))];
+        let mut ledger = PrLedger::default();
+        ledger.prs.insert(
+            7,
+            craft_core::LedgerPr {
+                created_at: Some(now - CDuration::minutes(3 * 60 + 55)),
+                ..Default::default()
+            },
+        );
+        let checks = vec![("o/r0".into(), raw.clone(), ledger.clone(), Some(probe("a")))];
         let (restated, _) = restat_unchanged(&mut snap, checks, now);
         assert_eq!(restated, ["o/r0"]);
         let stats = snap.repos[0].stats.clone().unwrap();
         assert_eq!(stats.recent["4h"].prs_opened, 1);
-        assert_eq!(Some(stats), craft_github::restat(&raw, now));
-        let later = craft_github::restat(&raw, now + CDuration::minutes(10)).unwrap();
+        assert_eq!(Some(stats), craft_github::restat(&raw, &ledger, now));
+        let later = craft_github::restat(&raw, &ledger, now + CDuration::minutes(10)).unwrap();
         assert_eq!(later.recent["4h"].prs_opened, 0);
         // Without a probe there is nothing to compare: the repo is fetched.
-        let checks = vec![("o/r0".into(), raw, None)];
+        let checks = vec![("o/r0".into(), raw, ledger, None)];
         let (restated, left) = restat_unchanged(&mut snap, checks, now);
         assert!(restated.is_empty() && left.is_empty());
+    }
+
+    #[test]
+    fn a_skipped_repo_keeps_its_pr_counts() {
+        let now = Utc::now();
+        let mut snap = snap_with(&[40], now);
+        let fetched_at = now - CDuration::minutes(40);
+        let raw = raw_fetched(fetched_at, &probe("a"));
+        // The shared ledger the fetch read: two PRs opened in the last hour,
+        // one merged two days ago.
+        let pr = |opened: i64, merged: Option<i64>| craft_core::LedgerPr {
+            state: if merged.is_some() { "MERGED" } else { "OPEN" }.into(),
+            created_at: Some(now - CDuration::minutes(opened)),
+            merged_at: merged.map(|m| now - CDuration::minutes(m)),
+            ..Default::default()
+        };
+        let mut ledger = PrLedger::default();
+        ledger.prs.insert(1, pr(20, None));
+        ledger.prs.insert(2, pr(50, None));
+        ledger.prs.insert(3, pr(4 * 24 * 60, Some(2 * 24 * 60)));
+        let checks = vec![("o/r0".into(), raw, ledger, Some(probe("a")))];
+        let (restated, _) = restat_unchanged(&mut snap, checks, now);
+        assert_eq!(restated, ["o/r0"]);
+        let stats = snap.repos[0].stats.clone().unwrap();
+        assert_eq!(stats.recent["1h"].prs_opened, 2);
+        assert_eq!(stats.recent["7d"].prs_opened, 3);
+        assert_eq!(stats.recent["7d"].prs_merged, 1);
+        assert_eq!(stats.recent["4h"].prs_merged, 0);
     }
 
     #[test]
@@ -1136,6 +1407,13 @@ mod tests {
         let hour = rate_limit_end("the top of the hour", now).unwrap();
         assert_eq!(hour.to_rfc3339(), "2026-10-18T05:00:00+00:00");
         assert!(rate_limit_end("later", now).is_none());
+    }
+
+    #[test]
+    fn only_github_links_open() {
+        assert!(open_url("https://evil.example/x".into()).is_err());
+        assert!(open_url("file:///etc/passwd".into()).is_err());
+        assert!(open_url("https://github.com.evil.example/x".into()).is_err());
     }
 
     #[test]

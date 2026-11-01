@@ -1,8 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  sortEntries, manualOrder, orderedEntries, nextSort, dropIndex, MANUAL, versionKey, freshness, isStale, ago, compact, tokenStatus,
-  totals, urgentAcross, isRefreshing, defaultDir, value, windowById, WINDOWS, COLUMNS, COLUMN,
+  sortEntries, manualOrder, orderedEntries, nextSort, dropIndex, MANUAL, versionKey, freshness, isStale, ago, compact, formatRate, buildRate, tokenStatus,
+  totals, urgentAcross, isRefreshing, isThirdParty, isRepoHidden, toggleKind, reorderVisible, defaultDir, value, windowById, WINDOWS, COLUMNS, COLUMN,
 } from './model.ts';
 import type { Activity, RepoEntry, RepoStats, UrgentIssue } from './model.ts';
 
@@ -56,6 +56,41 @@ test('commits since the build read through to since_build', () => {
   assert.equal(names(sortEntries(lagged, 'commits_since_build', 'desc')), 'bacd');
   assert.equal(value(lagged[2]!, 'commits_since_build'), null);
   assert.equal(totals(lagged).commits_since_build, 43);
+});
+
+test('the build download rate is downloads over the time out when they were counted', () => {
+  const fetched = '2026-10-08T12:00:00Z';
+  const built = (hoursAgo: number) => new Date(Date.parse(fetched) - hoursAgo * 3600e3).toISOString();
+  const out = (latest_build_downloads: number, hoursAgo: number) => entry('x', { latest_build_downloads, latest_build_at: built(hoursAgo) }, fetched);
+  assert.equal(buildRate(out(3600, 1)), 1);
+  assert.equal(value(out(7200, 1), 'latest_build_rate'), 2);
+  assert.equal(buildRate(out(0, 1)), 0, 'out, but no downloads yet');
+  assert.equal(buildRate(entry('x', { latest_build_downloads: 0, latest_build_at: null }, fetched)), null, 'no build');
+  assert.equal(buildRate(entry('x', null, fetched)), null, 'no stats');
+  assert.equal(buildRate(entry('x', { latest_build_downloads: 5, latest_build_at: built(1) }, null)), null, 'never fetched');
+  assert.equal(buildRate(out(5, 0)), null, 'no time out yet');
+  assert.equal(buildRate(out(5, -1)), null, 'published after the fetch, by clock skew');
+});
+
+test('build download rates sort by speed across units, missing last', () => {
+  const fetched = '2026-10-08T12:00:00Z';
+  const dayAgo = '2026-10-07T12:00:00Z';
+  const out = (repo: string, latest_build_downloads: number) => entry(repo, { latest_build_downloads, latest_build_at: dayAgo }, fetched);
+  const e = [
+    out('m', 8640), // 6.0/m
+    out('s', 172800), // 2.0/s
+    entry('none', { latest_build_downloads: 0, latest_build_at: null }, fetched),
+    out('h', 120), // 5.0/h
+    out('M', 86400 * 59 / 60), // 59.0/m, numerically above 2.0/s
+    out('d', 3), // 3.0/d
+    out('z', 0), // 0.0/d
+  ];
+  const order = (list: RepoEntry[]) => list.map((x) => x.repo.slice(2)).join(' ');
+  assert.equal(defaultDir('latest_build_rate'), 'desc', 'fastest first on the first click');
+  assert.equal(order(sortEntries(e, 'latest_build_rate', 'desc')), 's M m h d z none');
+  assert.equal(order(sortEntries(e, 'latest_build_rate', 'asc')), 'z d h m M s none');
+  assert.deepEqual(e.map((x) => { const r = buildRate(x); return r === null ? null : formatRate(r); }),
+    ['6.0/m', '2.0/s', null, '5.0/h', '59.0/m', '3.0/d', '0.0/d']);
 });
 
 test('dates and names', () => {
@@ -168,10 +203,19 @@ test('formatting', () => {
   assert.equal(compact(950), '950');
   assert.equal(compact(2_340_000), '2.3M');
   assert.equal(compact(null), '');
+  assert.equal(formatRate(12.34), '12.3/s');
+  assert.equal(formatRate(1), '1.0/s');
+  assert.equal(formatRate(0.5), '30.0/m');
+  assert.equal(formatRate(1 / 60), '1.0/m');
+  assert.equal(formatRate(1 / 120), '30.0/h');
+  assert.equal(formatRate(1 / 3600), '1.0/h');
+  assert.equal(formatRate(1 / 7200), '12.0/d');
+  assert.equal(formatRate(0), '0.0/d');
 });
 
 test('totals and urgent merge', () => {
   assert.equal(totals(rows).urgency, 110);
+  assert.equal(totals(rows).latest_build_rate, undefined, 'rates have no total');
   assert.equal(totals(rows).latest_build, undefined, 'versions have no total');
   const e = [
     entry('a', { urgent: [issue(1, 30), issue(2, 80, true)] }),
@@ -236,4 +280,42 @@ test('columns: unique keys, every recent column titled with its span', () => {
   assert.equal(Object.keys(COLUMN).length, COLUMNS.length);
   for (const c of COLUMNS.filter((c) => c.recent)) assert.match(c.title ?? '', /\{span\}/, c.key);
   assert.equal(COLUMNS[0]!.key, 'name', 'the sticky first column is the repo');
+});
+
+test('the Type column sorts by its words, repos without a type last', () => {
+  const e = [
+    { ...entry('a', {}), category: 'tooling' as const },
+    { ...entry('b', {}), category: 'other' as const },
+    { ...entry('c', {}), category: 'app' as const },
+    entry('d', {}),
+  ];
+  assert.deepEqual(sortEntries(e, 'category', 'asc').map((x) => x.repo), ['o/c', 'o/a', 'o/b', 'o/d']);
+  assert.equal(value(e[2]!, 'category'), 'App');
+});
+
+test('repos outside our org are third party', () => {
+  assert.equal(isThirdParty('storytold/photocraft'), false);
+  assert.equal(isThirdParty('Storytold/photocraft'), false, 'owners ignore case');
+  assert.equal(isThirdParty('tangency-labs/solidcraft'), true);
+});
+
+test('the toggles hide a repo by any kind it is', () => {
+  assert.equal(isRepoHidden('storytold/fonts', 'assets', []), false);
+  assert.equal(isRepoHidden('storytold/fonts', 'assets', ['assets']), true);
+  assert.equal(isRepoHidden('storytold/fonts', 'assets', ['ci']), false);
+  assert.equal(isRepoHidden('tangency-labs/solidcraft', 'app', ['third_party']), true, 'third party');
+  assert.equal(isRepoHidden('tangency-labs/solidcraft', 'app', ['app']), true, 'and an app');
+  assert.equal(isRepoHidden('someone/mine', 'other', ['third_party']), true, 'not ours, so third party');
+  assert.equal(isRepoHidden('someone/mine', 'other', ['app', 'library', 'assets', 'ci', 'tooling']), false);
+  assert.equal(isRepoHidden('storytold/mine', 'other', ['app', 'library', 'assets', 'ci', 'tooling', 'third_party']), false, 'no toggle covers it');
+});
+
+test('toggling a kind flips it', () => {
+  assert.deepEqual(toggleKind([], 'ci'), ['ci']);
+  assert.deepEqual(toggleKind(['ci', 'app'], 'ci'), ['app']);
+});
+
+test('dragging among visible rows leaves hidden repos in their places', () => {
+  assert.deepEqual(reorderVisible(['a', 'H1', 'b', 'c', 'H2'], ['c', 'a', 'b']), ['c', 'H1', 'a', 'b', 'H2']);
+  assert.deepEqual(reorderVisible(['a', 'b'], ['b', 'a']), ['b', 'a']);
 });

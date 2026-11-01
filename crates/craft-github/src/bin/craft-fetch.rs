@@ -3,8 +3,11 @@
 //! can load in a plain browser (`ui/dev-snapshot.json`).
 
 use chrono::Utc;
-use craft_core::{Cache, Config, LagBasis, RepoEntry, Snapshot, ALL_TIME};
+use craft_core::{Cache, Config, LagBasis, RepoEntry, SharedCache, Snapshot, ALL_TIME};
 use craft_github::{resolve_token, Error, GitHub, RawActivity};
+
+/// How long to wait for the PR poller to finish talking to GitHub.
+const LEASE_PATIENCE: std::time::Duration = std::time::Duration::from_secs(180);
 
 fn main() {
     let mut args: Vec<String> = std::env::args().skip(1).collect();
@@ -26,6 +29,7 @@ fn main() {
         }
     };
     let now = Utc::now();
+    let shared = SharedCache::default_location().unwrap();
     let mut snap = Snapshot {
         poll_secs: cfg.poll_secs(),
         stale_after_secs: cfg.stale_secs(),
@@ -47,7 +51,8 @@ fn main() {
             .as_deref()
             .map(|d| RawActivity::load(d, repo))
             .unwrap_or_default();
-        match gh.fetch_repo(repo, now, &mut raw, None) {
+        let _lease = shared.lease(LEASE_PATIENCE);
+        match gh.fetch_repo(repo, now, &mut raw, &shared, None) {
             Ok((s, budget)) => {
                 if let Some(dir) = &raw_dir {
                     if let Err(e) = raw.save(dir, repo) {

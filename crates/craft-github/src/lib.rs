@@ -5,12 +5,14 @@
 //! commits ([`WINDOWS`], plus [`SINCE_RELEASE`], which needs the releases),
 //! the app icon's blob id and the open issues to rank; one GraphQL query
 //! comparing the latest build's tag with `main`; one or more GraphQL queries
-//! for the commit authors, and one or more for the PRs opened and merged and
-//! issues opened, since a week ago or the latest build, whichever is earlier,
-//! which give each window's people and PR/issue counts. No search API: GitHub
-//! limits searches far more tightly than other queries, even inside GraphQL;
-//! The authors, PRs and issues are kept between polls ([`RawActivity`]), so
-//! after the first poll those queries fetch only what's new;
+//! for the commit authors, and one or more for the issues opened, since a week
+//! ago or the latest build, whichever is earlier, which give each window's people
+//! and issue counts. No search API: GitHub limits searches far more tightly than
+//! other queries, even inside GraphQL;
+//! The authors and issues are kept between polls ([`RawActivity`]), so after the
+//! first poll those queries fetch only what's new. PR counts come from the
+//! [`PrLedger`] shared with the PR poller (see [`GitHub::sync_ledger`]), which
+//! either app may have brought up to date already;
 //! one (usually) REST call for the contributor list, which GraphQL lacks.
 //! The icon itself is a REST blob fetch, made only when its blob id changes
 //! (see [`GitHub::icon`]). Blocking I/O: callers run this on worker threads.
@@ -27,8 +29,8 @@ use std::time::Duration;
 
 use chrono::{DateTime, SubsecRound, Utc};
 use craft_core::{
-    rank_issues, summarize_releases, Activity, Asset, BuildLag, IssueInput, LagBasis, Release,
-    RepoStats, ALL_TIME, SINCE_RELEASE, WINDOWS,
+    rank_issues, summarize_releases, Activity, Asset, BuildLag, IssueInput, LagBasis, LedgerPr,
+    PrLedger, Release, RepoStats, SharedCache, ALL_TIME, SINCE_RELEASE, WINDOWS,
 };
 use reqwest::blocking::Client;
 use reqwest::header::{HeaderMap, ACCEPT, AUTHORIZATION, USER_AGENT};
@@ -54,6 +56,12 @@ const FULL_REFRESH_HOURS: i64 = 6;
 const MAX_PAGES: usize = 30;
 /// Repositories per [`probe_query`] request.
 const PROBE_CHUNK: usize = 50;
+/// Pages of 100 a walk of the shared PR ledger may take. They're cheap (a point
+/// each), it's kept from then on, and it has to get through every PR touched in
+/// the window.
+const LEDGER_MAX_PAGES: usize = 100;
+/// A ledger either app walked this recently is good enough.
+const LEDGER_MAX_AGE_SECS: i64 = 5 * 60;
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -129,6 +137,16 @@ fn env_or_config_token(configured: &str, env: impl Fn(&str) -> Option<String>) -
 pub struct GitHub {
     http: Client,
     token: String,
+    pacing: f64,
+}
+
+/// What a walk of the shared ledger left behind and what it cost.
+#[derive(Debug, Clone, Default)]
+pub struct LedgerSync {
+    pub ledger: PrLedger,
+    pub cost: u64,
+    pub remaining: Option<u64>,
+    pub reset_at: Option<DateTime<Utc>>,
 }
 
 /// Rate-limit bookkeeping returned alongside each repo.
@@ -143,7 +161,17 @@ impl GitHub {
             .timeout(Duration::from_secs(30))
             .connect_timeout(Duration::from_secs(10))
             .build()?;
-        Ok(GitHub { http, token })
+        Ok(GitHub {
+            http,
+            token,
+            pacing: GRAPHQL_PACING,
+        })
+    }
+
+    /// Wait `pacing` times as long as each GraphQL request took, after it.
+    pub fn with_pacing(mut self, pacing: f64) -> GitHub {
+        self.pacing = pacing;
+        self
     }
 
     fn headers(&self) -> HeaderMap {
@@ -193,7 +221,14 @@ impl GitHub {
         let msg = serde_json::from_str::<Value>(&body)
             .ok()
             .and_then(|v| v["message"].as_str().map(str::to_string))
-            .unwrap_or_else(|| body.chars().take(200).collect());
+            .unwrap_or_else(|| {
+                // Gateways answer with an HTML page: not something to show anyone.
+                if body.trim_start().starts_with('<') {
+                    "GitHub didn't respond in time".to_string()
+                } else {
+                    body.chars().take(200).collect()
+                }
+            });
         Err(Error::Http(status.as_u16(), msg))
     }
 
@@ -205,7 +240,7 @@ impl GitHub {
             .headers(self.headers())
             .json(&json!({ "query": query, "variables": variables }))
             .send();
-        std::thread::sleep(started.elapsed().mul_f64(GRAPHQL_PACING));
+        std::thread::sleep(started.elapsed().mul_f64(self.pacing));
         let v: Value = Self::check(sent?)?.json()?;
         if let Some(errs) = v["errors"].as_array().filter(|e| !e.is_empty()) {
             let msg = errs
@@ -258,6 +293,7 @@ impl GitHub {
         repo: &str,
         now: DateTime<Utc>,
         raw: &mut RawActivity,
+        shared: &SharedCache,
         probe: Option<Probe>,
     ) -> Result<(RepoStats, Budget)> {
         let (owner, name) = repo
@@ -280,16 +316,28 @@ impl GitHub {
             };
         }
         fresh.commits.extend(self.authors(owner, name, from)?);
-        self.events(owner, name, from, &mut fresh)?;
+        self.issues_opened(owner, name, from, &mut fresh)?;
         fresh.covers_from = Some(since);
         fresh.fetched_at = Some(now);
         fresh.prune(since);
         let authors: Vec<CommitAuthor> = fresh.commits.values().cloned().collect();
-        let events = fresh.events();
+        let ledger = self.sync_ledger(repo, since, now, shared)?.ledger;
+        let events = Events {
+            prs_opened: ledger.opened_since(since),
+            prs_merged: ledger.merged_since(since),
+            issues_opened: fresh.issues_opened.values().copied().collect(),
+        };
         let contributors = self.contributors(repo)?;
         let budget = Budget {
             graphql_remaining: main["rateLimit"]["remaining"].as_u64(),
         };
+        if let Err(e) = shared.note_budget(
+            budget.graphql_remaining,
+            time(&main["rateLimit"]["resetAt"]),
+            now,
+        ) {
+            eprintln!("could not save the shared budget: {e}");
+        }
         let stats = build_stats(
             &main,
             &releases,
@@ -352,48 +400,123 @@ impl GitHub {
         Ok(out)
     }
 
-    /// When each PR was opened or merged, and each issue opened, since
-    /// `since`, added to `raw` by number: the three lists walked newest
-    /// first, each until it passes `since`. Merged PRs are walked by last
-    /// update, which merging bumps.
-    fn events(
+    /// When each issue was opened since `since`, added to `raw` by number.
+    fn issues_opened(
         &self,
         owner: &str,
         name: &str,
         since: DateTime<Utc>,
         raw: &mut RawActivity,
     ) -> Result<()> {
-        let mut more = [true; 3];
-        let mut after: [Option<String>; 3] = Default::default();
+        let mut after: Option<String> = None;
         for _ in 0..MAX_PAGES {
-            if !more.iter().any(|m| *m) {
+            let v = self.graphql(
+                ISSUES_QUERY,
+                json!({ "owner": owner, "name": name, "after": after }),
+            )?;
+            let conn = &v["repository"]["issues"];
+            let (times, done) = parse_events(conn, "createdAt", "createdAt", since);
+            raw.issues_opened.extend(times);
+            if done || conn["pageInfo"]["hasNextPage"].as_bool() != Some(true) {
+                break;
+            }
+            after = conn["pageInfo"]["endCursor"].as_str().map(str::to_string);
+        }
+        Ok(())
+    }
+
+    /// The repo's shared PR ledger, walked if it isn't already complete back to
+    /// `since` and recent. Walking by last update reaches every PR opened, merged
+    /// or closed since then, so this one list serves both apps. Call holding the
+    /// shared lease: this reads, updates and writes the ledger.
+    pub fn sync_ledger(
+        &self,
+        repo: &str,
+        since: DateTime<Utc>,
+        now: DateTime<Utc>,
+        shared: &SharedCache,
+    ) -> Result<LedgerSync> {
+        let (owner, name) = repo
+            .split_once('/')
+            .ok_or_else(|| Error::GraphQl(format!("bad repo {repo:?}")))?;
+        let mut out = LedgerSync {
+            ledger: load_ledger(shared, repo),
+            ..Default::default()
+        };
+        let Some(plan) = out.ledger.plan_walk(since, now, LEDGER_MAX_AGE_SECS) else {
+            return Ok(out);
+        };
+        let mut after: Option<String> = None;
+        let mut reached = false;
+        let mut oldest = None;
+        for _ in 0..LEDGER_MAX_PAGES {
+            let v = self.graphql(
+                LEDGER_QUERY,
+                json!({ "owner": owner, "name": name, "after": after }),
+            )?;
+            note_rate_limit(&v, &mut out);
+            let conn = &v["repository"]["pullRequests"];
+            let (page, done, last) = parse_ledger_page(conn, plan.stop_at);
+            for (n, pr) in page {
+                out.ledger.record(n, pr);
+            }
+            oldest = last.or(oldest);
+            if done || conn["pageInfo"]["hasNextPage"].as_bool() != Some(true) {
+                reached = true;
+                break;
+            }
+            after = conn["pageInfo"]["endCursor"].as_str().map(str::to_string);
+        }
+        out.ledger.finish_walk(plan, now, reached, oldest);
+        if let Err(e) = shared.save_ledger(repo, &out.ledger) {
+            eprintln!("{repo}: could not save the PR ledger: {e}");
+        }
+        if let Err(e) = shared.note_budget(out.remaining, out.reset_at, now) {
+            eprintln!("could not save the shared budget: {e}");
+        }
+        Ok(out)
+    }
+
+    /// Up to `pages` more of a walk through every merged PR, oldest first, for
+    /// when who has landed what matters. Oldest first keeps the cursor valid as
+    /// new merges land, and [`GitHub::sync_ledger`] brings those. Call holding
+    /// the shared lease.
+    pub fn backfill_ledger(
+        &self,
+        repo: &str,
+        pages: usize,
+        shared: &SharedCache,
+    ) -> Result<LedgerSync> {
+        let (owner, name) = repo
+            .split_once('/')
+            .ok_or_else(|| Error::GraphQl(format!("bad repo {repo:?}")))?;
+        let mut out = LedgerSync {
+            ledger: load_ledger(shared, repo),
+            ..Default::default()
+        };
+        for _ in 0..pages {
+            if out.ledger.backfill_complete {
                 break;
             }
             let v = self.graphql(
-                EVENTS_QUERY,
-                json!({
-                    "owner": owner, "name": name,
-                    "opened": more[0], "merged": more[1], "issues": more[2],
-                    "openedAfter": after[0], "mergedAfter": after[1], "issuesAfter": after[2],
-                }),
+                BACKFILL_QUERY,
+                json!({ "owner": owner, "name": name, "after": out.ledger.backfill_cursor }),
             )?;
-            let lists = [
-                ("opened", "createdAt", "createdAt", &mut raw.prs_opened),
-                ("merged", "updatedAt", "mergedAt", &mut raw.prs_merged),
-                ("issues", "createdAt", "createdAt", &mut raw.issues_opened),
-            ];
-            for (i, (alias, order, field, out)) in lists.into_iter().enumerate() {
-                if !more[i] {
-                    continue;
-                }
-                let conn = &v["repository"][alias];
-                let (times, done) = parse_events(conn, order, field, since);
-                out.extend(times);
-                more[i] = !done && conn["pageInfo"]["hasNextPage"].as_bool() == Some(true);
-                after[i] = conn["pageInfo"]["endCursor"].as_str().map(str::to_string);
+            note_rate_limit(&v, &mut out);
+            let conn = &v["repository"]["pullRequests"];
+            let (page, _, _) = parse_ledger_page(conn, DateTime::<Utc>::MIN_UTC);
+            for (n, pr) in page {
+                out.ledger.record(n, pr);
             }
+            if let Some(c) = conn["pageInfo"]["endCursor"].as_str() {
+                out.ledger.backfill_cursor = Some(c.to_string());
+            }
+            out.ledger.backfill_complete = conn["pageInfo"]["hasNextPage"].as_bool() != Some(true);
         }
-        Ok(())
+        if let Err(e) = shared.save_ledger(repo, &out.ledger) {
+            eprintln!("{repo}: could not save the PR ledger: {e}");
+        }
+        Ok(out)
     }
 
     /// Commits on `main` since the latest build; `None` without a build, a
@@ -471,6 +594,51 @@ impl GitHub {
         }
         Ok(out)
     }
+}
+
+/// The repo's ledger, bootstrapped from this app's cache if it has none yet.
+fn load_ledger(shared: &SharedCache, repo: &str) -> PrLedger {
+    let cache = craft_core::Cache::default_location().ok();
+    shared.load_or_seed_ledger(repo, cache.as_ref().map(|c| c.dir()))
+}
+
+fn note_rate_limit(data: &Value, out: &mut LedgerSync) {
+    let r = &data["rateLimit"];
+    out.cost += r["cost"].as_u64().unwrap_or(0);
+    if let Some(left) = r["remaining"].as_u64() {
+        out.remaining = Some(left);
+        out.reset_at = time(&r["resetAt"]);
+    }
+}
+
+/// One page of PRs, newest update first: those updated at or after `stop_at`,
+/// whether the page reached older ones, and the oldest update it holds.
+pub fn parse_ledger_page(
+    conn: &Value,
+    stop_at: DateTime<Utc>,
+) -> (Vec<(u64, LedgerPr)>, bool, Option<DateTime<Utc>>) {
+    let mut out = Vec::new();
+    let mut oldest = None;
+    for n in conn["nodes"].as_array().into_iter().flatten() {
+        let updated_at = time(&n["updatedAt"]);
+        if updated_at.is_some_and(|t| t < stop_at) {
+            return (out, true, oldest);
+        }
+        oldest = updated_at.or(oldest);
+        if let Some(number) = n["number"].as_u64() {
+            out.push((
+                number,
+                LedgerPr {
+                    state: n["state"].as_str().unwrap_or_default().to_string(),
+                    created_at: time(&n["createdAt"]),
+                    updated_at,
+                    merged_at: time(&n["mergedAt"]),
+                    author: n["author"]["login"].as_str().map(str::to_string),
+                },
+            ));
+        }
+    }
+    (out, false, oldest)
 }
 
 pub fn parse_contributors(body: &Value) -> Vec<String> {
@@ -629,7 +797,8 @@ fn parse_issues(conn: &Value) -> Vec<IssueInput> {
 }
 
 /// When PRs were opened and merged and issues opened, since
-/// [`activity_start`]; [`recent_activity`] buckets them into windows.
+/// [`activity_start`]; [`recent_activity`] buckets them into windows. The PRs
+/// come from the shared [`PrLedger`], the issues from [`RawActivity`].
 #[derive(Debug, Clone, Default)]
 pub struct Events {
     pub prs_opened: Vec<DateTime<Utc>>,
@@ -638,8 +807,9 @@ pub struct Events {
 }
 
 /// Activity kept between polls, in the cache directory, so each poll asks
-/// GitHub only for what's new. Keyed by commit oid and PR/issue number, so
-/// overlapping fetches merge instead of double counting.
+/// GitHub only for what's new. Keyed by commit oid and issue number, so
+/// overlapping fetches merge instead of double counting. PRs aren't here: they
+/// are in the [`PrLedger`] shared with the PR poller.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct RawActivity {
@@ -650,8 +820,6 @@ pub struct RawActivity {
     /// When the last fetch from scratch started.
     pub full_at: Option<DateTime<Utc>>,
     pub commits: BTreeMap<String, CommitAuthor>,
-    pub prs_opened: BTreeMap<u64, DateTime<Utc>>,
-    pub prs_merged: BTreeMap<u64, DateTime<Utc>>,
     pub issues_opened: BTreeMap<u64, DateTime<Utc>>,
     /// The last successful fetch, which [`restat`] measures again at a later
     /// time. Files written before it existed load with `None`.
@@ -735,21 +903,7 @@ impl RawActivity {
     /// Drop everything before `since`.
     pub fn prune(&mut self, since: DateTime<Utc>) {
         self.commits.retain(|_, (at, _)| *at >= since);
-        for m in [
-            &mut self.prs_opened,
-            &mut self.prs_merged,
-            &mut self.issues_opened,
-        ] {
-            m.retain(|_, at| *at >= since);
-        }
-    }
-
-    pub fn events(&self) -> Events {
-        Events {
-            prs_opened: self.prs_opened.values().copied().collect(),
-            prs_merged: self.prs_merged.values().copied().collect(),
-            issues_opened: self.issues_opened.values().copied().collect(),
-        }
+        self.issues_opened.retain(|_, at| *at >= since);
     }
 }
 
@@ -822,8 +976,9 @@ fn commits_match_counts(
 /// the windows move to `now`, and issues are ranked by their age at `now`.
 /// Valid only while nothing changed on GitHub (see [`can_skip`]). `raw` is
 /// left as it is, so the next fetch is incremental from the last real one
-/// and a later `restat` still has the commits it needs.
-pub fn restat(raw: &RawActivity, now: DateTime<Utc>) -> Option<RepoStats> {
+/// and a later `restat` still has the commits it needs. The PRs come from
+/// `ledger`, the repo's shared [`PrLedger`], as in [`GitHub::fetch_repo`].
+pub fn restat(raw: &RawActivity, ledger: &PrLedger, now: DateTime<Utc>) -> Option<RepoStats> {
     let last = raw.last.as_ref()?;
     let release_at = summarize_releases(&last.releases).latest_at;
     let mut main = last.main.clone();
@@ -836,14 +991,16 @@ pub fn restat(raw: &RawActivity, now: DateTime<Utc>) -> Option<RepoStats> {
         .filter(|(at, _)| *at >= since)
         .cloned()
         .collect();
-    let mut events = raw.events();
-    for times in [
-        &mut events.prs_opened,
-        &mut events.prs_merged,
-        &mut events.issues_opened,
-    ] {
-        times.retain(|at| *at >= since);
-    }
+    let events = Events {
+        prs_opened: ledger.opened_since(since),
+        prs_merged: ledger.merged_since(since),
+        issues_opened: raw
+            .issues_opened
+            .values()
+            .copied()
+            .filter(|at| *at >= since)
+            .collect(),
+    };
     Some(build_stats(
         &main,
         &last.releases,
@@ -1180,25 +1337,39 @@ query($owner: String!, $name: String!, $since: GitTimestamp!, $after: String) {
 }
 "#;
 
-/// One page each of PRs by creation, merged PRs by last update and issues by
-/// creation, newest first; `@include` drops the lists already walked far enough.
-const EVENTS_QUERY: &str = r#"
-query($owner: String!, $name: String!, $opened: Boolean!, $merged: Boolean!, $issues: Boolean!,
-      $openedAfter: String, $mergedAfter: String, $issuesAfter: String) {
+const ISSUES_QUERY: &str = r#"
+query($owner: String!, $name: String!, $after: String) {
   repository(owner: $owner, name: $name) {
-    opened: pullRequests(first: 100, after: $openedAfter, orderBy: {field: CREATED_AT, direction: DESC}) @include(if: $opened) {
-      pageInfo { hasNextPage endCursor }
-      nodes { number createdAt }
-    }
-    merged: pullRequests(states: MERGED, first: 100, after: $mergedAfter, orderBy: {field: UPDATED_AT, direction: DESC}) @include(if: $merged) {
-      pageInfo { hasNextPage endCursor }
-      nodes { number updatedAt mergedAt }
-    }
-    issues: issues(first: 100, after: $issuesAfter, orderBy: {field: CREATED_AT, direction: DESC}) @include(if: $issues) {
+    issues(first: 100, after: $after, orderBy: {field: CREATED_AT, direction: DESC}) {
       pageInfo { hasNextPage endCursor }
       nodes { number createdAt }
     }
   }
+}
+"#;
+
+/// Every PR, in any state, most recently updated first.
+const LEDGER_QUERY: &str = r#"
+query($owner: String!, $name: String!, $after: String) {
+  repository(owner: $owner, name: $name) {
+    pullRequests(first: 100, after: $after, orderBy: {field: UPDATED_AT, direction: DESC}) {
+      pageInfo { hasNextPage endCursor }
+      nodes { number state createdAt updatedAt mergedAt author { login } }
+    }
+  }
+  rateLimit { cost remaining resetAt }
+}
+"#;
+
+const BACKFILL_QUERY: &str = r#"
+query($owner: String!, $name: String!, $after: String) {
+  repository(owner: $owner, name: $name) {
+    pullRequests(states: MERGED, first: 100, after: $after, orderBy: {field: CREATED_AT, direction: ASC}) {
+      pageInfo { hasNextPage endCursor }
+      nodes { number state createdAt updatedAt mergedAt author { login } }
+    }
+  }
+  rateLimit { cost remaining resetAt }
 }
 "#;
 
@@ -1509,19 +1680,41 @@ mod tests {
         assert!(raw.fetch_from(t("2026-09-20T00:00:00Z"), now).1);
         // So does an old full fetch.
         assert!(raw.fetch_from(week_ago, t("2026-10-08T08:00:00Z")).1);
-        raw.prs_opened.insert(1, t("2026-09-30T00:00:00Z"));
-        raw.prs_opened.insert(2, t("2026-10-02T00:00:00Z"));
-        raw.prs_opened.insert(2, t("2026-10-02T00:00:00Z"));
+        raw.issues_opened.insert(1, t("2026-09-30T00:00:00Z"));
+        raw.issues_opened.insert(2, t("2026-10-02T00:00:00Z"));
+        raw.issues_opened.insert(2, t("2026-10-02T00:00:00Z"));
         raw.commits
             .insert("a".into(), (t("2026-09-30T00:00:00Z"), "ann".into()));
         raw.prune(week_ago);
-        assert_eq!(raw.events().prs_opened, vec![t("2026-10-02T00:00:00Z")]);
+        assert_eq!(raw.issues_opened.len(), 1);
         assert!(raw.commits.is_empty());
         let dir = std::env::temp_dir().join(format!("craft-raw-{}", std::process::id()));
         raw.save(&dir, "o/r").unwrap();
         assert_eq!(RawActivity::load(&dir, "o/r"), raw);
         assert_eq!(RawActivity::load(&dir, "o/missing"), RawActivity::default());
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn ledger_pages_stop_at_older_updates() {
+        let t = |s: &str| s.parse::<DateTime<Utc>>().unwrap();
+        let conn = json!({"nodes": [
+          {"number": 9, "state": "MERGED", "createdAt": "2026-09-01T00:00:00Z", "updatedAt": "2026-10-08T00:00:00Z",
+           "mergedAt": "2026-10-08T00:00:00Z", "author": {"login": "ann"}},
+          {"number": 8, "state": "OPEN", "createdAt": "2026-10-05T00:00:00Z", "updatedAt": "2026-10-06T00:00:00Z",
+           "mergedAt": null, "author": null},
+          {"number": 7, "state": "CLOSED", "createdAt": "2026-09-01T00:00:00Z", "updatedAt": "2026-09-30T00:00:00Z",
+           "mergedAt": null, "author": {"login": "bo"}}
+        ]});
+        let (page, done, oldest) = parse_ledger_page(&conn, t("2026-10-01T00:00:00Z"));
+        assert!(done);
+        assert_eq!(page.iter().map(|(n, _)| *n).collect::<Vec<_>>(), [9, 8]);
+        assert_eq!(page[0].1.author.as_deref(), Some("ann"));
+        assert_eq!(page[0].1.merged_at, Some(t("2026-10-08T00:00:00Z")));
+        assert_eq!(page[1].1.author, None);
+        assert_eq!(oldest, Some(t("2026-10-06T00:00:00Z")));
+        let (page, done, _) = parse_ledger_page(&conn, DateTime::<Utc>::MIN_UTC);
+        assert_eq!((page.len(), done), (3, false));
     }
 
     #[test]
@@ -1697,14 +1890,38 @@ mod tests {
             commits: p.commits.iter().cloned().collect(),
             ..Default::default()
         };
-        for (held, times) in [
-            (&mut raw.prs_opened, &p.events.prs_opened),
-            (&mut raw.prs_merged, &p.events.prs_merged),
-            (&mut raw.issues_opened, &p.events.issues_opened),
-        ] {
-            held.extend(times.iter().enumerate().map(|(i, t)| (i as u64, *t)));
+        raw.issues_opened.extend(
+            p.events
+                .issues_opened
+                .iter()
+                .enumerate()
+                .map(|(i, t)| (i as u64, *t)),
+        );
+        let mut ledger = PrLedger::default();
+        for (i, at) in p.events.prs_opened.iter().enumerate() {
+            ledger.prs.insert(
+                i as u64,
+                LedgerPr {
+                    created_at: Some(*at),
+                    ..Default::default()
+                },
+            );
         }
-        assert_eq!(restat(&raw, p.now), None, "no fetch to measure again");
+        for (i, at) in p.events.prs_merged.iter().enumerate() {
+            ledger.prs.insert(
+                10_000 + i as u64,
+                LedgerPr {
+                    state: "MERGED".into(),
+                    merged_at: Some(*at),
+                    ..Default::default()
+                },
+            );
+        }
+        assert_eq!(
+            restat(&raw, &ledger, p.now),
+            None,
+            "no fetch to measure again"
+        );
         raw.last = Some(LastFetch {
             at: p.now,
             probe: None,
@@ -1723,7 +1940,7 @@ mod tests {
             &p.events,
             p.now,
         );
-        assert_eq!(restat(&raw, p.now), Some(fetched));
+        assert_eq!(restat(&raw, &ledger, p.now), Some(fetched));
     }
 
     #[test]
@@ -1766,10 +1983,29 @@ mod tests {
             raw.commits.insert(oid.into(), (t(at), who.into()));
         }
         // Opened inside the last 4 h at `then`; merged inside the last week.
-        raw.prs_opened.insert(1, t("2026-10-08T00:10:00Z"));
-        raw.prs_merged.insert(2, t("2026-10-01T04:10:00Z"));
+        let ledger = PrLedger {
+            prs: BTreeMap::from([
+                (
+                    1,
+                    LedgerPr {
+                        state: "OPEN".into(),
+                        created_at: Some(t("2026-10-08T00:10:00Z")),
+                        ..Default::default()
+                    },
+                ),
+                (
+                    2,
+                    LedgerPr {
+                        state: "MERGED".into(),
+                        merged_at: Some(t("2026-10-01T04:10:00Z")),
+                        ..Default::default()
+                    },
+                ),
+            ]),
+            ..Default::default()
+        };
         let held = raw.clone();
-        let before = restat(&raw, then).unwrap();
+        let before = restat(&raw, &ledger, then).unwrap();
         let w = |s: &RepoStats, id: &str| s.recent[id];
         assert_eq!(
             ["10m", "30m", "7d"].map(|id| w(&before, id).commits),
@@ -1779,7 +2015,7 @@ mod tests {
         assert!(before.urgent[0].reasons.contains(&"new".to_string()));
 
         let now = t("2026-10-08T04:20:00Z");
-        let after = restat(&raw, now).unwrap();
+        let after = restat(&raw, &ledger, now).unwrap();
         // a and d left the 10-minute window, b the 30-minute one, c the week.
         assert_eq!(w(&after, "10m").commits, 0);
         assert_eq!(w(&after, "30m").commits, 2);
@@ -1798,10 +2034,10 @@ mod tests {
         assert!(after.urgency < before.urgency);
         // Unchanged: a later restat from the same fetch still has every commit.
         assert_eq!(raw, held);
-        let later = restat(&raw, t("2026-10-08T04:25:00Z")).unwrap();
+        let later = restat(&raw, &ledger, t("2026-10-08T04:25:00Z")).unwrap();
         assert_eq!(w(&later, "7d").commits, 3);
         raw.last = None;
-        assert_eq!(restat(&raw, now), None);
+        assert_eq!(restat(&raw, &ledger, now), None);
     }
 
     #[test]
@@ -1852,7 +2088,6 @@ mod tests {
             old.fetched_at,
             Some("2026-10-08T03:55:00Z".parse().unwrap())
         );
-        assert_eq!(old.prs_opened.len(), 1);
         let p = payloads();
         let raw = RawActivity {
             last: Some(LastFetch {
