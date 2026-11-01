@@ -6,6 +6,7 @@ use std::collections::BTreeMap;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
+use crate::config::{category_of, RepoCategory};
 use crate::BuildLag;
 
 pub type Time = DateTime<Utc>;
@@ -107,6 +108,9 @@ pub struct UrgentIssue {
 pub struct RepoEntry {
     /// `owner/name`
     pub repo: String,
+    /// What the repo is. Worked out from `repo`; [`Snapshot::sync_repos`] renews
+    /// it, so a cache written by an older build can't leave it out of date.
+    pub category: RepoCategory,
     pub stats: Option<RepoStats>,
     /// When `stats` was fetched. Kept across failed polls so stale data stays visible.
     pub fetched_at: Option<Time>,
@@ -126,6 +130,7 @@ impl RepoEntry {
     pub fn new(repo: &str) -> Self {
         RepoEntry {
             repo: repo.to_string(),
+            category: category_of(repo),
             ..Default::default()
         }
     }
@@ -306,9 +311,13 @@ impl Snapshot {
             .map(|w| {
                 old.iter()
                     .position(|e| e.repo.eq_ignore_ascii_case(w))
-                    .map(|i| RepoEntry {
-                        repo: w.clone(),
-                        ..old.swap_remove(i)
+                    .map(|i| {
+                        let mut entry = RepoEntry {
+                            repo: w.clone(),
+                            ..old.swap_remove(i)
+                        };
+                        entry.category = category_of(&entry.repo);
+                        entry
                     })
                     .unwrap_or_else(|| RepoEntry::new(w))
             })
@@ -453,6 +462,21 @@ mod tests {
         let back: Snapshot = serde_json::from_str(&serde_json::to_string(&s).unwrap()).unwrap();
         assert!(back.requested.is_empty());
         assert_eq!(back.fetching, None);
+    }
+
+    #[test]
+    fn sync_repos_renews_categories_from_older_caches() {
+        let mut s = Snapshot::default();
+        s.repos.push(RepoEntry {
+            repo: "storytold/craft-fonts".into(),
+            ..Default::default()
+        });
+        s.sync_repos(&[
+            "storytold/craft-fonts".into(),
+            "storytold/craft-libs".into(),
+        ]);
+        assert_eq!(s.repos[0].category, RepoCategory::Assets);
+        assert_eq!(s.repos[1].category, RepoCategory::Library);
     }
 
     #[test]
