@@ -7,7 +7,7 @@ import { readFileSync } from 'node:fs';
 import { Window } from 'happy-dom';
 import { start } from './app.ts';
 import type { Api } from './app.ts';
-import { COLUMNS } from './model.ts';
+import { COLUMNS, RECENT } from './model.ts';
 import type { Meta, RepoEntry, RepoStats, Snapshot, UrgentIssue } from './model.ts';
 
 const HTML = readFileSync(new URL('../index.html', import.meta.url), 'utf8');
@@ -436,11 +436,11 @@ test('the tabs are Downloads, PRs and Fix first, in that order, opening on Downl
   assert.equal(h.doc.querySelector('[data-view="repos"]')!.getAttribute('aria-selected'), 'true');
 });
 
-test('Downloads leads with the download columns', async () => {
+test('Downloads leads with the build, then its download columns', async () => {
   const keys = COLUMNS.map((c) => c.key);
-  const first = keys.indexOf('latest_build_rate');
+  const first = keys.indexOf('latest_build');
   assert.equal(first, keys.indexOf('category') + 1, 'right after the repo\'s name and type');
-  assert.deepEqual(keys.slice(first, first + 3), ['latest_build_rate', 'latest_build_downloads', 'downloads_total']);
+  assert.deepEqual(keys.slice(first, first + 4), ['latest_build', 'latest_build_at', 'latest_build_rate', 'latest_build_downloads']);
   const h = await setup();
   const groups = [...h.doc.querySelectorAll('thead tr.groups th')].map((th) => th.textContent);
   assert.equal(groups.includes('Downloads'), true);
@@ -509,4 +509,20 @@ test('hiding everything says why, and saved toggles apply from the start', async
   assert.equal(h.doc.querySelector('[data-kind="third_party"]')!.getAttribute('aria-pressed'), 'false');
   assert.equal(h.doc.querySelector('tr[data-repo]'), null);
   assert.match(h.doc.getElementById('tbody')!.textContent!, /hidden by the toggles/);
+});
+
+test('Total DLs sits with the activity columns and only counts under All time', async () => {
+  const i = COLUMNS.findIndex((c) => c.key === 'downloads_total');
+  assert.equal(COLUMNS[i]!.group, RECENT);
+  assert.equal(COLUMNS[i - 1]!.group, RECENT, 'beside the others, so the dropdown spans it');
+  const h = await setup({ snap: snapshot([repo('alpha', { downloads_total: 1234 })]), storage: { window: '4h' } });
+  const cell = () => h.row('alpha').cells[i]!.textContent;
+  const foot = () => (h.doc.getElementById('tfoot')!.querySelector('tr') as HTMLTableRowElement).cells[i]!.textContent;
+  assert.equal(cell(), '—');
+  assert.equal(foot(), '');
+  const picker = h.doc.querySelector<HTMLSelectElement>('.window-picker')!;
+  picker.value = 'all';
+  picker.dispatchEvent(new h.win.Event('change') as unknown as Event);
+  assert.equal(cell(), '1,234');
+  assert.equal(foot(), '1,234');
 });

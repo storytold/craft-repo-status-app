@@ -3,7 +3,7 @@
 // the Tauri API, or a browser stand-in, and calls `start`.
 
 import {
-  COLUMNS, RECENT, WINDOWS, MANUAL, windowById, value, orderedEntries, nextSort, dropIndex,
+  ALL_TIME, COLUMNS, RECENT, WINDOWS, MANUAL, windowById, value, orderedEntries, nextSort, dropIndex,
   freshness, ago, formatRate, totals, urgentAcross, tokenStatus, isRefreshing, isThirdParty,
   REPO_KINDS, isRepoHidden, toggleKind, manualOrder, reorderVisible, checkedAfterFetch, isStale,
 } from './model.ts';
@@ -111,6 +111,9 @@ export function start(api: Api, prRoute?: Route): () => void {
         const a = Math.min(1, Number(v) / 350) * 0.45;
         return el('span', { class: 'urgency', style: `background: rgb(var(--hot-rgb) / ${a.toFixed(2)})` }, String(Math.round(Number(v))));
       }
+      case 'downloads_total':
+        if (v === null) return el('span', { class: 'muted', title: 'Only known for All time: choose it in the dropdown above' }, '—');
+        return document.createTextNode(num(v));
       case 'critical_issues': return el('span', { class: v ? 'crit' : 'zero' }, num(v));
       case 'open_prs': return link(num(v), gh(entry.repo, '/pulls'));
       case 'open_issues': return link(num(v), gh(entry.repo, '/issues'));
@@ -250,7 +253,8 @@ export function start(api: Api, prRoute?: Route): () => void {
       $('tbody').replaceChildren(el('tr', {}, el('td', { colspan: COLUMNS.length, class: 'empty' }, why)));
     }
     const t = totals(shown, state.window);
-    const total = (c: Column): string => (c.kind === 'num' ? num(Math.round(t[c.key] ?? 0)) : '');
+    const noTotal = (c: Column): boolean => c.kind !== 'num' || (c.allTimeOnly === true && state.window !== ALL_TIME);
+    const total = (c: Column): string => (noTotal(c) ? '' : num(Math.round(t[c.key] ?? 0)));
     $('tfoot').replaceChildren(el('tr', {}, COLUMNS.map((c, i) =>
       el('td', { class: groupStart(i) }, i === 0 ? `${shown.length} repos` : total(c)))));
   }
