@@ -104,10 +104,12 @@ body.reordering tbody tr:not(.dragging) td:first-child::before { content: none; 
 .app-icon { width: 16px; height: 16px; border-radius: 4px; flex-shrink: 0; }
 .app-icon.none { display: inline-grid; place-items: center; font-size: 10px; font-weight: 700; color: var(--lib); background: color-mix(in srgb, var(--lib) 16%, transparent); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--lib) 45%, transparent); }
 .app-icon.pending { background: var(--surface); }
+.third-party { font-size: 9px; font-weight: 700; letter-spacing: .04em; padding: 0 4px; border-radius: 4px; color: var(--warn); background: color-mix(in srgb, var(--warn) 14%, transparent); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--warn) 40%, transparent); }
 tr.stale .repo .dot { background: var(--warn); }
 tr.error .repo .dot { background: var(--bad); }
 tr.stale td:not(:first-child) { opacity: .55; }
 .muted { color: var(--muted); }
+.category { color: var(--muted); font-size: 11px; }
 .fetched { display: inline-flex; align-items: center; gap: 3px; }
 .row-refresh { background: none; border: 0; padding: 0; width: 11px; height: 11px; display: inline-grid; place-items: center; color: var(--muted); opacity: .45; cursor: pointer; }
 .row-refresh svg { width: 10px; height: 10px; stroke-width: 1.8; }

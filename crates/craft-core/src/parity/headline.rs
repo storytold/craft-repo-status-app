@@ -177,7 +177,7 @@ fn rows<'a>(t: &'a Table, value_col: usize) -> Vec<Row<'a>> {
     let kind = t.col(&["kind", "how"]);
     t.rows
         .iter()
-        .filter(|r| !r.malformed && r.cells.len() > value_col)
+        .filter(|r| r.cells.len() > value_col)
         .map(|r| {
             let (base, qualifier) = split_label(&md::normalize(&r.cells[0].raw));
             Row {
@@ -903,6 +903,16 @@ mod tests {
                 line: 6,
             }
         );
+    }
+
+    #[test]
+    fn a_row_without_its_trailing_kind_cell_keeps_its_value() {
+        let md = "## Headline numbers\n\n| | Value | Kind |\n|---|---|---|\n\
+                  | **Feature breadth** | **~88%** |\n\
+                  | **Ready for real work** | **~45%** |\n";
+        let p = rm(md);
+        assert_eq!(ok(&p.breadth).0, 88.0);
+        assert_eq!(ok(&p.ready).0, 45.0);
     }
 
     #[test]

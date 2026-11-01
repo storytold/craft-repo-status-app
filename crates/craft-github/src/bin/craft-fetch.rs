@@ -5,8 +5,11 @@
 //! numbers read from them, which the snapshot then carries too.
 
 use chrono::Utc;
-use craft_core::{Cache, Config, Figure, LagBasis, RepoEntry, Snapshot, ALL_TIME};
+use craft_core::{Cache, Config, Figure, LagBasis, RepoEntry, SharedCache, Snapshot, ALL_TIME};
 use craft_github::{resolve_token, Error, GitHub, RawActivity};
+
+/// How long to wait for Craft PR Review to finish talking to GitHub.
+const LEASE_PATIENCE: std::time::Duration = std::time::Duration::from_secs(180);
 
 /// A parity number as one line: the percentage and its row, or why not.
 fn figure(f: &Figure) -> String {
@@ -58,6 +61,7 @@ fn main() {
         }
     };
     let now = Utc::now();
+    let shared = SharedCache::default_location().unwrap();
     let mut snap = Snapshot {
         poll_secs: cfg.poll_secs(),
         stale_after_secs: cfg.stale_secs(),
@@ -80,7 +84,8 @@ fn main() {
             .as_deref()
             .map(|d| RawActivity::load(d, repo))
             .unwrap_or_default();
-        match gh.fetch_repo(repo, now, &mut raw) {
+        let _lease = shared.lease(LEASE_PATIENCE);
+        match gh.fetch_repo(repo, now, &mut raw, &shared) {
             Ok((s, budget)) => {
                 if let Some(dir) = &raw_dir {
                     if let Err(e) = raw.save(dir, repo) {

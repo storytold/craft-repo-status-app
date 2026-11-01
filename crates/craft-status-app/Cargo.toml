@@ -20,3 +20,6 @@ tauri-plugin-global-shortcut = "2"
 serde.workspace = true
 serde_json.workspace = true
 chrono.workspace = true
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"

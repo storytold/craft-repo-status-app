@@ -462,6 +462,7 @@ dependencies = [
  "chrono",
  "craft-core",
  "craft-github",
+ "objc2",
  "serde",
  "serde_json",
  "tauri",

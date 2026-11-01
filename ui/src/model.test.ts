@@ -1,8 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  sortEntries, manualOrder, orderedEntries, nextSort, dropIndex, MANUAL, versionKey, freshness, isStale, ago, compact, tokenStatus,
-  totals, urgentAcross, isRefreshing, defaultDir, value, windowById, WINDOWS, COLUMNS, COLUMN,
+  sortEntries, manualOrder, orderedEntries, nextSort, dropIndex, MANUAL, versionKey, freshness, isStale, ago, compact, formatRate, buildRate, tokenStatus,
+  totals, urgentAcross, isRefreshing, isThirdParty, defaultDir, value, windowById, WINDOWS, COLUMNS, COLUMN,
 } from './model.ts';
 import type { Activity, RepoEntry, RepoStats, UrgentIssue } from './model.ts';
 
@@ -64,6 +64,41 @@ test('commits since the build read through to since_build', () => {
   assert.equal(names(sortEntries(lagged, 'commits_since_build', 'desc')), 'bacd');
   assert.equal(value(lagged[2]!, 'commits_since_build'), null);
   assert.equal(totals(lagged).commits_since_build, 43);
+});
+
+test('the build download rate is downloads over the time out when they were counted', () => {
+  const fetched = '2026-10-08T12:00:00Z';
+  const built = (hoursAgo: number) => new Date(Date.parse(fetched) - hoursAgo * 3600e3).toISOString();
+  const out = (latest_build_downloads: number, hoursAgo: number) => entry('x', { latest_build_downloads, latest_build_at: built(hoursAgo) }, fetched);
+  assert.equal(buildRate(out(3600, 1)), 1);
+  assert.equal(value(out(7200, 1), 'latest_build_rate'), 2);
+  assert.equal(buildRate(out(0, 1)), 0, 'out, but no downloads yet');
+  assert.equal(buildRate(entry('x', { latest_build_downloads: 0, latest_build_at: null }, fetched)), null, 'no build');
+  assert.equal(buildRate(entry('x', null, fetched)), null, 'no stats');
+  assert.equal(buildRate(entry('x', { latest_build_downloads: 5, latest_build_at: built(1) }, null)), null, 'never fetched');
+  assert.equal(buildRate(out(5, 0)), null, 'no time out yet');
+  assert.equal(buildRate(out(5, -1)), null, 'published after the fetch, by clock skew');
+});
+
+test('build download rates sort by speed across units, missing last', () => {
+  const fetched = '2026-10-08T12:00:00Z';
+  const dayAgo = '2026-10-07T12:00:00Z';
+  const out = (repo: string, latest_build_downloads: number) => entry(repo, { latest_build_downloads, latest_build_at: dayAgo }, fetched);
+  const e = [
+    out('m', 8640), // 6.0/m
+    out('s', 172800), // 2.0/s
+    entry('none', { latest_build_downloads: 0, latest_build_at: null }, fetched),
+    out('h', 120), // 5.0/h
+    out('M', 86400 * 59 / 60), // 59.0/m, numerically above 2.0/s
+    out('d', 3), // 3.0/d
+    out('z', 0), // 0.0/d
+  ];
+  const order = (list: RepoEntry[]) => list.map((x) => x.repo.slice(2)).join(' ');
+  assert.equal(defaultDir('latest_build_rate'), 'desc', 'fastest first on the first click');
+  assert.equal(order(sortEntries(e, 'latest_build_rate', 'desc')), 's M m h d z none');
+  assert.equal(order(sortEntries(e, 'latest_build_rate', 'asc')), 'z d h m M s none');
+  assert.deepEqual(e.map((x) => { const r = buildRate(x); return r === null ? null : formatRate(r); }),
+    ['6.0/m', '2.0/s', null, '5.0/h', '59.0/m', '3.0/d', '0.0/d']);
 });
 
 test('dates and names', () => {
@@ -163,10 +198,19 @@ test('formatting', () => {
   assert.equal(compact(950), '950');
   assert.equal(compact(2_340_000), '2.3M');
   assert.equal(compact(null), '');
+  assert.equal(formatRate(12.34), '12.3/s');
+  assert.equal(formatRate(1), '1.0/s');
+  assert.equal(formatRate(0.5), '30.0/m');
+  assert.equal(formatRate(1 / 60), '1.0/m');
+  assert.equal(formatRate(1 / 120), '30.0/h');
+  assert.equal(formatRate(1 / 3600), '1.0/h');
+  assert.equal(formatRate(1 / 7200), '12.0/d');
+  assert.equal(formatRate(0), '0.0/d');
 });
 
 test('totals and urgent merge', () => {
   assert.equal(totals(rows).urgency, 110);
+  assert.equal(totals(rows).latest_build_rate, undefined, 'rates have no total');
   assert.equal(totals(rows).latest_build, undefined, 'versions have no total');
   const e = [
     entry('a', { urgent: [issue(1, 30), issue(2, 80, true)] }),
@@ -291,6 +335,19 @@ test('a parity tooltip gives the row, its basis and the review date, or why ther
   const none = parity({ roadmap_oid: null, parity_doc: false, na: why, breadth: { state: 'absent', why } });
   assert.equal(parityTip(none, 'breadth'), why);
   assert.equal(parityTip(null, 'breadth'), 'Not read yet');
+  const tap = 'docs/target-app-parity.md';
+  const fromTap = parity({
+    roadmap_oid: null, last_reviewed: null, breadth: figure(88, { path: tap, line: 5 }), ready: figure(60, { path: tap, line: 6 }),
+    files: [{ path: tap, oid: 't1', reviewed: '2026-10-12', updated: null, generated: null, target: null, date_lines: 1, line: 3, why: null, commit_date: null, commit: null }],
+  });
+  assert.equal(parityTip(fromTap, 'breadth'), [
+    'Feature breadth: ~88%', 'Estimated · estimated', `${tap} last reviewed 2026-10-12`, `Click to open ${tap} on GitHub`,
+  ].join('\n'), 'a figure from the parity document gives that document\'s review date');
+  assert.match(parityTip({ ...fromTap, files: [] }, 'ready'), new RegExp(`\n${tap} has no Last reviewed date\n`));
+  const tapAbsent = { ...fromTap, ready: { state: 'absent', why: 'No Ready for real work row' } as const };
+  assert.equal(parityTip(tapAbsent, 'ready'), [
+    'No Ready for real work row', `${tap} last reviewed 2026-10-12`, `Click to open ${tap} on GitHub`,
+  ].join('\n'), 'an absent figure without a ROADMAP.md gives the parity document\'s review date');
 });
 
 test('a parity cell links to the parity document at the commit read, else to its ROADMAP.md row', () => {
@@ -499,4 +556,21 @@ test('columns: unique keys, every recent column titled with its span', () => {
   assert.equal(Object.keys(COLUMN).length, COLUMNS.length);
   for (const c of COLUMNS.filter((c) => c.recent)) assert.match(c.title ?? '', /\{span\}/, c.key);
   assert.equal(COLUMNS[0]!.key, 'name', 'the sticky first column is the repo');
+});
+
+test('the Type column sorts by its words, repos without a type last', () => {
+  const e = [
+    { ...entry('a', {}), category: 'tooling' as const },
+    { ...entry('b', {}), category: 'other' as const },
+    { ...entry('c', {}), category: 'app' as const },
+    entry('d', {}),
+  ];
+  assert.deepEqual(sortEntries(e, 'category', 'asc').map((x) => x.repo), ['o/c', 'o/a', 'o/b', 'o/d']);
+  assert.equal(value(e[2]!, 'category'), 'App');
+});
+
+test('repos outside our org are third party', () => {
+  assert.equal(isThirdParty('storytold/photocraft'), false);
+  assert.equal(isThirdParty('Storytold/photocraft'), false, 'owners ignore case');
+  assert.equal(isThirdParty('tangency-labs/solidcraft'), true);
 });
