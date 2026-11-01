@@ -1,20 +1,22 @@
-// Craft Status UI: renders the snapshot pushed by the Rust poller. main.ts
-// picks the Tauri API, or a browser stand-in, and calls `start`.
+// Craft Status UI: the window's chrome and tabs. Downloads and Fix first render the
+// snapshot pushed by the Rust status poller; the PR tab is pr-app.ts. main.ts picks
+// the Tauri API, or a browser stand-in, and calls `start`.
 
 import {
   COLUMNS, RECENT, WINDOWS, MANUAL, windowById, value, orderedEntries, nextSort, dropIndex,
   freshness, ago, formatRate, totals, urgentAcross, tokenStatus, isRefreshing, isThirdParty,
 } from './model.ts';
 import type { Column, Meta, RepoEntry, Snapshot, Sort } from './model.ts';
+import { startPrs } from './pr-app.ts';
+import type { Route } from './pr-app.ts';
+import { $, DAY, classes, el, load, localTime, save } from './dom.ts';
+import type { Api } from './dom.ts';
 
-/** What the UI needs from the host: Tauri commands and events, window chrome. */
-export interface Api {
-  invoke<T = unknown>(cmd: string, args?: Record<string, unknown>): Promise<T>;
-  listen<T>(event: string, fn: (payload: T) => void): void;
-  startResize(): void;
-}
+export type { Api } from './dom.ts';
 
-type View = 'repos' | 'urgent';
+type View = 'repos' | 'prs' | 'urgent';
+
+const asView = (v: string | null): View => (v === 'urgent' || v === 'prs' ? v : 'repos');
 
 interface State {
   snap: Snapshot | null;
@@ -27,45 +29,12 @@ interface State {
   criticalOnly: boolean;
 }
 
-const $ = <T extends HTMLElement = HTMLElement>(id: string): T => {
-  const n = document.getElementById(id);
-  if (!n) throw new Error(`#${id} is missing from index.html`);
-  return n as T;
-};
-
-function load<T>(k: string, d: T): T {
-  try { return (JSON.parse(localStorage.getItem(k) ?? 'null') as T | null) ?? d; } catch { return d; }
-}
-function save(k: string, v: unknown): void {
-  try { localStorage.setItem(k, JSON.stringify(v)); } catch { /* private mode */ }
-}
-
 // ───────────────────────────── formatting ─────────────────────────────
 
-type Child = Node | string | null | undefined | false;
-type Props = Record<string, unknown>;
-
-function el<K extends keyof HTMLElementTagNameMap>(tag: K, props: Props = {}, ...kids: (Child | Child[])[]): HTMLElementTagNameMap[K] {
-  const n = document.createElement(tag);
-  for (const [k, v] of Object.entries(props)) {
-    if (v === undefined || v === null || v === false) continue;
-    if (k === 'class') n.className = String(v);
-    else if (k === 'dataset') Object.assign(n.dataset, v);
-    else if (k.startsWith('on')) n.addEventListener(k.slice(2), v as EventListener);
-    else n.setAttribute(k, String(v));
-  }
-  for (const kid of kids.flat()) if (kid !== null && kid !== undefined && kid !== false) n.append(kid);
-  return n;
-}
-
-const localTime = (iso: string | null | undefined): string =>
-  (iso ? new Date(iso).toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' }) : '');
 const clock = (t: number): string => new Date(t).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' });
 const num = (n: number | string | null | undefined): string => Number(n ?? 0).toLocaleString('en-US');
 const gh = (repo: string, path = ''): string => `https://github.com/${repo}${path}`;
 const shortName = (repo: string): string => repo.split('/').pop() ?? repo;
-const classes = (...cs: (string | false | null | undefined)[]): string => cs.filter(Boolean).join(' ');
-const DAY = 86400e3;
 
 /** The toolbar's refresh arrow, as an element (SVG needs its namespace). */
 function refreshIcon(): SVGSVGElement {
@@ -79,12 +48,15 @@ function refreshIcon(): SVGSVGElement {
   return svg;
 }
 
-/** Starts the UI in the current document. Call once; returns a function that stops its clock. */
-export function start(api: Api): () => void {
+/**
+ * Starts the UI in the current document. Call once; returns a function that stops
+ * its clocks. `prRoute` opens the PR tab at that view.
+ */
+export function start(api: Api, prRoute?: Route): () => void {
   const state: State = {
     snap: null,
     meta: {},
-    view: (new URLSearchParams(location.search).get('view') ?? load<string>('view', 'repos')) === 'urgent' ? 'urgent' : 'repos',
+    view: prRoute ? 'prs' : asView(new URLSearchParams(location.search).get('view') ?? load<string>('view', 'repos')),
     sort: load<Sort>('sort', { key: 'urgency', dir: 'desc' }),
     order: load<string[]>('order', []),
     window: windowById(load('window', '')).id,
@@ -378,12 +350,13 @@ export function start(api: Api): () => void {
       `Last full refresh: ${localTime(snap.last_full_refresh_at) || '—'}`,
       `Stale after ${Math.round(snap.stale_after_secs / 60)} min without new data`,
     ].join('\n');
-    $('refresh').classList.toggle('spinning', !!snap.refreshing);
+    $('refresh').classList.toggle('spinning', !!snap.refreshing && state.view !== 'prs');
 
     const failing = snap.repos.filter((r) => r.error);
+    // A snapshot-wide problem (a broken config, a rate limit) matters on every tab.
     const msgs = [
       snap.error,
-      failing.length ? `${failing.length} repo${failing.length > 1 ? 's' : ''} failed last poll: ${failing.map((r) => `${shortName(r.repo)} (${r.error})`).join('; ')}` : null,
+      state.view !== 'prs' && failing.length ? `${failing.length} repo${failing.length > 1 ? 's' : ''} failed last poll: ${failing.map((r) => `${shortName(r.repo)} (${r.error})`).join('; ')}` : null,
     ].filter(Boolean);
     $('banner').hidden = !msgs.length;
     $('banner').textContent = msgs.join(' — ');
@@ -407,15 +380,28 @@ export function start(api: Api): () => void {
     const snap = state.snap;
     if (!snap || drag?.moved) return;
     renderStatus(snap);
-    document.querySelectorAll<HTMLElement>('.view').forEach((b) => b.setAttribute('aria-selected', String(b.dataset.view === state.view)));
+    if (state.view === 'repos') renderTable(snap);
+    else if (state.view === 'urgent') renderUrgent(snap);
+  }
+
+  /** What's on screen for the current tab, whether or not there's data yet. */
+  function renderTabs(): void {
+    const onPrs = state.view === 'prs';
+    document.querySelectorAll<HTMLElement>('[data-view]').forEach((b) => b.setAttribute('aria-selected', String(b.dataset.view === state.view)));
     $('repos-view').hidden = state.view !== 'repos';
     $('urgent-view').hidden = state.view !== 'urgent';
-    if (state.view === 'repos') renderTable(snap); else renderUrgent(snap);
+    $('prs-view').hidden = !onPrs;
+    for (const id of ['pr-nav', 'crumbs', 'pr-pill', 'pr-foot']) $(id).hidden = !onPrs;
+    for (const id of ['fresh-pill', 'refreshed', 'status-foot']) $(id).hidden = onPrs;
+    prs.setActive(onPrs);
   }
 
   function setView(v: View): void {
+    // Choosing the PR tab again goes back to its top, as a second Esc would.
+    if (v === 'prs' && state.view === 'prs') prs.home();
     state.view = v;
     save('view', v);
+    renderTabs();
     render();
   }
 
@@ -425,12 +411,15 @@ export function start(api: Api): () => void {
     $('pin').setAttribute('aria-pressed', String(!!state.meta.always_on_top));
     const mac = navigator.platform.toLowerCase().includes('mac');
     $('shortcut').textContent = (state.meta.shortcut ?? '').replace('CmdOrCtrl', mac ? '⌘' : 'Ctrl').replace('Shift', '⇧').replaceAll('+', '');
+    prs.setHighQuality(state.meta.high_quality);
   }
 
   // ───────────────────────────── wiring ─────────────────────────────
 
-  document.querySelectorAll<HTMLElement>('.view').forEach((b) => b.addEventListener('click', () => {
-    const view = b.dataset.view === 'urgent' ? 'urgent' : 'repos';
+  const prs = startPrs(api, prRoute);
+
+  document.querySelectorAll<HTMLElement>('[data-view]').forEach((b) => b.addEventListener('click', () => {
+    const view = asView(b.dataset.view ?? null);
     if (view === 'urgent' && state.view !== 'urgent') state.urgentRepo = '';
     setView(view);
   }));
@@ -440,17 +429,23 @@ export function start(api: Api): () => void {
     save('criticalOnly', state.criticalOnly);
     render();
   });
-  $('refresh').addEventListener('click', () => api.invoke('refresh_now'));
+  const refresh = (): void => {
+    if (state.view === 'prs') prs.refresh();
+    else void api.invoke('refresh_now');
+  };
+  $('refresh').addEventListener('click', refresh);
   $('pin').addEventListener('click', () => api.invoke('set_always_on_top', { on: !state.meta.always_on_top }));
   $('hide').addEventListener('click', () => api.invoke('hide_window'));
   $('edit-config').addEventListener('click', () => api.invoke('open_config'));
   $('resize').addEventListener('mousedown', (e) => { e.preventDefault(); api.startResize(); });
   document.addEventListener('keydown', (e) => {
     const mod = e.metaKey || e.ctrlKey;
-    if (e.key === 'Escape') api.invoke('hide_window');
-    else if (mod && e.key.toLowerCase() === 'r') { e.preventDefault(); api.invoke('refresh_now'); }
-    else if (mod && e.key === '1') setView('repos');
-    else if (mod && e.key === '2') setView('urgent');
+    if (state.view === 'prs' && prs.key(e)) e.preventDefault();
+    else if (e.key === 'Escape') api.invoke('hide_window');
+    else if (mod && e.key.toLowerCase() === 'r') { e.preventDefault(); refresh(); }
+    else if (mod && e.key === '1') { e.preventDefault(); setView('repos'); }
+    else if (mod && e.key === '2') { e.preventDefault(); setView('prs'); }
+    else if (mod && e.key === '3') { e.preventDefault(); setView('urgent'); }
   });
 
   api.listen<Snapshot>('craft:snapshot', (s) => { state.snap = s; render(); });
@@ -458,6 +453,7 @@ export function start(api: Api): () => void {
   // Relative times and staleness change with the clock alone.
   const clockTimer = setInterval(render, 15_000);
 
+  renderTabs();
   (async () => {
     try {
       applyMeta(await api.invoke<Meta>('get_meta'));
@@ -471,5 +467,8 @@ export function start(api: Api): () => void {
     }
   })();
 
-  return () => clearInterval(clockTimer);
+  return () => {
+    clearInterval(clockTimer);
+    prs.stop();
+  };
 }
