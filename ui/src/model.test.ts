@@ -40,10 +40,27 @@ test('sorting leaves its input alone', () => {
 
 test('versions sort semantically, prereleases below their release', () => {
   assert.equal(names(sortEntries(rows, 'latest_build', 'desc')), 'bdac');
-  assert.deepEqual(versionKey('v0.10.0-rc.2'), [0, 10, 0, -1, 2]);
-  assert.deepEqual(versionKey('V2'), [2, 0, 0, 0, 0]);
-  assert.deepEqual(versionKey('1.2.3-beta'), [1, 2, 3, -1, 0]);
+  assert.deepEqual(versionKey('v0.10.0-rc.2'), [0, 10, 0, -1, 'rc', '2']);
+  assert.deepEqual(versionKey('V2'), [2, 0, 0, 0]);
+  assert.deepEqual(versionKey('1.2.3-beta'), [1, 2, 3, -1, 'beta']);
   assert.deepEqual(versionKey('nightly'), [-1]);
+});
+
+test('build versions compare every prerelease identifier before their release', () => {
+  const tags = ['v1.0.0-1', 'v1.0.0-9007199254740992', 'v1.0.0-9007199254740993',
+    'v1.0.0-alpha', 'v1.0.0-alpha.1', 'v1.0.0-alpha.beta',
+    'v1.0.0-beta', 'v1.0.0-beta.2', 'v1.0.0-beta.11', 'v1.0.0-rc.1', 'v1.0.0'];
+  const builds = tags.map((latest_build, i) => entry(String(tags.length - i), { latest_build }));
+  /** Read build tags back in the requested table order. */
+  const sortedTags = (dir: 'asc' | 'desc') => sortEntries(builds, 'latest_build', dir).map((r) => r.stats!.latest_build);
+  assert.deepEqual(sortedTags('asc'), tags);
+  assert.deepEqual(sortedTags('desc'), [...tags].reverse());
+});
+
+test('build metadata does not change version precedence, and short tags still work', () => {
+  const builds = [entry('b', { latest_build: 'V2+build.1' }), entry('a', { latest_build: '2.0.0+build.9' }),
+    entry('c', { latest_build: 'v2.0-rc.1+build.99' }), entry('d', { latest_build: 'nightly' }), entry('e', null)];
+  assert.equal(names(sortEntries(builds, 'latest_build', 'desc')), 'abcde');
 });
 
 test('commits since the build read through to since_build', () => {
