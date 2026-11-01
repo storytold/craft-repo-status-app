@@ -41,6 +41,7 @@ pub const DEFAULT_REPOS: &[(&str, RepoCategory)] = &[
     ("storytold/soundcraft", RepoCategory::App),
     ("storytold/figcraft", RepoCategory::App),
     ("storytold/craft-launcher", RepoCategory::App),
+    ("storytold/craft-anything", RepoCategory::App),
     ("tangency-labs/solidcraft", RepoCategory::App),
     ("storytold/craft-libs", RepoCategory::Library),
     ("storytold/craft-i18n", RepoCategory::Library),
