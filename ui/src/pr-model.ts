@@ -337,7 +337,9 @@ export const relatedIsFlag = (relation: string): boolean => RELATED_HELP.find((h
 /** A related PR's hover text: how sure anyone is, and why. */
 export function relatedTitle(r: RelatedRef): string {
   const kind = relatedLabel(r.relation);
-  const lead = r.source === 'claude' ? `${kind} (Claude)` : r.relation === 'issue' ? kind : `Possibly related: ${kind.toLowerCase()}`;
+  let lead = `Possibly related: ${kind.toLowerCase()}`;
+  if (r.source === 'claude') lead = `${kind} (Claude)`;
+  else if (r.relation === 'issue') lead = kind;
   return [`#${r.number}`, lead, r.group, r.note].filter(Boolean).join(' · ');
 }
 
@@ -353,10 +355,16 @@ export interface Column<T> {
 
 const time = (iso: string | null | undefined): number | null => (iso ? Date.parse(iso) : null);
 
+/** Open PRs as listed; what the status poller counted until a first list is done. */
+function openCount(r: RepoRow): number | null {
+  if (!r.listed) return r.open_hint ?? null;
+  return r.partial ? Math.max(r.open, r.open_hint ?? 0) : r.open;
+}
+
 export const REPO_COLUMNS: Column<RepoRow>[] = [
   { key: 'name', label: 'Repo', text: true, value: (r) => shortName(r.repo) },
   { key: 'category', label: 'Type', text: true, title: 'What the repo is: app, library, assets, CI or tooling', value: (r) => CATEGORY_LABEL[r.category ?? 'other'] },
-  { key: 'open', label: 'Open', group: 'PRs', title: 'Open PRs', value: (r) => (r.listed ? (r.partial ? Math.max(r.open, r.open_hint ?? 0) : r.open) : r.open_hint ?? null) },
+  { key: 'open', label: 'Open', group: 'PRs', title: 'Open PRs', value: openCount },
   { key: 'inspected', label: 'Inspected', group: 'PRs', title: 'How many have had CodeRabbit findings, files and checks read. Heuristics are partial until then.', value: (r) => (r.listed ? r.inspected : null) },
   { key: 'landable', label: 'Landable', group: 'Landing', title: 'A person approved the latest commit, CI passed, nothing in the way', value: (r) => (r.listed ? r.landable : null) },
   { key: 'promising', label: 'Promising', group: 'Landing', title: 'Passes every automated check and scores well, but no person has approved it', value: (r) => (r.listed ? r.promising : null) },

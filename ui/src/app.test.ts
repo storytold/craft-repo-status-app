@@ -455,3 +455,38 @@ test('a config problem shows on the PR tab as well', async () => {
   assert.equal(h.view(), 'prs');
   assert.match(h.doc.getElementById('banner')!.textContent!, /Config error/);
 });
+
+// ───────────────────────────── repo toggles ─────────────────────────────
+
+test('the toggles sit beside the tabs, hide repos on Downloads and Fix first, and are remembered', async () => {
+  const fonts = repo('fonts', { urgency: 1, urgent: [issue(7, 30, false)], critical_issues: 2 }, { category: 'assets' });
+  const third = { repo: 'tangency-labs/solidcraft', category: 'app' as const, stats: stats({ urgent: [issue(9, 70, false)] }), fetched_at: NOW };
+  const alpha = { ...repo('alpha', { open_prs: 3 }, { category: 'app' }), repo: 'storytold/alpha' };
+  const h = await setup({ snap: snapshot([alpha, { ...fonts, repo: 'storytold/fonts' }, third]) });
+  const toggle = (id: string) => h.doc.querySelector<HTMLElement>(`[data-kind="${id}"]`)!;
+  assert.equal(h.doc.getElementById('repo-kinds')!.previousElementSibling!.getAttribute('role'), 'tablist');
+  assert.equal(toggle('assets').getAttribute('aria-pressed'), 'true');
+  assert.equal(h.rows().length, 3);
+
+  toggle('assets').click();
+  assert.equal(toggle('assets').getAttribute('aria-pressed'), 'false');
+  assert.equal(h.rows().includes('orytold/fonts'), false);
+  assert.match(h.doc.getElementById('tfoot')!.textContent!, /2 repos/);
+  assert.equal(h.doc.getElementById('repo-count')!.textContent, '2');
+  assert.deepEqual(JSON.parse(h.win.localStorage.getItem('hiddenKinds')!), ['assets']);
+
+  toggle('third_party').click();
+  assert.equal(h.rows().length, 1, 'only the first party app is left');
+  h.doc.querySelector<HTMLElement>('[data-view="urgent"]')!.click();
+  assert.doesNotMatch(h.doc.getElementById('urgent-list')!.textContent!, /Issue (7|9)/);
+  assert.equal(h.doc.getElementById('urgent-count')!.textContent, '');
+  toggle('assets').click();
+  assert.match(h.doc.getElementById('urgent-list')!.textContent!, /Issue 7/);
+});
+
+test('hiding everything says why, and saved toggles apply from the start', async () => {
+  const h = await setup({ storage: { hiddenKinds: ['third_party'] } });
+  assert.equal(h.doc.querySelector('[data-kind="third_party"]')!.getAttribute('aria-pressed'), 'false');
+  assert.equal(h.doc.querySelector('tr[data-repo]'), null);
+  assert.match(h.doc.getElementById('tbody')!.textContent!, /hidden by the toggles/);
+});

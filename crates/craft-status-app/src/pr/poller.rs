@@ -299,6 +299,72 @@ fn run_job(
     Ok(out)
 }
 
+/// How long to wait after a job failed, and what to tell the user.
+fn after_failure(
+    state: &PrReview,
+    cfg: &Config,
+    job: &Job,
+    pacing: &mut Pacing,
+    error: GhError,
+    now: Time,
+) -> (i64, String) {
+    match error {
+        GhError::RateLimited(until) => {
+            pacing.strikes += 1;
+            let backoff = (BACKOFF_MIN << (pacing.strikes - 1).min(8)).min(BACKOFF_MAX);
+            let mut resume = now + chrono::Duration::seconds(backoff);
+            if let Some(end) = rate_limit_end(&until, now) {
+                resume = resume.max(end);
+            }
+            // The status poller shares the account: it should stop too.
+            if let Err(e) = state.shared_cache.note_backoff(resume) {
+                eprintln!("could not share the backoff: {e}");
+            }
+            (
+                (resume - now).num_seconds(),
+                format!("Rate limited by GitHub; pausing until {}", clock(resume)),
+            )
+        }
+        GhError::Unauthorized => {
+            state.status.lock().unwrap().token_rejected = true;
+            (
+                cfg.poll_secs(),
+                "GitHub rejected the token (401): it may have expired or been revoked".to_string(),
+            )
+        }
+        e @ GhError::NoToken => (cfg.poll_secs(), e.to_string()),
+        e => (
+            REPO_RETRY_GAP,
+            after_fetch_error(state, job, pacing, e, now),
+        ),
+    }
+}
+
+/// A job failed for its own reasons. What to say about it.
+fn after_fetch_error(
+    state: &PrReview,
+    job: &Job,
+    pacing: &mut Pacing,
+    e: GhError,
+    now: Time,
+) -> String {
+    let Job::Details(refs) = job else {
+        return e.to_string();
+    };
+    if pr_github::is_timeout(&e) && refs.len() > 1 {
+        pacing.detail_batch = Some((refs.len() / 2).max(1));
+    } else {
+        // One PR GitHub can't serve mustn't hold up the others.
+        let mut store = state.store.lock().unwrap();
+        for r in refs {
+            if let Some(p) = store.repo_mut(&r.repo).prs.get_mut(&r.number) {
+                p.detail_failed_at = Some(now);
+            }
+        }
+    }
+    format!("Couldn't inspect PRs: {e}")
+}
+
 /// Fetch whatever's most useful, if the budget and pacing allow.
 fn step(app: &AppHandle, pacing: &mut Pacing) {
     let state = app.state::<PrReview>();
@@ -433,52 +499,10 @@ fn step(app: &AppHandle, pacing: &mut Pacing) {
             }
             g
         }
-        Err(GhError::RateLimited(until)) => {
-            pacing.strikes += 1;
-            let backoff = (BACKOFF_MIN << (pacing.strikes - 1).min(8)).min(BACKOFF_MAX);
-            let mut resume = now + chrono::Duration::seconds(backoff);
-            if let Some(end) = rate_limit_end(&until, now) {
-                resume = resume.max(end);
-            }
-            // The status poller shares the account: it should stop too.
-            if let Err(e) = state.shared_cache.note_backoff(resume) {
-                eprintln!("could not share the backoff: {e}");
-            }
-            error = Some(format!(
-                "Rate limited by GitHub; pausing until {}",
-                clock(resume)
-            ));
-            (resume - now).num_seconds()
-        }
-        Err(GhError::Unauthorized) => {
-            state.status.lock().unwrap().token_rejected = true;
-            error = Some(
-                "GitHub rejected the token (401): it may have expired or been revoked".to_string(),
-            );
-            cfg.poll_secs()
-        }
-        Err(e @ GhError::NoToken) => {
-            error = Some(e.to_string());
-            cfg.poll_secs()
-        }
         Err(e) => {
-            if let Job::Details(refs) = &job {
-                if pr_github::is_timeout(&e) && refs.len() > 1 {
-                    pacing.detail_batch = Some((refs.len() / 2).max(1));
-                } else {
-                    // One PR GitHub can't serve mustn't hold up the others.
-                    let mut store = state.store.lock().unwrap();
-                    for r in refs {
-                        if let Some(p) = store.repo_mut(&r.repo).prs.get_mut(&r.number) {
-                            p.detail_failed_at = Some(now);
-                        }
-                    }
-                }
-                error = Some(format!("Couldn't inspect PRs: {e}"));
-            } else {
-                error = Some(e.to_string());
-            }
-            REPO_RETRY_GAP
+            let (gap, message) = after_failure(&state, &cfg, &job, pacing, e, now);
+            error = Some(message);
+            gap
         }
     };
     pacing.not_before = Some(now + chrono::Duration::seconds(gap));
@@ -734,103 +758,152 @@ fn run_request(
     }
 }
 
+/// The next background job, taking groups and batches in turn.
+fn pick_background(
+    state: &PrReview,
+    cfg: &Config,
+    repos: &[String],
+    now: Time,
+    groups_turn: &mut bool,
+) -> Option<ClaudeJob> {
+    let pick = |groups: bool| {
+        if groups {
+            next_group(state, &cfg.claude, repos, now)
+        } else {
+            next_batch(state, cfg, repos, cfg.claude.batch_size)
+        }
+    };
+    let job = pick(*groups_turn).or_else(|| pick(!*groups_turn));
+    if job.is_some() {
+        *groups_turn = !*groups_turn;
+    }
+    job
+}
+
+/// What the footer says Claude is doing.
+fn claude_label(request: Option<&ClaudeRequest>, job: Option<&ClaudeJob>) -> Option<String> {
+    match (request, job) {
+        (Some(r), _) => Some(format!("#{} in {}", r.number, r.repo)),
+        (_, Some(ClaudeJob::Batch { repo, numbers })) => {
+            Some(format!("{} PRs in {repo}", numbers.len()))
+        }
+        (_, Some(ClaudeJob::Group { repo })) => Some(format!("Grouping {repo}")),
+        _ => None,
+    }
+}
+
+fn run_claude(
+    state: &PrReview,
+    c: &ClaudeConfig,
+    token: &str,
+    request: Option<&ClaudeRequest>,
+    job: Option<&ClaudeJob>,
+) -> Result<f64, String> {
+    match (request, job) {
+        (Some(r), _) => run_request(state, c, token, r),
+        (_, Some(ClaudeJob::Batch { repo, numbers })) => run_batch(state, c, repo, numbers),
+        (_, Some(ClaudeJob::Group { repo })) => run_group(state, c, repo),
+        _ => Ok(0.0),
+    }
+}
+
+fn publish_claude(
+    state: &PrReview,
+    c: &ClaudeConfig,
+    ledger: &pr_claude::Ledger,
+    available: bool,
+    running: Option<String>,
+    last_error: Option<Option<String>>,
+) {
+    let mut st = state.status.lock().unwrap();
+    let cs = &mut st.claude;
+    cs.enabled = c.enabled;
+    cs.available = available;
+    cs.model = c.model.clone();
+    cs.running = running;
+    cs.spent_today = ledger.usd;
+    cs.max_usd_per_day = c.max_usd_per_day;
+    cs.runs_last_hour = ledger.runs.len() as u32;
+    cs.max_runs_per_hour = c.max_runs_per_hour;
+    if let Some(e) = last_error {
+        cs.last_error = e;
+    }
+}
+
+/// The Claude thread's bookkeeping between turns.
+struct ClaudeTurns {
+    ledger: pr_claude::Ledger,
+    backoff_until: Option<Time>,
+    groups_turn: bool,
+}
+
+/// Runs whatever's next. True if another request is waiting, so don't sleep.
+fn claude_turn(app: &AppHandle, turns: &mut ClaudeTurns) -> bool {
+    let state = app.state::<PrReview>();
+    let now = Utc::now();
+    let cfg = state.config.lock().unwrap().clone();
+    let shared = shared(app);
+    let repos = cfg.watched(&shared.repos);
+    turns.ledger.roll(now);
+    let c = &cfg.claude;
+    let available = pr_claude::find_binary(&c.binary).is_some();
+    let request = state.claude_requests.lock().unwrap().pop_front();
+    let allowed = c.enabled
+        && available
+        && turns.ledger.allows(c)
+        && turns.backoff_until.is_none_or(|t| now >= t);
+    let job = (allowed && request.is_none())
+        .then(|| pick_background(&state, &cfg, &repos, now, &mut turns.groups_turn))
+        .flatten();
+    let label = claude_label(request.as_ref(), job.as_ref());
+    let working = label.is_some();
+    publish_claude(&state, c, &turns.ledger, available, label, None);
+    if !working {
+        return false;
+    }
+    emit_changed(app);
+    let result = run_claude(
+        &state,
+        c,
+        &shared.github_token,
+        request.as_ref(),
+        job.as_ref(),
+    );
+    let done = Utc::now();
+    let outcome = match result {
+        Ok(cost) => {
+            turns.ledger.record(done, cost);
+            None
+        }
+        Err(e) => {
+            eprintln!("claude: {e}");
+            turns.backoff_until = Some(done + chrono::Duration::seconds(CLAUDE_BACKOFF));
+            Some(e)
+        }
+    };
+    if let Err(e) = turns.ledger.save(&state.dir) {
+        eprintln!("could not save the Claude ledger: {e}");
+    }
+    publish_claude(&state, c, &turns.ledger, available, None, Some(outcome));
+    emit_changed(app);
+    // Asking by hand goes straight on to any others queued.
+    let more = !state.claude_requests.lock().unwrap().is_empty();
+    more
+}
+
 pub fn spawn_claude(app: AppHandle, rx: mpsc::Receiver<()>) {
     std::thread::Builder::new()
         .name("pr-claude".into())
         .spawn(move || {
-            let state = app.state::<PrReview>();
-            let mut ledger = pr_claude::Ledger::load(&state.dir);
-            let mut backoff_until: Option<Time> = None;
-            let mut groups_turn = true;
+            let mut turns = ClaudeTurns {
+                ledger: pr_claude::Ledger::load(&app.state::<PrReview>().dir),
+                backoff_until: None,
+                groups_turn: true,
+            };
             loop {
-                let now = Utc::now();
-                let cfg = state.config.lock().unwrap().clone();
-                let shared = shared(&app);
-                let repos = cfg.watched(&shared.repos);
-                ledger.roll(now);
-                let c = &cfg.claude;
-                let available = pr_claude::find_binary(&c.binary).is_some();
-                let request = state.claude_requests.lock().unwrap().pop_front();
-                let allowed = c.enabled
-                    && available
-                    && ledger.allows(c)
-                    && backoff_until.is_none_or(|t| now >= t);
-                let job = if allowed && request.is_none() {
-                    let pick = |groups: bool| {
-                        if groups {
-                            next_group(&state, c, &repos, now)
-                        } else {
-                            next_batch(&state, &cfg, &repos, c.batch_size)
-                        }
-                    };
-                    let first = pick(groups_turn);
-                    let job = first.or_else(|| pick(!groups_turn));
-                    if job.is_some() {
-                        groups_turn = !groups_turn;
-                    }
-                    job
-                } else {
-                    None
-                };
-                let label = match (&request, &job) {
-                    (Some(r), _) => Some(format!("#{} in {}", r.number, r.repo)),
-                    (_, Some(ClaudeJob::Batch { repo, numbers })) => {
-                        Some(format!("{} PRs in {repo}", numbers.len()))
-                    }
-                    (_, Some(ClaudeJob::Group { repo })) => Some(format!("Grouping {repo}")),
-                    _ => None,
-                };
-                let publish = |ledger: &pr_claude::Ledger,
-                               running: Option<String>,
-                               last_error: Option<Option<String>>| {
-                    let mut st = state.status.lock().unwrap();
-                    let cs = &mut st.claude;
-                    cs.enabled = c.enabled;
-                    cs.available = available;
-                    cs.model = c.model.clone();
-                    cs.running = running;
-                    cs.spent_today = ledger.usd;
-                    cs.max_usd_per_day = c.max_usd_per_day;
-                    cs.runs_last_hour = ledger.runs.len() as u32;
-                    cs.max_runs_per_hour = c.max_runs_per_hour;
-                    if let Some(e) = last_error {
-                        cs.last_error = e;
-                    }
-                };
-                publish(&ledger, label.clone(), None);
-                if label.is_some() {
-                    emit_changed(&app);
-                    let result = match (&request, &job) {
-                        (Some(r), _) => run_request(&state, c, &shared.github_token, r),
-                        (_, Some(ClaudeJob::Batch { repo, numbers })) => {
-                            run_batch(&state, c, repo, numbers)
-                        }
-                        (_, Some(ClaudeJob::Group { repo })) => run_group(&state, c, repo),
-                        _ => Ok(0.0),
-                    };
-                    let done = Utc::now();
-                    let outcome = match result {
-                        Ok(cost) => {
-                            ledger.record(done, cost);
-                            None
-                        }
-                        Err(e) => {
-                            eprintln!("claude: {e}");
-                            backoff_until = Some(done + chrono::Duration::seconds(CLAUDE_BACKOFF));
-                            Some(e)
-                        }
-                    };
-                    if let Err(e) = ledger.save(&state.dir) {
-                        eprintln!("could not save the Claude ledger: {e}");
-                    }
-                    publish(&ledger, None, Some(outcome));
-                    emit_changed(&app);
-                    // Asking by hand goes straight on to any others queued.
-                    if !state.claude_requests.lock().unwrap().is_empty() {
-                        continue;
-                    }
+                if !claude_turn(&app, &mut turns) {
+                    let _ = rx.recv_timeout(CLAUDE_TICK);
                 }
-                let _ = rx.recv_timeout(CLAUDE_TICK);
             }
         })
         .expect("spawn Claude thread");

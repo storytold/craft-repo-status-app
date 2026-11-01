@@ -56,6 +56,10 @@ header { display: flex; align-items: center; gap: 14px; padding: 8px 10px 8px 15
 .badge { font-variant-numeric: tabular-nums; opacity: .75; margin-left: 2px; }
 .badge.hot:not(:empty) { color: var(--bad); opacity: 1; font-weight: 600; }
 .badge.good:not(:empty) { color: var(--good); opacity: 1; font-weight: 600; }
+.kinds { display: flex; flex-wrap: wrap; gap: 3px; padding-left: 12px; border-left: 1px solid var(--border); }
+.kind { border: 1px solid var(--border); background: none; color: var(--muted); padding: 0 7px; border-radius: 10px; font-size: 11px; white-space: nowrap; text-decoration: line-through; opacity: .65; }
+.kind:hover { color: var(--fg); opacity: 1; }
+.kind[aria-pressed="true"] { background: var(--surface); color: var(--fg); text-decoration: none; opacity: 1; }
 .views.sub { padding-left: 12px; border-left: 1px solid var(--border); }
 .crumbs { display: flex; align-items: center; gap: 5px; min-width: 0; color: var(--muted); white-space: nowrap; overflow: hidden; }
 .crumbs:empty { display: none; }

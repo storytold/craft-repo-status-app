@@ -34,6 +34,55 @@ fn main() {
     }
 }
 
+/// Lists `repo` and who can write to it, then inspects its `details` best PRs.
+fn fetch_repo(
+    gh: &GitHub,
+    store: &mut Store,
+    repo: &String,
+    details: usize,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let now = Utc::now();
+    let d = store.repo_mut(repo);
+    let spends = gh.list_full(repo, d, now, &mut |_| {})?;
+    let (roster, more) = gh.roster(repo, now)?;
+    d.roster = roster;
+    let left = more.last().and_then(|s| s.remaining);
+    let cost: u64 = spends.iter().chain(&more).map(|s| s.cost).sum();
+    println!("{repo}: {} open, {cost} points, {left:?} left", d.prs.len());
+    let mut pending: Vec<(i32, DetailRef)> = d
+        .prs
+        .values()
+        .filter_map(|p| {
+            detail_priority(p, now).map(|s| {
+                (
+                    s,
+                    DetailRef {
+                        repo: repo.clone(),
+                        number: p.number,
+                        id: p.id.clone(),
+                    },
+                )
+            })
+        })
+        .collect();
+    pending.sort_by_key(|(s, _)| std::cmp::Reverse(*s));
+    pending.truncate(details);
+    for chunk in pending.chunks(BATCH) {
+        let refs: Vec<DetailRef> = chunk.iter().map(|(_, r)| r.clone()).collect();
+        let (results, spend) = gh.details(&refs, now)?;
+        println!("  inspected {} ({} points)", refs.len(), spend.cost);
+        let d = store.repo_mut(repo);
+        for (r, res) in results {
+            if let (Some(res), Some(p)) = (res, d.prs.get_mut(&r.number)) {
+                res.apply(p, now);
+            }
+        }
+    }
+    refresh_groups(store.repo_mut(repo));
+    store.save(repo)?;
+    Ok(())
+}
+
 fn run(
     fetch: &[String],
     details: usize,
@@ -56,48 +105,9 @@ fn run(
             resolve_token(&shared.github_token)?.value,
             shared_cache.clone(),
         )?;
-        let now = Utc::now();
         for repo in fetch {
             let _lease = shared_cache.lease(std::time::Duration::from_secs(180));
-            let d = store.repo_mut(repo);
-            let spends = gh.list_full(repo, d, now, &mut |_| {})?;
-            let (roster, more) = gh.roster(repo, now)?;
-            d.roster = roster;
-            let left = more.last().and_then(|s| s.remaining);
-            let cost: u64 = spends.iter().chain(&more).map(|s| s.cost).sum();
-            println!("{repo}: {} open, {cost} points, {left:?} left", d.prs.len());
-            let mut pending: Vec<(i32, DetailRef)> = d
-                .prs
-                .values()
-                .filter_map(|p| {
-                    detail_priority(p, now).map(|s| {
-                        (
-                            s,
-                            DetailRef {
-                                repo: repo.clone(),
-                                number: p.number,
-                                id: p.id.clone(),
-                            },
-                        )
-                    })
-                })
-                .collect();
-            pending.sort_by_key(|(s, _)| std::cmp::Reverse(*s));
-            pending.truncate(details);
-            for chunk in pending.chunks(BATCH) {
-                let refs: Vec<DetailRef> = chunk.iter().map(|(_, r)| r.clone()).collect();
-                let (results, spend) = gh.details(&refs, now)?;
-                println!("  inspected {} ({} points)", refs.len(), spend.cost);
-                let d = store.repo_mut(repo);
-                for (r, res) in results {
-                    if let (Some(res), Some(p)) = (res, d.prs.get_mut(&r.number)) {
-                        res.apply(p, now);
-                    }
-                }
-            }
-            let d = store.repo_mut(repo);
-            refresh_groups(d);
-            store.save(repo)?;
+            fetch_repo(&gh, &mut store, repo, details)?;
         }
     }
 

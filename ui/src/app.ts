@@ -5,6 +5,7 @@
 import {
   COLUMNS, RECENT, WINDOWS, MANUAL, windowById, value, orderedEntries, nextSort, dropIndex,
   freshness, ago, formatRate, totals, urgentAcross, tokenStatus, isRefreshing, isThirdParty,
+  REPO_KINDS, isRepoHidden, toggleKind, manualOrder, reorderVisible,
 } from './model.ts';
 import type { Column, Meta, RepoEntry, Snapshot, Sort } from './model.ts';
 import { startPrs } from './pr-app.ts';
@@ -27,6 +28,8 @@ interface State {
   window: string;
   urgentRepo: string;
   criticalOnly: boolean;
+  /** The ids of the REPO_KINDS toggled off. */
+  hiddenKinds: string[];
 }
 
 // ───────────────────────────── formatting ─────────────────────────────
@@ -62,6 +65,7 @@ export function start(api: Api, prRoute?: Route): () => void {
     window: windowById(load('window', '')).id,
     urgentRepo: '',
     criticalOnly: load('criticalOnly', false),
+    hiddenKinds: load<string[]>('hiddenKinds', []),
   };
 
   function openUrl(url: string, ev?: Event): void {
@@ -216,9 +220,14 @@ export function start(api: Api, prRoute?: Route): () => void {
     return i > 0 && COLUMNS[i - 1]!.group !== COLUMNS[i]!.group ? 'group-start' : '';
   }
 
+  /** The repos the toggles beside the tabs leave showing. */
+  const shownRepos = (snap: Snapshot): RepoEntry[] =>
+    snap.repos.filter((r) => !isRepoHidden(r.repo, r.category, state.hiddenKinds));
+
   function renderTable(snap: Snapshot): void {
     renderHead();
-    const rows = orderedEntries(snap.repos, state.sort, state.order, state.window);
+    const shown = shownRepos(snap);
+    const rows = orderedEntries(shown, state.sort, state.order, state.window);
     const now = Date.now();
     $('tbody').replaceChildren(...rows.map((e) => {
       const stale = !e.fetched_at || now - Date.parse(e.fetched_at) > snap.stale_after_secs * 1000;
@@ -235,11 +244,12 @@ export function start(api: Api, prRoute?: Route): () => void {
       }, COLUMNS.map((c, i) => el('td', { class: groupStart(i) }, cell(e, c))));
     }));
     if (!rows.length) {
-      $('tbody').replaceChildren(el('tr', {}, el('td', { colspan: COLUMNS.length, class: 'empty' }, 'No repositories configured — Edit config.')));
+      const why = snap.repos.length ? 'Every repo is hidden by the toggles beside the tabs.' : 'No repositories configured — Edit config.';
+      $('tbody').replaceChildren(el('tr', {}, el('td', { colspan: COLUMNS.length, class: 'empty' }, why)));
     }
-    const t = totals(snap.repos, state.window);
+    const t = totals(shown, state.window);
     $('tfoot').replaceChildren(el('tr', {}, COLUMNS.map((c, i) =>
-      el('td', { class: groupStart(i) }, i === 0 ? `${snap.repos.length} repos` : c.kind === 'num' ? num(Math.round(t[c.key] ?? 0)) : ''))));
+      el('td', { class: groupStart(i) }, i === 0 ? `${shown.length} repos` : c.kind === 'num' ? num(Math.round(t[c.key] ?? 0)) : ''))));
   }
 
   // ───────────────────────────── row dragging ─────────────────────────────
@@ -296,7 +306,8 @@ export function start(api: Api, prRoute?: Route): () => void {
     // The click that follows this pointerup must not open the urgent view.
     justDragged = true;
     setTimeout(() => { justDragged = false; });
-    state.order = [...$('tbody').children].map((r) => (r as HTMLElement).dataset.repo ?? '');
+    const dragged = [...$('tbody').children].map((r) => (r as HTMLElement).dataset.repo ?? '');
+    state.order = reorderVisible(manualOrder(state.snap?.repos ?? [], state.order).map((r) => r.repo), dragged);
     state.sort = { key: MANUAL };
     save('order', state.order);
     save('sort', state.sort);
@@ -308,12 +319,14 @@ export function start(api: Api, prRoute?: Route): () => void {
   }
 
   function renderUrgent(snap: Snapshot): void {
+    const shown = shownRepos(snap);
+    if (!shown.some((r) => r.repo === state.urgentRepo)) state.urgentRepo = '';
     const sel = $<HTMLSelectElement>('urgent-repo');
     sel.replaceChildren(el('option', { value: '' }, 'All repositories'),
-      ...snap.repos.map((r) => el('option', { value: r.repo }, shortName(r.repo))));
+      ...shown.map((r) => el('option', { value: r.repo }, shortName(r.repo))));
     sel.value = state.urgentRepo;
     $<HTMLInputElement>('critical-only').checked = state.criticalOnly;
-    const items = urgentAcross(snap.repos, { repo: state.urgentRepo, criticalOnly: state.criticalOnly });
+    const items = urgentAcross(shown, { repo: state.urgentRepo, criticalOnly: state.criticalOnly });
     const SEVERE = /crash|panic|freeze|hang|data loss|corruption|won't|blank|security/;
     $('urgent-list').replaceChildren(...items.map((u) => {
       const a = Math.min(1, u.score / 90) * 0.5;
@@ -354,9 +367,10 @@ export function start(api: Api, prRoute?: Route): () => void {
 
     const failing = snap.repos.filter((r) => r.error);
     // A snapshot-wide problem (a broken config, a rate limit) matters on every tab.
+    const failures = failing.map((r) => `${shortName(r.repo)} (${r.error})`).join('; ');
     const msgs = [
       snap.error,
-      state.view !== 'prs' && failing.length ? `${failing.length} repo${failing.length > 1 ? 's' : ''} failed last poll: ${failing.map((r) => `${shortName(r.repo)} (${r.error})`).join('; ')}` : null,
+      state.view !== 'prs' && failing.length ? `${failing.length} repo${failing.length > 1 ? 's' : ''} failed last poll: ${failures}` : null,
     ].filter(Boolean);
     $('banner').hidden = !msgs.length;
     $('banner').textContent = msgs.join(' — ');
@@ -368,10 +382,11 @@ export function start(api: Api, prRoute?: Route): () => void {
     $('token').textContent = token.text;
     $('token').title = token.title;
     $('token').classList.toggle('bad', token.bad);
-    const critical = snap.repos.reduce((n, r) => n + (r.stats?.critical_issues ?? 0), 0);
+    const shown = shownRepos(snap);
+    const critical = shown.reduce((n, r) => n + (r.stats?.critical_issues ?? 0), 0);
     $('urgent-count').textContent = critical ? String(critical) : '';
     $('urgent-count').title = `${critical} critical open issues`;
-    $('repo-count').textContent = String(snap.repos.length);
+    $('repo-count').textContent = String(shown.length);
   }
 
   function render(): void {
@@ -417,6 +432,29 @@ export function start(api: Api, prRoute?: Route): () => void {
   // ───────────────────────────── wiring ─────────────────────────────
 
   const prs = startPrs(api, prRoute);
+  prs.setHiddenKinds(state.hiddenKinds);
+
+  const kindToggles = REPO_KINDS.map((k) => el('button', {
+    class: 'kind',
+    'data-kind': k.id,
+    onclick: () => {
+      state.hiddenKinds = toggleKind(state.hiddenKinds, k.id);
+      save('hiddenKinds', state.hiddenKinds);
+      renderKinds();
+      prs.setHiddenKinds(state.hiddenKinds);
+      render();
+    },
+  }, k.label));
+  $('repo-kinds').replaceChildren(...kindToggles);
+
+  function renderKinds(): void {
+    REPO_KINDS.forEach((k, i) => {
+      const on = !state.hiddenKinds.includes(k.id);
+      kindToggles[i]!.setAttribute('aria-pressed', String(on));
+      kindToggles[i]!.title = `${on ? 'Hide' : 'Show'} ${k.label.toLowerCase()} on every tab`;
+    });
+  }
+  renderKinds();
 
   document.querySelectorAll<HTMLElement>('[data-view]').forEach((b) => b.addEventListener('click', () => {
     const view = asView(b.dataset.view ?? null);
@@ -441,7 +479,7 @@ export function start(api: Api, prRoute?: Route): () => void {
   document.addEventListener('keydown', (e) => {
     const mod = e.metaKey || e.ctrlKey;
     if (state.view === 'prs' && prs.key(e)) e.preventDefault();
-    else if (e.key === 'Escape') api.invoke('hide_window');
+    else if (e.key === 'Escape') void api.invoke('hide_window');
     else if (mod && e.key.toLowerCase() === 'r') { e.preventDefault(); refresh(); }
     else if (mod && e.key === '1') { e.preventDefault(); setView('repos'); }
     else if (mod && e.key === '2') { e.preventDefault(); setView('prs'); }

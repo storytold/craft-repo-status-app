@@ -325,6 +325,46 @@ export function isThirdParty(repo: string): boolean {
   return !FIRST_PARTY_OWNERS.includes(owner);
 }
 
+// ───────────────────────────── which repos show ─────────────────────────────
+
+/** A kind of repo the toggles beside the tabs can hide. */
+export interface RepoKind {
+  id: string;
+  label: string;
+  includes(repo: string, category: RepoCategory | undefined): boolean;
+}
+
+const ofCategory = (category: RepoCategory) => (_: string, c: RepoCategory | undefined): boolean => c === category;
+
+export const REPO_KINDS: readonly RepoKind[] = [
+  { id: 'third_party', label: '3rd party', includes: (repo) => isThirdParty(repo) },
+  { id: 'app', label: 'Apps', includes: ofCategory('app') },
+  { id: 'library', label: 'Libraries', includes: ofCategory('library') },
+  { id: 'assets', label: 'Assets', includes: ofCategory('assets') },
+  { id: 'ci', label: 'CI', includes: ofCategory('ci') },
+  { id: 'tooling', label: 'Tooling', includes: ofCategory('tooling') },
+];
+
+/** Whether any kind this repo is has been hidden: a third-party app goes with either toggle. */
+export function isRepoHidden(repo: string, category: RepoCategory | undefined, hidden: readonly string[]): boolean {
+  return REPO_KINDS.some((k) => hidden.includes(k.id) && k.includes(repo, category));
+}
+
+/** `hidden` with `id` flipped. */
+export function toggleKind(hidden: readonly string[], id: string): string[] {
+  return hidden.includes(id) ? hidden.filter((k) => k !== id) : [...hidden, id];
+}
+
+/**
+ * The manual order after dragging among the visible rows: hidden repos keep their
+ * places in `all` (the previous order), and the visible ones fill the rest as dragged.
+ */
+export function reorderVisible(all: readonly string[], visible: readonly string[]): string[] {
+  const shown = new Set(visible);
+  const next = visible[Symbol.iterator]();
+  return all.map((repo) => (shown.has(repo) ? next.next().value ?? repo : repo));
+}
+
 // ───────────────────────────── freshness ─────────────────────────────
 
 export function isStale(entry: RepoEntry, staleAfterSecs: number, now: number = Date.now()): boolean {

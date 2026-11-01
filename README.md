@@ -34,6 +34,12 @@ CodeRabbit's findings and Claude's summaries. Everything runs locally: no server
 | **PRs** | `⌘2` | Reviewing open PRs: grades, CodeRabbit findings, Claude's summaries | left out |
 | **Fix first** | `⌘3` | Open issues most worth fixing | shown, tagged `3P` |
 
+The chips beside the tabs show or hide kinds of repo on every tab: **3rd party**, **Apps**,
+**Libraries**, **Assets**, **CI** and **Tooling**. A repo hides if any kind it is has been
+turned off, so solidcraft goes with either 3rd party or Apps. Hiding only changes what's on
+screen, including totals and tab counts: the repo keeps being fetched, and fetch errors still
+show. The choice is remembered.
+
 ## Downloads
 
 The default list covers the apps and also libraries, assets, CI and tooling repos.

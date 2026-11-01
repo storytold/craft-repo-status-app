@@ -13,11 +13,12 @@
         <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M2 14V9M6 14V6M10 14V4M14 14V1"/></svg>
         <span data-tauri-drag-region>Craft Status</span>
       </div>
-      <nav class="views" role="tablist">
+      <nav class="views" role="tablist" aria-label="Tabs">
         <button class="view" data-view="repos" role="tab" title="Downloads (⌘1)">Downloads <span class="badge" id="repo-count"></span></button>
         <button class="view" data-view="prs" role="tab" title="PRs (⌘2)">PRs <span class="badge good" id="prs-count"></span></button>
         <button class="view" data-view="urgent" role="tab" title="Fix first (⌘3)">Fix first <span class="badge hot" id="urgent-count"></span></button>
       </nav>
+      <div class="kinds" id="repo-kinds" role="group" aria-label="Which repos to show"></div>
       <nav class="views sub" id="pr-nav" aria-label="PR views" hidden>
         <button class="view" data-pr-view="apps">Repos <span class="badge" id="apps-count"></span></button>
         <button class="view" data-pr-view="queue">Review queue <span class="badge good" id="queue-count"></span></button>

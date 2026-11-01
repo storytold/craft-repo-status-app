@@ -454,3 +454,18 @@ test('Esc on the PR tab closes the help panel when leaving the tab too', async (
   assert.equal(h.$('#help-panel'), null);
   assert.equal(h.$('#repos-view')!.hidden, false);
 });
+
+test('the toggles hide repos and their PRs from the tables, tab count and queue', async () => {
+  const h = await setup({ repos: [row({ repo: 'o/alpha', category: 'app' }), row({ repo: 'o/beta', category: 'library', reviewable: 4 })] });
+  assert.deepEqual(appRows(h), ['o/alpha', 'o/beta']);
+  assert.equal(h.$('#prs-count')!.textContent, '7');
+  (h.$('[data-kind="library"]') as HTMLElement).click();
+  assert.deepEqual(appRows(h), ['o/alpha']);
+  assert.equal(h.$('#prs-count')!.textContent, '2');
+  assert.match(h.$('#apps-table tfoot')!.textContent!, /All repos/);
+  (h.$('[data-pr-view="queue"]') as HTMLElement).click();
+  await tick();
+  assert.deepEqual(prRows(h), [], 'the queued PR is in the hidden repo');
+  (h.$('[data-kind="library"]') as HTMLElement).click();
+  assert.deepEqual(prRows(h), [9]);
+});

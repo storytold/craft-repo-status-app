@@ -12,7 +12,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::config::Config;
-use crate::model::{Ease, Pr, PrState, RabbitStatus, RepoData, Severity, Tier};
+use crate::model::{Ease, Pr, PrDetail, PrState, RabbitStatus, RepoData, Severity, Tier};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 #[serde(default)]
@@ -262,98 +262,150 @@ pub fn headline(s: &Signals) -> PrState {
     }
 }
 
-/// Runs the heuristics over `pr`, written by `author`.
-pub fn assess(pr: &Pr, author: &crate::assess::AuthorInfo, cfg: &Config) -> Assessment {
-    let mut a = Assessment {
-        ci: ci_state(pr),
-        ..Default::default()
-    };
-    let detail = pr.current_detail().or(pr.detail.as_ref());
-    a.inspected = pr.current_detail().is_some();
-    let conflicted = pr.mergeable == "CONFLICTING" || pr.merge_state == "DIRTY";
-    let changes_requested = pr.review_decision.as_deref() == Some("CHANGES_REQUESTED");
-    let approved = pr.review_decision.as_deref() == Some("APPROVED");
+/// What the inspected detail of a PR adds up to, for the heuristics below.
+struct Read {
+    critical: i32,
+    major: i32,
+    minor: i32,
+    trivial: i32,
+    heavy: i32,
+    human_open: u64,
+    security_checks_failed: Vec<String>,
+    rabbit: RabbitStatus,
+    inspected_ever: bool,
+    has_body: bool,
+    long_body: bool,
+    linked: bool,
+    touches_code: bool,
+    /// Lines changed, less lockfiles and generated files.
+    real_lines: u64,
+    /// How many top-level areas of the repo it changes.
+    areas: usize,
+}
 
-    let (mut critical, mut major, mut minor, mut trivial, mut heavy) =
-        (0i32, 0i32, 0i32, 0i32, 0i32);
-    let mut human_open = 0;
-    let mut security_check_failed = vec![];
-    let mut rabbit = RabbitStatus::None;
-    let (mut has_body, mut long_body, mut linked) = (false, false, false);
-    let mut real_lines = pr.lines();
-    let mut tops = std::collections::BTreeSet::new();
-    if let Some(d) = detail {
-        for f in d.findings.iter().filter(|f| f.active()) {
-            match f.severity {
-                Severity::Critical => critical += 1,
-                Severity::Major => major += 1,
-                Severity::Minor => minor += 1,
-                Severity::Trivial => trivial += 1,
-            }
-            if f.effort.eq_ignore_ascii_case("heavy lift") {
-                heavy += 1;
-            }
-            match (f.severity.is_flag(), f.security) {
-                (true, true) => a.security_flags += 1,
-                (false, true) => a.security_nits += 1,
-                _ => {}
-            }
+impl Read {
+    fn flags(&self) -> i32 {
+        self.critical + self.major
+    }
+
+    fn findings(&self) -> i32 {
+        self.flags() + self.minor + self.trivial
+    }
+}
+
+/// Whether the author can already change anything `sensitive_paths` guards.
+fn can_write(pr: &Pr, author: &AuthorInfo) -> bool {
+    author.tier == Tier::Bot
+        || author
+            .permission
+            .as_deref()
+            .is_some_and(|p| matches!(p, "WRITE" | "MAINTAIN" | "ADMIN"))
+        || matches!(pr.association.as_str(), "OWNER" | "MEMBER" | "COLLABORATOR")
+}
+
+fn count_findings(d: &PrDetail, r: &mut Read, a: &mut Assessment) {
+    for f in d.findings.iter().filter(|f| f.active()) {
+        match f.severity {
+            Severity::Critical => r.critical += 1,
+            Severity::Major => r.major += 1,
+            Severity::Minor => r.minor += 1,
+            Severity::Trivial => r.trivial += 1,
         }
-        a.rabbit_flags = (critical + major) as u64;
-        a.rabbit_nits = (minor + trivial) as u64;
-        human_open = d.human_threads_open;
-        rabbit = d.rabbit;
-        security_check_failed = d
-            .checks
-            .iter()
-            .filter(|c| is_security_check(&c.name) && check_failed(&c.state))
-            .map(|c| c.name.clone())
-            .collect();
-        let len = d.body.trim().chars().count();
-        has_body = len >= 40;
-        long_body = len >= 200;
-        linked = !d.linked_issues.is_empty();
-        a.tests_touched = d.files.iter().any(|f| is_test(&f.path));
-        a.deps_changed = d.files.iter().any(|f| {
-            let name = f.path.rsplit('/').next().unwrap_or(&f.path);
-            matches!(name, "Cargo.lock" | "package-lock.json")
-        });
-        let generated: u64 = d
-            .files
-            .iter()
-            .filter(|f| is_lock_or_generated(&f.path))
-            .map(|f| f.additions + f.deletions)
-            .sum();
-        real_lines = real_lines.saturating_sub(generated);
-        for f in d.files.iter().filter(|f| !is_lock_or_generated(&f.path)) {
-            tops.insert(f.path.split('/').take(2).collect::<Vec<_>>().join("/"));
+        if f.effort.eq_ignore_ascii_case("heavy lift") {
+            r.heavy += 1;
         }
-        let writer = author.tier == Tier::Bot
-            || author
-                .permission
-                .as_deref()
-                .is_some_and(|p| matches!(p, "WRITE" | "MAINTAIN" | "ADMIN"))
-            || matches!(pr.association.as_str(), "OWNER" | "MEMBER" | "COLLABORATOR");
-        if !writer {
-            a.sensitive_paths = d
-                .files
-                .iter()
-                .filter(|f| {
-                    cfg.sensitive_paths
-                        .iter()
-                        .any(|s| f.path.contains(s.as_str()))
-                })
-                .map(|f| f.path.clone())
-                .collect();
+        match (f.severity.is_flag(), f.security) {
+            (true, true) => a.security_flags += 1,
+            (false, true) => a.security_nits += 1,
+            _ => {}
         }
     }
+    a.rabbit_flags = r.flags() as u64;
+    a.rabbit_nits = (r.minor + r.trivial) as u64;
+}
+
+fn read_files(d: &PrDetail, r: &mut Read, a: &mut Assessment) {
+    a.tests_touched = d.files.iter().any(|f| is_test(&f.path));
+    a.deps_changed = d.files.iter().any(|f| {
+        let name = f.path.rsplit('/').next().unwrap_or(&f.path);
+        matches!(name, "Cargo.lock" | "package-lock.json")
+    });
+    r.touches_code = d.files.iter().any(|f| is_code(&f.path));
+    let generated: u64 = d
+        .files
+        .iter()
+        .filter(|f| is_lock_or_generated(&f.path))
+        .map(|f| f.additions + f.deletions)
+        .sum();
+    r.real_lines = r.real_lines.saturating_sub(generated);
+    let areas: std::collections::BTreeSet<String> = d
+        .files
+        .iter()
+        .filter(|f| !is_lock_or_generated(&f.path))
+        .map(|f| f.path.split('/').take(2).collect::<Vec<_>>().join("/"))
+        .collect();
+    r.areas = areas.len();
+}
+
+fn read_detail(pr: &Pr, author: &AuthorInfo, cfg: &Config, a: &mut Assessment) -> Read {
+    let mut r = Read {
+        critical: 0,
+        major: 0,
+        minor: 0,
+        trivial: 0,
+        heavy: 0,
+        human_open: 0,
+        security_checks_failed: vec![],
+        rabbit: RabbitStatus::None,
+        inspected_ever: false,
+        has_body: false,
+        long_body: false,
+        linked: false,
+        touches_code: false,
+        real_lines: pr.lines(),
+        areas: 0,
+    };
+    let Some(d) = pr.current_detail().or(pr.detail.as_ref()) else {
+        return r;
+    };
+    r.inspected_ever = true;
+    count_findings(d, &mut r, a);
+    read_files(d, &mut r, a);
+    r.human_open = d.human_threads_open;
+    r.rabbit = d.rabbit;
+    r.security_checks_failed = d
+        .checks
+        .iter()
+        .filter(|c| is_security_check(&c.name) && check_failed(&c.state))
+        .map(|c| c.name.clone())
+        .collect();
+    let len = d.body.trim().chars().count();
+    r.has_body = len >= 40;
+    r.long_body = len >= 200;
+    r.linked = !d.linked_issues.is_empty();
+    if !can_write(pr, author) {
+        a.sensitive_paths = d
+            .files
+            .iter()
+            .filter(|f| {
+                cfg.sensitive_paths
+                    .iter()
+                    .any(|s| f.path.contains(s.as_str()))
+            })
+            .map(|f| f.path.clone())
+            .collect();
+    }
+    r
+}
+
+fn note_security(r: &Read, a: &mut Assessment) {
     if a.security_flags > 0 {
         a.security_reasons.push(format!(
             "{} CodeRabbit security finding(s)",
             a.security_flags
         ));
     }
-    for c in &security_check_failed {
+    for c in &r.security_checks_failed {
         a.security_flags += 1;
         a.security_reasons.push(format!("{c} failed"));
     }
@@ -363,55 +415,59 @@ pub fn assess(pr: &Pr, author: &crate::assess::AuthorInfo, cfg: &Config) -> Asse
             a.sensitive_paths.len()
         ));
     }
+}
 
-    // Flags.
-    a.conflicted = conflicted;
-    a.approved = approved;
-    a.changes_requested = changes_requested;
-    a.approval_stale = approved && pr.approved_on_head.is_empty();
-    let mut problems = vec![];
+fn problems(r: &Read, a: &Assessment) -> Vec<String> {
+    let mut out = vec![];
     if a.ci == "failure" {
-        problems.push("CI is failing".to_string());
+        out.push("CI is failing".to_string());
     }
-    if changes_requested {
-        problems.push("A reviewer requested changes".to_string());
+    if a.changes_requested {
+        out.push("A reviewer requested changes".to_string());
     }
-    if critical + major > 0 {
-        problems.push(format!(
-            "{} unresolved CodeRabbit flag(s)",
-            critical + major
-        ));
+    if r.flags() > 0 {
+        out.push(format!("{} unresolved CodeRabbit flag(s)", r.flags()));
     }
-    if !security_check_failed.is_empty() {
-        problems.push(format!(
+    if !r.security_checks_failed.is_empty() {
+        out.push(format!(
             "Security check failed: {}",
-            security_check_failed.join(", ")
+            r.security_checks_failed.join(", ")
         ));
     }
-    if human_open > 0 {
-        problems.push(format!("{human_open} unresolved review conversation(s)"));
+    if r.human_open > 0 {
+        out.push(format!(
+            "{} unresolved review conversation(s)",
+            r.human_open
+        ));
     }
-    let mut running = vec![];
+    out
+}
+
+fn still_running(pr: &Pr, r: &Read, a: &Assessment) -> Vec<String> {
+    let mut out = vec![];
     if a.ci == "pending" {
-        running.push("CI is still running".to_string());
+        out.push("CI is still running".to_string());
     }
-    if rabbit == RabbitStatus::InProgress {
-        running.push("CodeRabbit is still reviewing".to_string());
+    if r.rabbit == RabbitStatus::InProgress {
+        out.push("CodeRabbit is still reviewing".to_string());
     }
     if pr.mergeable == "UNKNOWN" || pr.mergeable.is_empty() {
-        running.push("GitHub hasn't worked out mergeability yet".to_string());
+        out.push("GitHub hasn't worked out mergeability yet".to_string());
     }
+    out
+}
 
-    // Ease.
-    let mut ease = vec![];
-    let (pts, label) = match real_lines {
+/// The size of the change, in lines and files.
+fn ease_of_size(pr: &Pr, r: &Read) -> Vec<Reason> {
+    let lines = r.real_lines;
+    let (pts, label) = match lines {
         0..50 => (0, "Tiny"),
         50..200 => (1, "Small"),
         200..600 => (2, "Moderate"),
         600..2000 => (4, "Large"),
         _ => (6, "Huge"),
     };
-    ease.push(why(format!("{label} change: {real_lines} lines"), pts));
+    let mut ease = vec![why(format!("{label} change: {lines} lines"), pts)];
     let files = pr.changed_files;
     let pts = match files {
         0..=3 => 0,
@@ -422,23 +478,28 @@ pub fn assess(pr: &Pr, author: &crate::assess::AuthorInfo, cfg: &Config) -> Asse
     if pts > 0 {
         ease.push(why(format!("{files} files"), pts));
     }
-    if tops.len() > 4 {
-        ease.push(why(format!("Spreads across {} areas", tops.len()), 1));
+    if r.areas > 4 {
+        ease.push(why(format!("Spreads across {} areas", r.areas), 1));
     }
-    if conflicted {
+    ease
+}
+
+fn ease_reasons(pr: &Pr, r: &Read, a: &Assessment, author: &AuthorInfo) -> Vec<Reason> {
+    let mut ease = ease_of_size(pr, r);
+    if a.conflicted {
         ease.push(why("Needs a rebase", 2));
     }
     if a.ci == "failure" {
         ease.push(why("CI has to be fixed first", 1));
     }
-    if critical + major > 0 {
+    if r.flags() > 0 {
         ease.push(why(
-            format!("{} CodeRabbit flag(s) to address", critical + major),
-            (critical + major).min(3),
+            format!("{} CodeRabbit flag(s) to address", r.flags()),
+            r.flags().min(3),
         ));
     }
-    if heavy > 0 {
-        ease.push(why(format!("{heavy} heavy-lift finding(s)"), 1));
+    if r.heavy > 0 {
+        ease.push(why(format!("{} heavy-lift finding(s)", r.heavy), 1));
     }
     if !a.sensitive_paths.is_empty() {
         ease.push(why("Touches sensitive paths", 2));
@@ -448,107 +509,81 @@ pub fn assess(pr: &Pr, author: &crate::assess::AuthorInfo, cfg: &Config) -> Asse
         Tier::New => ease.push(why("First-time contributor", 1)),
         _ => {}
     }
-    a.ease_score = ease.iter().map(|r| r.points).sum();
-    a.ease_reasons = ease;
-    a.ease = match a.ease_score {
-        i32::MIN..=2 => Ease::Easy,
-        3..=5 => Ease::Medium,
-        _ => Ease::Hard,
-    };
-    if let Some(claude) = pr.analysis.as_ref().and_then(|c| c.ease) {
-        if claude > a.ease {
-            a.ease = claude;
-            a.ease_raised_by_claude = true;
+    ease
+}
+
+/// What only an inspected PR can say about its quality.
+fn quality_of_detail(r: &Read, a: &Assessment, q: &mut Vec<Reason>) {
+    if r.long_body {
+        q.push(why("Explains itself", 8));
+    } else if !r.has_body {
+        q.push(why("Little or no description", -15));
+    }
+    if r.linked {
+        q.push(why("Closes an issue", 6));
+    }
+    if a.tests_touched {
+        q.push(why("Includes tests", 12));
+    } else if r.touches_code {
+        q.push(why("Changes code without tests", -8));
+    }
+    let penalties = [
+        (r.critical, "critical", (-20 * r.critical).max(-40)),
+        (r.major, "major", (-10 * r.major).max(-30)),
+        (r.minor, "minor", (-3 * r.minor).max(-12)),
+        (r.trivial, "trivial", (-r.trivial).max(-4)),
+    ];
+    for (count, name, points) in penalties {
+        if count > 0 {
+            q.push(why(format!("{count} {name} finding(s)"), points));
         }
     }
+    if r.rabbit == RabbitStatus::Reviewed && r.findings() == 0 {
+        q.push(why("CodeRabbit had nothing to add", 8));
+    }
+    if a.security_flags > 0 {
+        q.push(why("Security flags", -15));
+    }
+}
 
-    // Quality.
+fn quality_reasons(r: &Read, a: &Assessment, author: &AuthorInfo) -> Vec<Reason> {
     let mut q = vec![why("Baseline", 60)];
     match a.ci.as_str() {
         "success" => q.push(why("CI passes", 10)),
         "failure" => q.push(why("CI fails", -20)),
         _ => {}
     }
-    if conflicted {
+    if a.conflicted {
         q.push(why("Merge conflicts", -15));
     }
-    if changes_requested {
+    if a.changes_requested {
         q.push(why("Changes requested", -15));
     }
-    if approved {
+    if a.approved {
         q.push(why("Approved", 10));
     }
-    if real_lines > 10_000 {
+    if r.real_lines > 10_000 {
         q.push(why("Too large to review well", -20));
-    } else if real_lines > 2_000 {
+    } else if r.real_lines > 2_000 {
         q.push(why("Very large", -10));
     }
-    if detail.is_some() {
-        if long_body {
-            q.push(why("Explains itself", 8));
-        } else if !has_body {
-            q.push(why("Little or no description", -15));
-        }
-        if linked {
-            q.push(why("Closes an issue", 6));
-        }
-        let touches_code = detail.is_some_and(|d| d.files.iter().any(|f| is_code(&f.path)));
-        if a.tests_touched {
-            q.push(why("Includes tests", 12));
-        } else if touches_code {
-            q.push(why("Changes code without tests", -8));
-        }
-        if critical > 0 {
-            q.push(why(
-                format!("{critical} critical finding(s)"),
-                (-20 * critical).max(-40),
-            ));
-        }
-        if major > 0 {
-            q.push(why(
-                format!("{major} major finding(s)"),
-                (-10 * major).max(-30),
-            ));
-        }
-        if minor > 0 {
-            q.push(why(
-                format!("{minor} minor finding(s)"),
-                (-3 * minor).max(-12),
-            ));
-        }
-        if trivial > 0 {
-            q.push(why(
-                format!("{trivial} trivial finding(s)"),
-                (-trivial).max(-4),
-            ));
-        }
-        if rabbit == RabbitStatus::Reviewed && critical + major + minor + trivial == 0 {
-            q.push(why("CodeRabbit had nothing to add", 8));
-        }
-        if a.security_flags > 0 {
-            q.push(why("Security flags", -15));
-        }
+    if r.inspected_ever {
+        quality_of_detail(r, a, &mut q);
     }
     if matches!(author.tier, Tier::Core | Tier::Frequent) {
         q.push(why("Track record", 4));
     }
-    a.quality = q.iter().map(|r| r.points).sum::<i32>().clamp(0, 100) as u8;
-    a.quality_reasons = q;
-    a.high_quality = a.inspected && a.quality >= cfg.high_quality;
+    q
+}
 
-    // Headline.
-    a.state = headline(&Signals {
-        draft: pr.is_draft,
-        problem: !problems.is_empty(),
-        conflicted,
-        inspected: a.inspected,
-        running: !running.is_empty(),
-        ci_passed: a.ci == "success",
-        approved: approved && !a.approval_stale,
-        high_quality: a.high_quality,
-    });
+fn state_reasons(
+    pr: &Pr,
+    a: &Assessment,
+    problems: Vec<String>,
+    running: Vec<String>,
+) -> Vec<String> {
     let stale_note = "An approval predates the latest commit, so it doesn't count";
-    a.state_reasons = match a.state {
+    match a.state {
         PrState::Draft => vec!["Marked as a draft".to_string()],
         PrState::NeedsWork => problems,
         PrState::Conflicted => {
@@ -585,7 +620,59 @@ pub fn assess(pr: &Pr, author: &crate::assess::AuthorInfo, cfg: &Config) -> Asse
             }
             why
         }
+    }
+}
+
+/// Runs the heuristics over `pr`, written by `author`.
+pub fn assess(pr: &Pr, author: &crate::assess::AuthorInfo, cfg: &Config) -> Assessment {
+    let mut a = Assessment {
+        ci: ci_state(pr),
+        inspected: pr.current_detail().is_some(),
+        conflicted: pr.mergeable == "CONFLICTING" || pr.merge_state == "DIRTY",
+        changes_requested: pr.review_decision.as_deref() == Some("CHANGES_REQUESTED"),
+        approved: pr.review_decision.as_deref() == Some("APPROVED"),
+        ..Default::default()
     };
+    let r = read_detail(pr, author, cfg, &mut a);
+    note_security(&r, &mut a);
+    a.approval_stale = a.approved && pr.approved_on_head.is_empty();
+    let problems = problems(&r, &a);
+    let running = still_running(pr, &r, &a);
+
+    a.ease_reasons = ease_reasons(pr, &r, &a, author);
+    a.ease_score = a.ease_reasons.iter().map(|r| r.points).sum();
+    a.ease = match a.ease_score {
+        i32::MIN..=2 => Ease::Easy,
+        3..=5 => Ease::Medium,
+        _ => Ease::Hard,
+    };
+    if let Some(claude) = pr.analysis.as_ref().and_then(|c| c.ease) {
+        if claude > a.ease {
+            a.ease = claude;
+            a.ease_raised_by_claude = true;
+        }
+    }
+
+    a.quality_reasons = quality_reasons(&r, &a, author);
+    a.quality = a
+        .quality_reasons
+        .iter()
+        .map(|r| r.points)
+        .sum::<i32>()
+        .clamp(0, 100) as u8;
+    a.high_quality = a.inspected && a.quality >= cfg.high_quality;
+
+    a.state = headline(&Signals {
+        draft: pr.is_draft,
+        problem: !problems.is_empty(),
+        conflicted: a.conflicted,
+        inspected: a.inspected,
+        running: !running.is_empty(),
+        ci_passed: a.ci == "success",
+        approved: a.approved && !a.approval_stale,
+        high_quality: a.high_quality,
+    });
+    a.state_reasons = state_reasons(pr, &a, problems, running);
 
     let notable = pr.reactions >= 3 || pr.comments_total >= 8;
     a.interesting = notable || pr.analysis.as_ref().is_some_and(|c| c.interesting);

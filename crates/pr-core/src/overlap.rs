@@ -134,11 +134,8 @@ fn pairs_sharing<'a>(
     pairs
 }
 
-/// Groups `prs` by shared issues, then files, then near-identical titles.
-pub fn local_groups(prs: &[&Pr]) -> Vec<Group> {
-    let mut links = Links::new(prs.iter().map(|p| p.number));
-    let mut why: HashMap<(u64, u64), String> = HashMap::new();
-
+/// Links PRs naming the same issue; returns which issue each linked PR came in by.
+fn link_by_issue(prs: &[&Pr], links: &mut Links) -> HashMap<u64, u64> {
     let mut by_issue: BTreeMap<u64, Vec<u64>> = BTreeMap::new();
     for p in prs {
         let mut issues = issues_in_title(&p.title);
@@ -160,7 +157,11 @@ pub fn local_groups(prs: &[&Pr]) -> Vec<Group> {
             }
         }
     }
+    issue_of
+}
 
+/// Links PRs changing enough of the same files, noting why.
+fn link_by_files(prs: &[&Pr], links: &mut Links, why: &mut HashMap<(u64, u64), String>) {
     let files_of: HashMap<u64, HashSet<&str>> = prs
         .iter()
         .filter_map(|p| {
@@ -197,7 +198,10 @@ pub fn local_groups(prs: &[&Pr]) -> Vec<Group> {
             why.insert((a, b), format!("{shared} shared file(s), such as {file}"));
         }
     }
+}
 
+/// Links PRs with nearly the same title, noting why.
+fn link_by_title(prs: &[&Pr], links: &mut Links, why: &mut HashMap<(u64, u64), String>) {
     let words: HashMap<u64, HashSet<String>> = prs
         .iter()
         .map(|p| (p.number, title_words(&p.title)))
@@ -219,6 +223,15 @@ pub fn local_groups(prs: &[&Pr]) -> Vec<Group> {
             why.insert((a, b), "Nearly the same title".to_string());
         }
     }
+}
+
+/// Groups `prs` by shared issues, then files, then near-identical titles.
+pub fn local_groups(prs: &[&Pr]) -> Vec<Group> {
+    let mut links = Links::new(prs.iter().map(|p| p.number));
+    let mut why: HashMap<(u64, u64), String> = HashMap::new();
+    let issue_of = link_by_issue(prs, &mut links);
+    link_by_files(prs, &mut links, &mut why);
+    link_by_title(prs, &mut links, &mut why);
 
     let mut clusters: BTreeMap<u64, Vec<u64>> = BTreeMap::new();
     let numbers: Vec<u64> = prs.iter().map(|p| p.number).collect();
