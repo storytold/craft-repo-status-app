@@ -1,6 +1,6 @@
 [package]
 name = "craft-status-app"
-description = "Tray dashboard for the storytold *craft repositories"
+description = "Tray dashboard for the storytold *craft repositories: downloads, PR review and urgent issues"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -13,8 +13,11 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-craft-core = { path = "../craft-core" }
-craft-github = { path = "../craft-github" }
+craft-core.workspace = true
+craft-github.workspace = true
+pr-core.workspace = true
+pr-github.workspace = true
+pr-claude.workspace = true
 tauri = { version = "2", features = ["tray-icon", "image-png", "macos-private-api"] }
 tauri-plugin-global-shortcut = "2"
 serde.workspace = true
