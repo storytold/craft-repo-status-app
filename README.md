@@ -33,6 +33,8 @@ CodeRabbit's findings and Claude's summaries. Everything runs locally: no server
 | **Downloads** | `⌘1` | Download counts and rates, builds, issues and activity for every repo | shown, tagged `3P` |
 | **PRs** | `⌘2` | Reviewing open PRs: grades, CodeRabbit findings, Claude's summaries | left out |
 | **Fix first** | `⌘3` | Open issues most worth fixing | shown, tagged `3P` |
+| **People** | `⌘4` | Open pull requests by work state, and rankings of the people behind them | shown |
+| **My PRs** | `⌘5` | Your open pull requests and what blocks each | the watched repos |
 
 The chips beside the tabs show or hide kinds of repo on every tab: **3rd party**, **Apps**,
 **Libraries**, **Assets**, **CI** and **Tooling**. A repo hides if any kind it is has been
@@ -81,9 +83,18 @@ sort by a column again.
   rpm, flatpak, zips and tarballs. Checksum lists, signatures, `.zsync` delta
   files and updater manifests are left out, because machines fetch them, not
   people.
-- **Fix first** (`⌘2`) ranks open issues across every repo. Each issue shows
+- **Fix first** (`⌘3`) ranks open issues across every repo. Each issue shows
   the reasons behind its score. Click a row in the Repos table to filter the
-  list to that repo. Click an issue to open it on GitHub.
+  list to that repo. Click an issue to open it on GitHub. The caret on a
+  Repos row shows the repo's people and open work under the row instead (see
+  [The People tab](#the-people-tab)).
+- **People** (`⌘4`) shows one row per person with their open pull requests
+  by work state, who each one waits on, and their flow and reviews in a
+  window, or the rankings. With `people.track_record` on, it also shows each
+  contributor's review level per repo. The tab's badge counts the open pull
+  requests held for the owner. See [The People tab](#the-people-tab).
+- **My PRs** (`⌘5`) lists your open pull requests in the configured repos and
+  what blocks each one. See [The My PRs tab](#the-my-prs-tab).
 - **Freshness**: the header shows when the oldest data on screen was fetched,
   and a pill that reads `FRESH`, `REFRESHING` or **`STALE`**. Data is stale
   when any repo has gone `stale_minutes` (default 15) without a successful
@@ -111,6 +122,231 @@ The score is deterministic and simple to read (`crates/craft-core/src/urgency.rs
 Issues labelled `wontfix`, `duplicate` or `invalid` are dropped. For each
 repo, the 100 newest open issues and the 30 most-commented open issues are
 scored.
+
+## The People tab
+
+Every open pull request has one work state, decided by the rules in
+`crates/craft-core/src/people/states.rs` in order: the author stepped back,
+held for the owner, a maintainer's own task, declined in a comment,
+superseded, parked by the author, depends on another pull request, draft, not
+ready, competing pull requests, move to craft-libs, changes requested by a
+maintainer, changes requested by a community reviewer, merge conflict,
+workflow approval, CI failing (from the pull request or inherited from
+`main`), CI running, author answered, community approved, ready to merge and
+awaiting a first response. The first rule that matches gives the state; every
+later match is listed on hover. A maintainer request made at or after a hold
+outranks the hold and waits on both the author and the owner. In repos listed
+in `people.rebase_repos`, a conflict on a contributor's pull request that
+maintainers can push to is a flag.
+
+States read from GitHub fields (draft, mergeability, checks) show plainly.
+States read from comment text carry a dotted underline. Hovering one shows
+the rule, the matched sentence (up to 200 characters) with its author and
+date, the phrase that matched, and the other states that matched; clicking it
+opens the comment on GitHub. A `?` marks low confidence: the two author
+states, a competitor found only through a shared issue, and a close with no
+maintainer response. Counts give the part read from comments, as in
+`3 (2 from comments)`.
+
+A pull request the app has found but whose comments, reviews and events it
+has not read yet shows as **Not read yet**, under its author, with when GitHub
+last saw it change. It waits on nobody, and no rule decides its state until
+the app reads it. Until every record is read, the bar shows
+`N of M timelines read`.
+
+The columns are Open, On them (pull requests waiting on the person: their own
+that wait on the author, ones where they made the last maintainer request or
+comment, and holds they own), On others, Held, Merged, Landed elsewhere,
+Closed (without merging, folded parents and accidental closes left out), To
+merge (median), Landed (merged plus landed elsewhere over everything closed),
+They answer (their median time to answer a maintainer request; a rebase or
+split request is answered only by a push), First response (the median time
+to the first maintainer comment, review or merge on their pull requests) and
+Reviews given. The window picker sets the window for flow and reviews; the
+response times cover all time. The repo picker limits every figure to one
+repo. Every column sorts. A name from the team roster (`people.roster`)
+shows next to the login.
+
+The caret on a person opens one row per repo and the person's detail: open
+work by state, grouped by who it waits on, with the median and longest time in
+state and the five oldest items; the work of others that waits on them; their
+pull requests held for the owner, with the hold's age, who placed it, its
+reason (design, policy, brand, packaging, library, dependency or owner
+decision) and when it was last held again, and the ones they parked
+themselves; their response times and unanswered requests; the reviews,
+requests, holds, merges and closes they gave; their flow by subtype and
+outcome; and where their work went (see below). The bar also shows how old
+the records are, in the alert color past `stale_minutes` or while a repo has
+never been checked.
+
+**Rankings** (the second button in the bar) lists one row per person for
+the window picked, with a selector for three rankings. Every column sorts.
+
+- **Merged**: their merged pull requests; pull requests that landed elsewhere;
+  product lines added and removed, split by commit author; lines in
+  `Cargo.lock`, translation catalogs and `contributors/contributors.json` in a
+  column of their own; changed files; commits they authored in merged pull
+  requests; commits whose `Co-authored-by:` trailer names them (AI co-authors
+  are left out); commits on `main` that belong to no pull request; and active
+  days (UTC days with a commit, a merge or a review). Direct commits come from
+  the history of `main` that the app keeps, so they show for the 7-day and
+  release windows only, once every merged pull request is loaded, and `—`
+  otherwise.
+- **Maintainer**: merges, credited to the merge commit's committer when
+  someone pushed a local merge and to GitHub's merged-by otherwise; reviews of
+  other people's pull requests, split into approved, changes requested and
+  commented, with the number of pull requests reviewed; and review commits
+  (commits in someone else's pull request) with their lines. A merge count
+  with batch merges carries a badge such as `14 in batch pushes`.
+- **Type**: their merged pull requests by type (feature, fix, docs, tests, ci,
+  packaging, dependency, i18n, refactor, perf, release) and product work
+  (feature plus fix). The picker next to the selector sorts by one type. A
+  `?` marks counts whose type a fallback rule decided; hovering it says so.
+
+A merged pull request's product lines are split over its non-merge commits by
+each commit's share of the commits' lines. A commit that an earlier merged
+pull request in the same repo holds counts there only. A commit without a
+linked account, and a pull request whose commits past the first 100 are not
+read yet, credit their share to the author. The type and area come from
+`crates/craft-core/src/people/kind.rs`: the title's Conventional Commits type
+or `Area:` prefix, `Fix #N:`, the changed paths, refactor and perf words, the
+branch prefix and fix words, in that order. In repos listed in
+`people.batch_repos`, merge and landed counts carry an `*` marking them
+unverified. Roster rows without a GitHub login and co-author names without an
+account are listed under the table. While the first load of merged and closed
+pull requests runs, the bar shows how many of each are loaded.
+
+The caret on a person, in Rankings and in the work view, shows where their
+work went in the window: by repository (with their merges, reviews and review
+commits), by area, by type and by directory (two path segments under
+`crates/` and `apps/`, translation catalogs grouped as `translations`). With a
+repo picked, the tables cover that repo alone. Each row gives their merged
+pull requests, their product lines and their share of their own total. Click a
+directory, or press `Enter` or `Space` on it, to list its modules under
+`src/`. Hover an area or a type for the rule that decided it.
+
+**Track record** (the third button, shown only when `people.track_record` is
+on) lists one row per person per repo with a review level: **Trusted**,
+**Review**, **Untrusted** or **Not enough record**. Only confirmed faults that
+GitHub fields show set a level, at most one per pull request
+(`crates/craft-core/src/people/track.rs`):
+
+- a merged pull request reverts the work, unless a later pull request replaced
+  it, the work's merge commit also landed other authors' pull requests (a batch
+  push), the revert was itself reverted, or it was one of three or more reverts
+  within 10 minutes with no failure named. A co-authored pull request is still
+  its author's. The revert names the work by GitHub's "Reverts #N" line, by the
+  work's merge commit or a commit its author wrote on the branch, or, when it
+  names no commit, by quoting the work's title. A revert of a commit someone
+  else pushed to the branch, or of a commit that belongs to no pull request,
+  does not count against the author. A pull request the revert names in a
+  sentence with a defect word is not taken as the replacement;
+- the body ticks "`cargo xtask ci`" while a check on the head failed that
+  passed on the head of `main` when the check ran, is not in
+  `people.flaky_checks` and was not waiting for workflow approval. The app
+  knows `main`'s head at a time only when two sweeps, one at or before that
+  time and one at or after it, saw the same commit there with the same
+  results. It dates the head's checks from the oldest check suite's start to
+  the newest one's. A failure does not count when `main` is not known to have
+  passed that check throughout those times, when it is a failing commit
+  status, when the head has more than 8 check suites, or when the pull request
+  was read before the app recorded commit statuses and suite counts;
+- a maintainer closed it, it landed nowhere, no merged pull request that
+  references it did so or merged within 7 days of the close, no other pull
+  request closed the same issue or competed for it, and the work states did not
+  find it superseded, yielded to another pull request, or closed by accident
+  within an hour of opening;
+- it closed as the copy of a pull request opened more than 12 hours earlier,
+  linked to it and sharing an issue, by a maintainer or by the author more than
+  an hour after opening. A pull request opened after the earlier one closed
+  without landing is a resubmission, not a copy.
+
+A follow-up fix never counts, since the records hold each pull request's
+changed files but not its changed lines. A merged pull request that names the
+work, was opened after the work landed and merged within 14 days of it is
+listed instead. When a sentence naming the work has a defect word (fail,
+broke, regression, crash, wrong, bug and the like) and the pull request
+changes a product file the work changed, it is listed as found by you when you
+wrote it, as a maintainer revision when whoever merged or pushed to the work
+wrote it, and otherwise as a possible follow-up. One that cites the work with a
+precedent phrase such as "in the same way" or "like #N" is listed as a
+precedent, and any other as a possible follow-up with the reason it falls
+short. A sentence with a precedent phrase or a term from
+`people.gate_excluded_terms` is not read as naming a defect.
+
+The fault rate is faults over counted pull requests: those at least 7 days old
+that landed more than 72 hours ago, or that closed as a maintainer's decline or
+a late duplicate. A ticked box on a pull request closed any other way is
+listed but not counted. The rate's Wilson 90% interval is compared with the
+baseline, the pooled rate of the other authors in the repo with a long enough
+record, or of every repo's when the repo has fewer than 5 such authors. The
+baseline has its own Wilson 90% interval, from the pooled faults and counted
+pull requests. Untrusted means the person's lower bound lies above the
+baseline's upper bound. Trusted means the rate is at or below the baseline
+with no fault in the last 30 days. Review is everything else, including a
+lower bound above the baseline that is not above its upper bound. A person
+needs 5 counted pull requests, with 80% of their pull requests at least 7 days
+old decided, before any level but Not enough record. Not enough record also
+shows when no baseline exists, and it shows no rate. A pull request whose
+timeline the app has not read yet is not decided.
+Maintainers (logins with 3 or more merges or closes of others' pull requests
+among the repo's last 200 merged or closed ones, plus `people.maintainers` and
+the owners) and bots get no row. Your own rows, for `people.my_login` or else
+the token's user, follow the others under You and stay out of every baseline.
+
+The rows come grouped by level, the newest fault first, and Not enough record
+by first activity; no column sorts and no rank number shows. The repo picker
+limits the rows to one repo. Hover a level for its rule, the baseline's
+authors and each counted fault. The caret lists every fault and every event
+listed beside them, each with its pull request, date, rule and the other pull
+request, marked "involves you" when that one is yours. A fault in the last 7
+days shows a dated badge, and a first-time contributor a "new to this repo"
+tag. The app works the levels out from the records the People work already
+holds and sends no GitHub request for them, and no other view reads them.
+Reverts pushed straight to `main` without a pull request are not in those
+records, so they do not count.
+
+The caret on a row of the Repos table shows that repo's people for the table's
+window, with their merges, reviews and review commits, and its open work: open
+pull requests by who they wait on and state, the oldest one waiting on a
+maintainer and the first-response queue, the pull requests held for the owner,
+the maintainer and author queues, the checks on `main`, the flow in the window
+(merged by subtype, landed elsewhere, closed by outcome, median time to merge
+and to the first maintainer response, merge methods and mergers), aging and
+stale counts, and pull requests that wait on or compete with another.
+
+## The My PRs tab
+
+The My PRs tab lists the open pull requests whose author is
+`people.my_login`, or the user the GitHub token belongs to when that is empty,
+in the configured repos. It reads the People tab's records and work states.
+The app reads the token's login with one GitHub query on its first pull
+request update after launch, and again after the token changes. The columns
+are Repo, #, Title, Blocker, Reply, Held, Waits on, In state and Opened, and
+every column sorts.
+
+- **Blocker** names the pull request's work state in short words, such as
+  Conflicting, Failing checks, Failing on main, Waiting for approval, Checks
+  running, Changes requested, Draft, Held, Awaiting review, Answered or
+  Ready. It is red when the state waits on you, blue while checks run, plain
+  when it waits on someone else and green when the pull request is approved
+  or ready to merge. A pull request the app has found but not read yet shows
+  Not read yet. By default the list sorts red first, then blue, plain, green
+  and Not read yet, and each group by rule order. Hover the chip for its rule
+  and matched sentence, as in the People tab; click it to open that comment.
+  In repos listed in `people.rebase_repos`, a conflict on a contributor's
+  pull request that maintainers can push to shows as `conflict` next to the
+  chip instead of as Conflicting.
+- **Reply** shows Reply needed when a maintainer request on the pull request
+  has no answer from you and no later approval resolved it (rule 40 of the
+  work states). Hover it for who asked, when and for what; click it to open
+  the request.
+- **Held** shows Held when the pull request is held for the owner, also when
+  a request made after the hold or an earlier rule decided its state. Hover
+  it for how long, by whom and why.
+
+Needs me only shows only the pull requests whose blocker waits on you or that
+need your reply. The tab's badge counts those pull requests.
 
 ## PRs
 
@@ -248,6 +484,26 @@ above the 150 where the Downloads tab's polling pauses itself.
   within about 15 s.
 - `⌘R` or the ⟳ button makes every repo due at once; they are still fetched
   one at a time, stalest first, and a rate-limit pause still holds.
+- The People tab's pull request records are kept up to date by a thread of
+  their own. At launch and after each successful repo fetch, it reads the
+  changed pull requests of the repos whose newest pull request update moved
+  (the fetch reads that time with its other counts), sweeps the open pull
+  requests of a share of the repos so that each is swept every 30 minutes,
+  reads the records the sweep found (yours first, then the most recently
+  updated), and continues the first load of merged and closed pull
+  requests. It reads commit lists and the checks on a head commit in pages
+  of 100, one request a page. Its requests go one at a
+  time and only while no repo is being fetched, so they fill the 20 s gaps.
+  Each run sends at most 30 requests for the reading, the first load and long
+  commit, check and file lists, and below 1,500 points left it reads only the
+  changed lists.
+  When GitHub cannot finish a query (a server error, or an error that names
+  a timeout), it asks again for a smaller page, or splits the batch in two.
+  If GitHub rate-limits one of its requests, fetching
+  pauses as after a rate limit of its own. `craft-fetch --people` runs one
+  such update and prints what it read; quit the app before running it,
+  because both write the same record files. `craft-fetch --states` prints the
+  work states of the kept records without a request.
 - Two caches in `~/Library/Caches/craft-status/` survive restarts:
   - `raw/<owner>@<repo>.json`: each repo's commit authors and issues from the
     last week (or since the latest build). Each poll fetches only what's new
@@ -256,6 +512,9 @@ above the 150 where the Downloads tab's polling pauses itself.
   - `snapshot.json`: what the window shows, saved after each repo. On launch
     the window shows it at once, marked `STALE` if it's old. Repos whose
     data is still fresh aren't refetched at launch.
+  - `prs/<owner>@<repo>.json`: each repo's pull request records for the
+    People tab, saved after each stage of an update; `roster.json` keeps a
+    downloaded roster for an hour. People data stays out of `snapshot.json`.
 - A third cache, `~/Library/Caches/craft-github-cache/`, is shared by this
   polling and the PR tab's. Everything in it can be deleted.
   - `prs/<owner>@<repo>.json`: a ledger of each repo's PRs, which is where the
@@ -286,6 +545,7 @@ The app behaves like the Todo app:
 - The window is chrome-less and semi-transparent, and it appears on every
   Space. It remembers its position and size in `~/.craft_status_state.toml`.
 - `Esc` hides the window (on the PRs tab, once it's back at the top).
+- `⌘1` to `⌘5` switch to Downloads, PRs, Fix first, People and My PRs.
 
 ## Configuration: `~/.craft_status_config.toml`
 
@@ -297,6 +557,39 @@ its `[pr_review]` section, and all of them are optional: a file from before PR r
 moved in just gets the defaults. `~/.craft_pr_review_config.toml` is no longer read,
 so copy any changes you made there into that section (minus `[window]`, `[tray]` and
 `[shortcuts]`, which the main ones cover).
+
+The `[people]` table sets up the People tab:
+
+- `roster` (default empty): the team roster, as the `https://` URL of a
+  sheet's CSV export or a CSV file path. Columns are found by their header:
+  `GitHub` for the login, `Discord` with `user` or `handle`, the first other
+  column with `name` for the display name, `time zone` or `timezone`, and
+  `focus`. The app reads it at runtime; a downloaded copy is kept for an hour.
+- `owner_logins` (default none): the owners of every repo that
+  `[people.repo_owners]` does not list; a pull request held for the owner
+  waits on them. Without owners, a hold waits on a login named after "owner"
+  in the hold's sentence.
+- `[people.repo_owners]`: owners by repo (`"owner/name" = ["login"]`), in
+  place of `owner_logins`. An empty list means no owners.
+- `maintainers` (default none): logins counted as maintainers of every repo,
+  besides the ones found from membership, merges and closes.
+- `rebase_repos`: repos whose maintainers rebase contributors' branches
+  themselves.
+- `batch_repos`: repos that land work through a batch branch; their merge and
+  landed counts are marked unverified.
+- `my_login` (default empty): the GitHub login whose open pull requests the
+  My PRs tab lists. Leave it empty for the user the GitHub token belongs to.
+- `track_record` (default `false`): shows the Track record view in the People
+  tab. While it is `false` the app does not build the view.
+- `track_record_window_days` (default 60, held to 14 to 365): how far back
+  the Track record reads, by the date each pull request was opened.
+- `flaky_checks` (default `{}`): checks by repo, as
+  `{ "owner/name" = ["check"] }`, whose failures never count as a pull
+  request's own in the Track record.
+- `gate_excluded_terms` (default
+  `{ "storytold/vectorcraft" = ["wasm32 clippy"] }`): terms by repo that mark
+  a failure outside the repo's gate. A follow-up whose sentence about a pull
+  request names one is not read as naming a defect.
 
 ## Build, install, test
 
