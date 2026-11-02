@@ -56,7 +56,7 @@ afterEach(async () => { await teardown?.(); teardown = null; });
 const tick = () => new Promise((r) => setTimeout(r, 0));
 
 /** A fresh document with the UI started in it. */
-async function setup({ snap = snapshot(), storage = {} as Record<string, unknown>, meta = {} as Meta } = {}): Promise<Harness> {
+async function setup({ snap = snapshot(), storage = {} as Record<string, unknown>, meta = {} as Meta, snapReply = Promise.resolve() } = {}): Promise<Harness> {
   const win = new Window({ url: 'http://localhost/index.html' });
   win.document.body.innerHTML = BODY;
   for (const [k, v] of Object.entries(storage)) win.localStorage.setItem(k, JSON.stringify(v));
@@ -77,7 +77,7 @@ async function setup({ snap = snapshot(), storage = {} as Record<string, unknown
   const api: Api = {
     async invoke<T>(cmd: string, args?: Record<string, unknown>) {
       calls.push({ cmd, args });
-      if (cmd === 'get_snapshot') return snap as T;
+      if (cmd === 'get_snapshot') { await snapReply; return snap as T; }
       if (cmd === 'get_meta') return meta as T;
       return null as T;
     },
@@ -335,6 +335,344 @@ test('the window picker switches the activity columns and remembers', async () =
 test('an empty config says so', async () => {
   const h = await setup({ snap: snapshot([]) });
   assert.match(h.doc.getElementById('tbody')!.textContent ?? '', /No repositories configured/);
+});
+
+// ───────────────────────────── live updates ─────────────────────────────
+
+/** The default snapshot with some repos' stats, entry fields or snapshot fields changed. */
+function changed(stats: Record<string, Partial<RepoStats>>, entries: Record<string, Partial<RepoEntry>> = {}, extra: Partial<Snapshot> = {}): Snapshot {
+  const s = snapshot();
+  s.repos = s.repos.map((e) => {
+    const name = e.repo.slice(2);
+    return { ...e, ...entries[name], stats: e.stats && { ...e.stats, ...stats[name] } };
+  });
+  return { ...s, ...extra };
+}
+
+const hover = (h: Harness, type: 'pointerenter' | 'pointerleave') =>
+  h.doc.getElementById('tbody')!.dispatchEvent(new h.win.PointerEvent(type) as unknown as Event);
+
+const column = (key: string): number => COLUMNS.findIndex((c) => c.key === key);
+const FETCHED = column('fetched');
+const URGENCY = column('urgency');
+const PRS = column('open_prs');
+
+test('a snapshot updates rows in place', async () => {
+  const h = await setup();
+  const alpha = h.row('alpha');
+  const prs = alpha.cells[PRS]!;
+  h.emit('craft:snapshot', changed({ alpha: { open_prs: 9 } }));
+  // assert.ok rather than assert.equal: a failing equal prints both elements, which can take minutes.
+  assert.ok(h.row('alpha') === alpha, 'the same row');
+  assert.ok(alpha.cells[PRS] === prs, 'the same cell');
+  assert.equal(prs.textContent, '9');
+});
+
+test('a snapshot keeps the nodes of cells whose content did not change', async () => {
+  const h = await setup();
+  const prs = () => h.row('alpha').cells[PRS]!.firstChild as HTMLElement;
+  const link = prs();
+  const name = h.row('alpha').cells[0]!.firstChild;
+  h.emit('craft:snapshot', changed({ beta: { open_prs: 9 } }, {}, { fetching: 'o/alpha' }));
+  assert.ok(prs() === link, 'the same link element');
+  assert.ok(h.row('alpha').cells[0]!.firstChild === name, 'the same repo name');
+  link.click();
+  assert.equal(h.calls.at(-1)?.args?.url, 'https://github.com/o/alpha/pulls');
+  h.emit('craft:snapshot', changed({ alpha: { open_prs: 9 } }));
+  assert.ok(prs() !== link, 'a new value gets a new element');
+  assert.equal(prs().textContent, '9');
+});
+
+test('a fetch keeps the repo name and its link, and updates the tooltip', async () => {
+  const h = await setup();
+  const name = () => h.row('alpha').cells[0]!.firstChild as HTMLElement;
+  const before = name();
+  const link = before.querySelector('.link');
+  const tip = before.title;
+  h.emit('craft:snapshot', changed({}, { alpha: { fetched_at: '2026-01-02T03:04:05Z' } }));
+  assert.ok(name() === before && name().querySelector('.link') === link, 'the same name and link');
+  assert.notEqual(before.title, tip);
+  assert.match(before.title, /^Fetched /);
+});
+
+test('a clock render keeps an activity cell whose tooltip has aged', async (t) => {
+  t.mock.timers.enable({ apis: ['setInterval', 'Date'], now: Date.now() });
+  const built = new Date(Date.now() - 3600e3 + 5e3).toISOString();
+  const act = { commits: 3, prs_opened: 0, prs_merged: 0, issues_opened: 0, people: 1 };
+  const h = await setup({ snap: changed({ alpha: { latest_build_at: built, recent: { release: act } } }), storage: { window: 'release' } });
+  const commits = () => h.row('alpha').cells[column('recent_commits')]!.firstChild as HTMLElement;
+  const before = commits();
+  assert.match(before.title, /\(59m ago\)$/);
+  t.mock.timers.tick(15_000);
+  assert.ok(commits() === before, 'the same element');
+  assert.match(before.title, /\(1h ago\)$/);
+});
+
+test('a link whose address changes is replaced even when its text is the same', async () => {
+  const lag = (from_sha: string) => ({ since_build: { commits: 5, basis: 'by_date' as const, from_sha } });
+  const h = await setup({ snap: changed({ alpha: lag('aaaaaaa1') }) });
+  const unreleased = () => h.row('alpha').cells[column('commits_since_build')]!.querySelector<HTMLElement>('.link')!;
+  const before = unreleased();
+  h.emit('craft:snapshot', changed({ alpha: lag('bbbbbbb2') }));
+  assert.ok(unreleased() !== before, 'a new link');
+  unreleased().click();
+  assert.equal(h.calls.at(-1)?.args?.url, 'https://github.com/o/alpha/compare/bbbbbbb2...HEAD');
+});
+
+test('cells carry their tooltips, links and marks, and the footer its totals', async () => {
+  const old = new Date(Date.now() - 20 * 86400e3).toISOString();
+  const act = { commits: 3, prs_opened: 0, prs_merged: 0, issues_opened: 0, people: 1 };
+  const h = await setup({ snap: snapshot([
+    repo('alpha', {
+      since_build: { commits: 4, basis: 'exact', from_sha: 'aaaaaaa1bbbb' }, latest_build_prerelease: true,
+      oldest_open_pr_at: old, recent: { release: act },
+    }),
+    repo('beta', { since_build: { commits: 0, basis: 'by_date', from_sha: 'ccccccc3dddd' } }, { error: 'boom' }),
+    repo('gamma', { since_build: { commits: 2, basis: 'by_date', from_sha: null } }, { fetched_at: null }),
+    repo('delta', null, { inaccessible: true }),
+    repo('eps', { latest_build: null }),
+  ]), storage: { window: 'release' } });
+  const at = (name: string, key: string) => h.row(name).cells[column(key)]!;
+  const tip = (name: string, key: string) => (at(name, key).firstChild as HTMLElement).title;
+
+  assert.match(tip('alpha', 'name'), /^Fetched /);
+  assert.equal(tip('beta', 'name'), 'Last attempt failed: boom');
+  assert.equal(tip('gamma', 'name'), 'Not fetched yet');
+  assert.equal(tip('delta', 'name'), 'Not accessible (private, or not found)');
+  assert.equal(at('delta', 'urgency').textContent, '');
+
+  assert.equal(tip('alpha', 'commits_since_build'), '4 commits on main since v1.0.0 (aaaaaaa)');
+  at('alpha', 'commits_since_build').querySelector<HTMLElement>('.link')!.click();
+  assert.equal(h.calls.at(-1)?.args?.url, 'https://github.com/o/alpha/compare/v1.0.0...HEAD');
+  assert.equal(tip('beta', 'commits_since_build'),
+    'v1.0.0’s commit shares no history with main: ~0 commits on main are newer than it, counted from ccccccc');
+  assert.ok(at('beta', 'commits_since_build').querySelector('.link.zero'), 'a zero count is a dimmed link');
+  assert.equal(tip('gamma', 'commits_since_build'), 'v1.0.0’s commit shares no history with main: ~2 commits on main are newer than it');
+  assert.ok(!at('gamma', 'commits_since_build').querySelector('.link'), 'no commit to compare from');
+  assert.equal(at('gamma', 'commits_since_build').textContent, '~2');
+  assert.ok(at('eps', 'commits_since_build').querySelector('.muted'));
+
+  assert.equal(at('alpha', 'latest_build').textContent, 'v1.0.0PRE');
+  assert.ok(at('alpha', 'latest_build').querySelector('.link + .pre'));
+  assert.equal(at('beta', 'latest_build').querySelector('.pre'), null);
+  assert.equal(at('eps', 'latest_build').querySelector('.muted')!.textContent, '—');
+
+  assert.ok(at('alpha', 'oldest_open_pr_at').querySelector('.old'), 'an open PR older than 14 days');
+  assert.equal(at('beta', 'oldest_open_pr_at').querySelector('.old'), null);
+  assert.ok(tip('beta', 'oldest_open_pr_at'));
+
+  assert.match(tip('alpha', 'recent_commits'), /^Since v1\.0\.0, published .+ \(now ago\)$/);
+  assert.ok(at('alpha', 'recent_commits').querySelector('.active'));
+  assert.equal(tip('beta', 'recent_commits'), 'Not fetched yet for this window');
+  assert.equal(tip('eps', 'recent_commits'), 'No release yet');
+
+  const foot = [...h.doc.querySelectorAll('tfoot td')];
+  assert.equal(foot[0]!.textContent, '5 repos');
+  assert.equal(foot[PRS]!.textContent, '4');
+  assert.equal(foot[column('oldest_open_pr_at')]!.textContent, '');
+});
+
+test('rows move to their sorted place without being rebuilt', async () => {
+  const h = await setup();
+  const before = ['alpha', 'beta', 'gamma'].map((n) => h.row(n));
+  h.emit('craft:snapshot', changed({ gamma: { urgency: 400 } }));
+  assert.deepEqual(h.rows(), ['gamma', 'beta', 'alpha']);
+  assert.ok(['alpha', 'beta', 'gamma'].every((n, i) => h.row(n) === before[i]), 'the same rows');
+});
+
+test('the Fetched cell keeps its refresh button while the clock and fetches change its age', async (t) => {
+  // The 15 s clock is created by start(), so setInterval is mocked before setup(); setTimeout stays real for tick().
+  t.mock.timers.enable({ apis: ['setInterval', 'Date'], now: Date.now() });
+  const fresh = () => new Date().toISOString();
+  const h = await setup({ snap: changed({}, { gamma: { fetched_at: fresh() } }) });
+  const cell = () => h.row('gamma').cells[FETCHED]!;
+  const button = cell().querySelector<HTMLButtonElement>('.row-refresh')!;
+  assert.equal(cell().textContent, 'now');
+  t.mock.timers.tick(15_000);
+  assert.equal(cell().textContent, '15s', 'the clock aged the text');
+  assert.ok(cell().querySelector('.row-refresh') === button, 'the same button after a clock render');
+  h.emit('craft:snapshot', changed({}, { gamma: { fetched_at: fresh() } }, { fetching: 'o/gamma' }));
+  assert.equal(cell().textContent, 'now');
+  assert.ok(cell().querySelector('.row-refresh') === button, 'the same button after a fetch');
+  assert.ok(button.classList.contains('spinning'));
+  assert.ok(!cell().classList.contains('changed'), 'a new fetch time does not flash');
+  h.emit('craft:snapshot', changed({}, { gamma: { fetched_at: fresh() } }));
+  assert.ok(!button.classList.contains('spinning'), 'done');
+  assert.equal(button.title, 'Refresh only gamma');
+});
+
+test('the row of the repo being fetched is marked', async () => {
+  const h = await setup();
+  h.emit('craft:snapshot', changed({}, {}, { fetching: 'o/alpha' }));
+  assert.ok(h.row('alpha').classList.contains('fetching'));
+  assert.ok(!h.row('beta').classList.contains('fetching'));
+  h.emit('craft:snapshot', snapshot());
+  assert.ok(!h.doc.querySelector('tr.fetching'));
+});
+
+test('rows do not move under the pointer', async () => {
+  const h = await setup();
+  hover(h, 'pointerenter');
+  h.emit('craft:snapshot', changed({ gamma: { urgency: 400 } }));
+  assert.deepEqual(h.rows(), ['beta', 'gamma', 'alpha'], 'the order waits');
+  assert.equal(h.row('gamma').cells[URGENCY]!.textContent, '400', 'the values do not');
+  hover(h, 'pointerleave');
+  assert.deepEqual(h.rows(), ['gamma', 'beta', 'alpha']);
+});
+
+test('a hover ends when the window loses focus, and the held order applies', async () => {
+  const h = await setup();
+  hover(h, 'pointerenter');
+  h.emit('craft:snapshot', changed({ gamma: { urgency: 400 } }));
+  assert.deepEqual(h.rows(), ['beta', 'gamma', 'alpha'], 'the order waits');
+  h.win.dispatchEvent(new h.win.Event('blur'));
+  assert.deepEqual(h.rows(), ['gamma', 'beta', 'alpha']);
+  h.emit('craft:snapshot', changed({ alpha: { urgency: 500 } }));
+  assert.deepEqual(h.rows(), ['alpha', 'beta', 'gamma'], 'the next snapshot reorders at once');
+  hover(h, 'pointerenter');
+  h.emit('craft:snapshot', changed({ gamma: { urgency: 600 } }));
+  assert.deepEqual(h.rows(), ['alpha', 'beta', 'gamma']);
+  h.emit('craft:focus', true);
+  assert.deepEqual(h.rows(), ['alpha', 'beta', 'gamma'], 'gaining focus changes nothing');
+  h.emit('craft:focus', false);
+  assert.deepEqual(h.rows(), ['gamma', 'beta', 'alpha'], 'the host’s focus event too');
+  hover(h, 'pointerenter');
+  h.emit('craft:snapshot', changed({ beta: { urgency: 700 } }));
+  assert.deepEqual(h.rows(), ['gamma', 'beta', 'alpha']);
+  Object.defineProperty(h.doc, 'hidden', { value: true, configurable: true });
+  h.doc.dispatchEvent(new h.win.Event('visibilitychange') as unknown as Event);
+  assert.deepEqual(h.rows(), ['beta', 'gamma', 'alpha'], 'hiding the window');
+});
+
+test('a header click reorders at once even while hovering', async () => {
+  const h = await setup();
+  hover(h, 'pointerenter');
+  header(h, 'Repo').click();
+  assert.deepEqual(h.rows(), ['alpha', 'beta', 'gamma']);
+  dragRow(h, 'alpha', 2.5 * ROW_HEIGHT);
+  assert.deepEqual(h.rows(), ['beta', 'gamma', 'alpha'], 'a drop too');
+  assert.ok(!h.doc.querySelector('tr.dragging'), 'the dropped row is no longer marked as dragged');
+  assert.deepEqual(stored(h, 'order'), ['o/beta', 'o/gamma', 'o/alpha']);
+  h.emit('craft:snapshot', changed({ alpha: { urgency: 500 } }));
+  assert.deepEqual(h.rows(), ['beta', 'gamma', 'alpha'], 'a snapshot keeps the manual order');
+});
+
+test('repos that leave the config lose their rows', async () => {
+  const h = await setup();
+  const beta = h.row('beta');
+  h.emit('craft:snapshot', snapshot([repo('beta', {}), repo('delta', {})]));
+  assert.deepEqual(h.rows().sort(), ['beta', 'delta']);
+  assert.ok(h.row('beta') === beta, 'the same row');
+  h.emit('craft:snapshot', snapshot([]));
+  assert.match(h.doc.getElementById('tbody')!.textContent ?? '', /No repositories configured/);
+  h.emit('craft:snapshot', snapshot());
+  assert.deepEqual(h.rows(), ['beta', 'gamma', 'alpha']);
+  assert.doesNotMatch(h.doc.getElementById('tbody')!.textContent ?? '', /No repositories configured/);
+});
+
+// setTimeout is mocked only after setup(), whose tick() needs the real one;
+// setInterval (the 15 s clock) stays real.
+const lit = (h: Harness) => [...h.doc.querySelectorAll('td.changed')];
+
+test('a changed value flashes its cell, then the class goes', async (t) => {
+  const h = await setup();
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  h.emit('craft:snapshot', changed({ alpha: { open_prs: 9, urgency: 100.2 } }));
+  const prs = h.row('alpha').cells[PRS]!;
+  assert.ok(lit(h).length === 1 && lit(h)[0] === prs, 'only the PRs cell: urgency still shows 100');
+  t.mock.timers.tick(2499);
+  assert.ok(prs.classList.contains('changed'));
+  t.mock.timers.tick(1);
+  assert.equal(lit(h).length, 0);
+});
+
+test('no flash on first render, sort click, window change, or a snapshot with identical data', async (t) => {
+  const h = await setup();
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  assert.equal(lit(h).length, 0, 'first render');
+  header(h, 'Repo').click();
+  assert.equal(lit(h).length, 0, 'sort click');
+  const picker = h.doc.querySelector<HTMLSelectElement>('.window-picker')!;
+  picker.value = '7d';
+  picker.dispatchEvent(new h.win.Event('change') as unknown as Event);
+  assert.equal(lit(h).length, 0, 'window change');
+  h.emit('craft:snapshot', snapshot());
+  assert.equal(lit(h).length, 0, 'identical snapshot');
+  h.doc.querySelector<HTMLElement>('[data-view="urgent"]')!.click();
+  h.emit('craft:snapshot', changed({ alpha: { open_prs: 9 } }));
+  h.doc.querySelector<HTMLElement>('[data-view="repos"]')!.click();
+  assert.equal(lit(h).length, 0, 'a snapshot while the table is hidden');
+  dragRow(h, 'beta', 2.5 * ROW_HEIGHT, { drop: false });
+  h.emit('craft:snapshot', changed({ alpha: { open_prs: 10 } }));
+  pointer(h, h.win as unknown as EventTarget, 'pointerup', 2.5 * ROW_HEIGHT);
+  assert.equal(h.row('alpha').cells[PRS]!.textContent, '10');
+  assert.equal(lit(h).length, 0, 'a snapshot mid-drag, then the drop');
+});
+
+test('the first data for a repo does not flash', async (t) => {
+  const h = await setup({ snap: snapshot([repo('alpha', null, { fetched_at: null }), repo('beta', {})]) });
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  h.emit('craft:snapshot', snapshot([repo('alpha', { open_prs: 4 }), repo('beta', {}), repo('delta', { open_prs: 5 })]));
+  assert.equal(h.row('alpha').cells[PRS]!.textContent, '4');
+  assert.equal(lit(h).length, 0, 'a repo fetched for the first time, and a repo new to the config');
+});
+
+test('a get_snapshot reply that arrives after a snapshot event does not replace it', async (t) => {
+  let reply = (): void => {};
+  const h = await setup({ snapReply: new Promise<void>((r) => { reply = r; }) });
+  h.emit('craft:snapshot', changed({ alpha: { open_prs: 9 } }));
+  reply();
+  await tick();
+  assert.equal(h.row('alpha').cells[PRS]!.textContent, '9');
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  h.emit('craft:snapshot', changed({ alpha: { open_prs: 9 } }));
+  assert.equal(lit(h).length, 0, 'the same data again');
+});
+
+test('a second change restarts the flash', async (t) => {
+  const h = await setup();
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  h.emit('craft:snapshot', changed({ alpha: { open_prs: 9 } }));
+  const prs = h.row('alpha').cells[PRS]!;
+  t.mock.timers.tick(2000);
+  h.emit('craft:snapshot', changed({ alpha: { open_prs: 10 } }));
+  t.mock.timers.tick(2000);
+  assert.ok(prs.classList.contains('changed'), 'the first flash’s timer was cleared');
+  t.mock.timers.tick(500);
+  assert.ok(!prs.classList.contains('changed'));
+});
+
+test('a highlight continues from its timer when its row moves or the table is shown again', async (t) => {
+  const h = await setup();
+  t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: Date.now() });
+  h.emit('craft:snapshot', changed({ alpha: { open_prs: 9 }, beta: { open_prs: 9 } }));
+  const alphaPrs = h.row('alpha').cells[PRS]!;
+  const betaPrs = h.row('beta').cells[PRS]!;
+  t.mock.timers.tick(1000);
+  h.emit('craft:snapshot', changed({ alpha: { open_prs: 9, urgency: 400 }, beta: { open_prs: 9 } }));
+  assert.deepEqual(h.rows(), ['alpha', 'beta', 'gamma'], 'alpha moved; beta and gamma did not');
+  assert.equal(alphaPrs.style.animationDelay, '-1000ms');
+  assert.equal(betaPrs.style.animationDelay, '', 'a row that did not move keeps its running animation');
+  assert.equal(h.row('alpha').cells[URGENCY]!.style.animationDelay, '', 'the urgency cell started its highlight now');
+  h.doc.querySelector<HTMLElement>('[data-view="urgent"]')!.click();
+  t.mock.timers.tick(500);
+  h.doc.querySelector<HTMLElement>('[data-view="repos"]')!.click();
+  assert.equal(betaPrs.style.animationDelay, '-1500ms');
+  assert.equal(h.row('alpha').cells[URGENCY]!.style.animationDelay, '-500ms');
+  t.mock.timers.tick(1000);
+  assert.ok(!alphaPrs.classList.contains('changed'));
+  assert.equal(alphaPrs.style.animationDelay, '', 'the timer clears the delay with the class');
+});
+
+test('a snapshot does not rebuild the urgent repo picker', async () => {
+  const h = await setup();
+  h.doc.querySelector<HTMLElement>('[data-view="urgent"]')!.click();
+  const options = () => [...h.doc.querySelectorAll('#urgent-repo option')];
+  const before = options();
+  h.emit('craft:snapshot', changed({ alpha: { open_prs: 9 } }));
+  assert.ok(options().length === 4 && options().every((o, i) => o === before[i]), 'the same option elements');
+  h.emit('craft:snapshot', snapshot([repo('alpha', {}), repo('delta', {})]));
+  assert.deepEqual(options().map((o) => o.textContent), ['All repositories', 'alpha', 'delta']);
 });
 
 // ───────────────────────────── status ─────────────────────────────

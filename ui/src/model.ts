@@ -434,6 +434,60 @@ export function formatRate(perSec: number): string {
   return `${(perSec * 86400).toFixed(1)}/d`;
 }
 
+/** A count with thousands separators: 1,234. */
+export const formatNum = (n: Value | undefined): string => Number(n ?? 0).toLocaleString('en-US');
+
+/**
+ * The text a table cell shows for a column, with times aged to `now`: counts
+ * with separators, urgency rounded, `~` before an estimated lag, `PRE` after a
+ * pre-release build, and '—' where there is no data.
+ */
+export function displayValue(entry: RepoEntry, key: string, window: string, now: number): string {
+  const v = value(entry, key, window);
+  const s = entry.stats;
+  const col = COLUMN[key];
+  if (key === 'name') return String(v);
+  if (col?.kind === 'age') return v ? ago(String(v), now) : '—';
+  if (key === 'category') return v ? String(v) : '—';
+  if (!s) return entry.inaccessible ? '' : '—';
+  switch (key) {
+    case 'urgency': return String(Math.round(Number(v)));
+    case 'latest_build_rate': return v === null ? '—' : formatRate(Number(v));
+    case 'commits_since_build': return lagText(s, v);
+    case 'latest_build': return buildText(s, v);
+  }
+  if (col?.recent || col?.allTimeOnly) return v === null ? '—' : formatNum(v);
+  if (col?.kind === 'date') return v ? ago(String(v), now) : '—';
+  return formatNum(v);
+}
+
+/** The commits-since-release count, with `~` when it is an estimate. */
+function lagText(s: RepoStats, v: Value): string {
+  if (!s.since_build) return '—';
+  const estimate = s.since_build.basis === 'exact' ? '' : '~';
+  return `${estimate}${formatNum(v)}`;
+}
+
+/** The latest release's tag, with ` PRE` after a pre-release. */
+function buildText(s: RepoStats, v: Value): string {
+  if (!v) return '—';
+  return s.latest_build_prerelease ? `${v} PRE` : String(v);
+}
+
+/**
+ * The keys of the columns whose shown text differs between two versions of a
+ * repo's entry. Both are read at the same `now`, so a relative time that has
+ * only aged compares equal. It returns an empty list when either version has
+ * no stats. `age` columns (Fetched) are left out, and so are the
+ * recent-activity columns when `prev` has no activity for `window`.
+ */
+export function changedCells(prev: RepoEntry | undefined, next: RepoEntry, window: string, now: number): string[] {
+  if (!prev?.stats || !next.stats) return [];
+  const unread = !prev.stats.recent?.[window];
+  return COLUMNS.filter((c) => c.kind !== 'age' && !(c.recent && unread)
+    && displayValue(prev, c.key, window, now) !== displayValue(next, c.key, window, now)).map((c) => c.key);
+}
+
 /** Column totals for the footer row (counts only; rates, dates and versions blank). */
 export function totals(entries: readonly RepoEntry[], window: string = DEFAULT_WINDOW): Record<string, number> {
   const out: Record<string, number> = {};

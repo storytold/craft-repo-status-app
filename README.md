@@ -90,6 +90,12 @@ sort by a column again.
   fetch. A stale row is dimmed and gets an amber dot; a failed row gets a red
   dot, and its error appears in the banner. The tray tooltip also says
   whether the data is stale.
+- **Live updates**: the repo being fetched has a pulsing blue dot. When its
+  fetch lands, its row updates in place, and each cell whose value changed,
+  other than Fetched, is highlighted for 2.5 s. While the pointer is over the
+  rows, they keep their places; they move to their sorted order when the
+  pointer leaves or the window loses focus. Sorting, changing the window and
+  dragging a row reorder the table at once.
 
 ### How issues are scored
 

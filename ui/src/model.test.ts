@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import {
   sortEntries, manualOrder, orderedEntries, nextSort, dropIndex, MANUAL, versionKey, freshness, isStale, ago, compact, formatRate, buildRate, tokenStatus,
   totals, urgentAcross, isRefreshing, isThirdParty, isRepoHidden, toggleKind, reorderVisible, defaultDir, value, windowById, WINDOWS, COLUMNS, COLUMN,
+  displayValue, changedCells,
 } from './model.ts';
 import type { Activity, RepoEntry, RepoStats, UrgentIssue } from './model.ts';
 
@@ -241,6 +242,68 @@ test('recent-activity columns follow the selected window', () => {
   assert.equal(names(sortEntries(e, 'recent_merged', 'desc', 'all')), 'abold');
   assert.equal(value(a, 'recent_commits', 'release'), null, 'no release');
   assert.deepEqual(WINDOWS.map((w) => w.id), ['10m', '30m', '1h', '4h', '12h', '1d', '7d', 'release', 'all']);
+});
+
+test('displayValue is the text each column shows', () => {
+  const now = Date.parse('2026-10-08T12:00:00Z');
+  const act: Activity = { commits: 1234, prs_opened: 0, prs_merged: 2, issues_opened: 0, people: 3 };
+  const e = entry('app', {
+    urgency: 100.4, critical_issues: 0, open_prs: 1234, open_issues: 2, last_commit_at: '2026-10-08T09:00:00Z', last_issue_at: null,
+    recent: { '4h': act }, latest_build: 'v1.2.0', latest_build_prerelease: true, latest_build_downloads: 12345,
+    since_build: { commits: 1500, basis: 'branched', from_sha: null },
+  }, '2026-10-08T10:00:00Z');
+  const shown = (key: string, x: RepoEntry = e, window = '4h') => displayValue(x, key, window, now);
+  assert.equal(shown('name'), 'app');
+  assert.equal(shown('fetched'), '2h');
+  assert.equal(shown('urgency'), '100');
+  assert.equal(shown('critical_issues'), '0');
+  assert.equal(shown('open_prs'), '1,234');
+  assert.equal(shown('last_commit_at'), '3h');
+  assert.equal(shown('last_issue_at'), '—', 'a missing date');
+  assert.equal(shown('recent_commits'), '1,234');
+  assert.equal(shown('recent_commits', e, '7d'), '—', 'a window not fetched yet');
+  assert.equal(shown('commits_since_build'), '~1,500', 'an estimated lag');
+  assert.equal(shown('latest_build'), 'v1.2.0 PRE');
+  assert.equal(shown('latest_build_downloads'), '12,345');
+  const plain = entry('app', { latest_build: 'v1.2.0', latest_build_prerelease: false, since_build: { commits: 3, basis: 'exact', from_sha: 'x' } });
+  assert.equal(shown('latest_build', plain), 'v1.2.0');
+  assert.equal(shown('commits_since_build', plain), '3');
+  assert.equal(shown('urgency', plain), '0', 'a stat the cache lacks');
+  const bare = entry('app', { latest_build: null, since_build: null });
+  assert.equal(shown('latest_build', bare), '—');
+  assert.equal(shown('commits_since_build', bare), '—');
+  assert.equal(shown('urgency', entry('app', null, null)), '—', 'no stats yet');
+  assert.equal(shown('fetched', entry('app', null, null)), '—', 'never fetched');
+  const hidden = { ...entry('app', null), inaccessible: true };
+  assert.equal(shown('urgency', hidden), '', 'an inaccessible repo');
+  assert.equal(shown('fetched', hidden), 'now', 'an inaccessible repo still shows when it was checked');
+  assert.equal(shown('name', entry('app', null, null)), 'app');
+  assert.equal(shown('category', { ...e, category: 'library' }), 'Library');
+  assert.equal(shown('category', { ...entry('app', null, null), category: 'ci' }), 'CI', 'a type before the first fetch');
+  assert.equal(shown('category', e), '—', 'a repo outside the list');
+  const built = entry('app', { latest_build_downloads: 8640, latest_build_at: '2026-10-07T12:00:00Z' }, '2026-10-08T12:00:00Z');
+  assert.equal(shown('latest_build_rate', built), '6.0/m');
+  assert.equal(shown('latest_build_rate', bare), '—', 'no build');
+});
+
+test('changedCells lists the columns whose shown text changed', () => {
+  const now = Date.parse('2026-10-08T12:00:00Z');
+  const act = (commits: number): Activity => ({ commits, prs_opened: 0, prs_merged: 0, issues_opened: 0, people: 1 });
+  const base: Partial<RepoStats> = { urgency: 100.4, open_prs: 1, last_commit_at: '2026-10-08T09:00:00Z', recent: { '4h': act(1), '1d': act(1) } };
+  const prev = entry('app', base);
+  const next = (s: Partial<RepoStats>) => entry('app', { ...base, ...s });
+  assert.deepEqual(changedCells(prev, prev, '4h', now + 60 * 60_000), [], 'an hour later, with the same data');
+  assert.deepEqual(changedCells(prev, next({ open_prs: 2 }), '4h', now), ['open_prs']);
+  assert.deepEqual(changedCells(prev, next({ last_commit_at: '2026-10-08T11:59:00Z' }), '4h', now), ['last_commit_at']);
+  assert.deepEqual(changedCells(prev, next({ urgency: 100.2 }), '4h', now), [], 'urgency rounds to the same 100');
+  assert.deepEqual(changedCells(prev, entry('app', base, '2026-10-08T11:00:00Z'), '4h', now), [], 'a new fetch time alone');
+  assert.deepEqual(changedCells(undefined, next({ open_prs: 2 }), '4h', now), [], 'a repo new to the table');
+  assert.deepEqual(changedCells(entry('app', null, null), next({ open_prs: 2 }), '4h', now), [], 'the first data for a repo');
+  const other = next({ recent: { '4h': act(1), '1d': act(5) } });
+  assert.deepEqual(changedCells(prev, other, '4h', now), [], 'a change in another window');
+  assert.deepEqual(changedCells(prev, other, '1d', now), ['recent_commits'], 'the selected window');
+  const filled = next({ open_prs: 2, recent: { '4h': act(1), '1d': act(1), '7d': act(9) } });
+  assert.deepEqual(changedCells(prev, filled, '7d', now), ['open_prs'], 'a window read for the first time');
 });
 
 test('a row is refreshing while its repo is being fetched or queued', () => {
