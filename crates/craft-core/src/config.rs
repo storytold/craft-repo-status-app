@@ -13,23 +13,57 @@ const CONFIG_FILE_NAME: &str = ".craft_status_config.toml";
 const STATE_FILE_NAME: &str = ".craft_status_state.toml";
 pub const TEMPLATE: &str = include_str!("../../../craft_status_config.template.toml");
 
-pub const DEFAULT_REPOS: &[&str] = &[
-    "storytold/photocraft",
-    "storytold/lightcraft",
-    "storytold/filmcraft",
-    "storytold/designcraft",
-    "storytold/vectorcraft",
-    "storytold/pdfcraft",
-    "storytold/effectcraft",
-    "storytold/wordcraft",
-    "storytold/deckcraft",
-    "storytold/gridcraft",
-    "storytold/cadcraft",
-    "storytold/soundcraft",
-    "storytold/craft-libs",
-    "storytold/craft-launcher",
-    "storytold/figcraft",
+/// What a repository is, shown beside it in both apps' tables.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum RepoCategory {
+    App,
+    Library,
+    Assets,
+    Ci,
+    Tooling,
+    /// Anything not in [`DEFAULT_REPOS`], such as a repo added by hand.
+    #[default]
+    Other,
+}
+
+/// The repos watched by default, in the template's order, and what each one is.
+pub const DEFAULT_REPOS: &[(&str, RepoCategory)] = &[
+    ("storytold/photocraft", RepoCategory::App),
+    ("storytold/lightcraft", RepoCategory::App),
+    ("storytold/filmcraft", RepoCategory::App),
+    ("storytold/designcraft", RepoCategory::App),
+    ("storytold/vectorcraft", RepoCategory::App),
+    ("storytold/pdfcraft", RepoCategory::App),
+    ("storytold/effectcraft", RepoCategory::App),
+    ("storytold/wordcraft", RepoCategory::App),
+    ("storytold/deckcraft", RepoCategory::App),
+    ("storytold/gridcraft", RepoCategory::App),
+    ("storytold/cadcraft", RepoCategory::App),
+    ("storytold/soundcraft", RepoCategory::App),
+    ("storytold/figcraft", RepoCategory::App),
+    ("storytold/craft-launcher", RepoCategory::App),
+    ("storytold/craft-anything", RepoCategory::App),
+    ("tangency-labs/solidcraft", RepoCategory::App),
+    ("storytold/craft-libs", RepoCategory::Library),
+    ("storytold/craft-i18n", RepoCategory::Library),
+    ("storytold/craft-ai-integrations", RepoCategory::Library),
+    ("storytold/indd-utils", RepoCategory::Library),
+    ("storytold/craft-fonts", RepoCategory::Assets),
+    ("storytold/photocraft-corpus", RepoCategory::Assets),
+    ("storytold/craft-launcher-assets", RepoCategory::Assets),
+    ("storytold/craft-common-actions", RepoCategory::Ci),
+    ("storytold/craft-contrib", RepoCategory::Tooling),
+    ("storytold/craft-skills", RepoCategory::Tooling),
 ];
+
+/// What `repo` (`owner/name`, any case) is; [`RepoCategory::Other`] if unknown.
+pub fn category_of(repo: &str) -> RepoCategory {
+    DEFAULT_REPOS
+        .iter()
+        .find(|(name, _)| name.eq_ignore_ascii_case(repo))
+        .map_or(RepoCategory::Other, |(_, category)| *category)
+}
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -201,7 +235,7 @@ pub struct Shortcuts {
 impl Default for Config {
     fn default() -> Self {
         Config {
-            repos: DEFAULT_REPOS.iter().map(|s| s.to_string()).collect(),
+            repos: DEFAULT_REPOS.iter().map(|(r, _)| r.to_string()).collect(),
             poll_minutes: 30.0,
             stale_minutes: 60.0,
             github_token: String::new(),
@@ -365,6 +399,23 @@ mod tests {
     #[test]
     fn template_parses_to_defaults() {
         assert_eq!(Config::parse(TEMPLATE).unwrap(), Config::default());
+    }
+
+    #[test]
+    fn every_default_repo_has_a_category() {
+        for (repo, category) in DEFAULT_REPOS {
+            assert_ne!(*category, RepoCategory::Other, "{repo}");
+        }
+    }
+
+    #[test]
+    fn categories_ignore_case_and_unknown_repos_are_other() {
+        assert_eq!(category_of("Storytold/Craft-Fonts"), RepoCategory::Assets);
+        assert_eq!(
+            category_of("storytold/craft-common-actions"),
+            RepoCategory::Ci
+        );
+        assert_eq!(category_of("someone/else"), RepoCategory::Other);
     }
 
     #[test]
