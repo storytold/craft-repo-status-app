@@ -21,7 +21,7 @@ use tauri::{AppHandle, Manager};
 
 use super::{
     clock, emit_snapshot, rate_limit_end, reload_config_if_changed, AppState, Pacing, BACKOFF_MAX,
-    BACKOFF_MIN, OPTIONAL_FLOOR, REPO_GAP, REPO_RETRY,
+    BACKOFF_MIN, LEASE_PATIENCE, OPTIONAL_FLOOR, REPO_GAP, REPO_RETRY,
 };
 
 /// Rounds in a row that find no open pull request in an added repo before
@@ -111,6 +111,10 @@ pub fn discover(app: &AppHandle, pacing: &mut Pacing, found: &mut Found) {
     let state = app.state::<AppState>();
     let cfg = state.config.lock().unwrap().clone();
     let now = Utc::now();
+    // The PR poller was rate-limited on this account: hold off too.
+    if let Some(until) = state.shared.as_ref().and_then(|s| s.budget().backoff(now)) {
+        pacing.not_before = Some(pacing.not_before.map_or(until, |t| t.max(until)));
+    }
     let (pruned, run) = {
         let mut snap = state.snapshot.lock().unwrap();
         let pruned = prune(&cfg, &mut snap);
@@ -123,9 +127,19 @@ pub fn discover(app: &AppHandle, pacing: &mut Pacing, found: &mut Found) {
         }
         return;
     };
+    let lease = state.shared.as_ref().and_then(|s| s.lease(LEASE_PATIENCE));
     let result = search(&cfg, found, &owner);
+    drop(lease);
     let now = Utc::now();
     let msg = pace(pacing, result.as_ref().err().map(SearchError::error), now);
+    if let (Some(resume), Some(shared), true) =
+        (pacing.not_before, state.shared.as_ref(), msg.is_some())
+    {
+        // The PR poller shares the account: it should stop too.
+        if let Err(e) = shared.note_backoff(resume) {
+            eprintln!("could not share the backoff: {e}");
+        }
+    }
     record(&state, found, &owner, result, msg, now);
     emit_snapshot(app);
 }
@@ -523,6 +537,7 @@ mod tests {
             config_mtime: Mutex::new(None),
             snapshot: Mutex::new(snapshot(&before)),
             cache: None,
+            shared: None,
             refresh_tx: Mutex::new(None),
             window_state: Mutex::new(None),
             window_dirty: AtomicBool::new(false),
@@ -550,6 +565,7 @@ mod tests {
             config_mtime: Mutex::new(None),
             snapshot: Mutex::new(s),
             cache: None,
+            shared: None,
             refresh_tx: Mutex::new(None),
             window_state: Mutex::new(None),
             window_dirty: AtomicBool::new(false),
@@ -602,6 +618,7 @@ mod tests {
             config_mtime: Mutex::new(None),
             snapshot: Mutex::new(s),
             cache: None,
+            shared: None,
             refresh_tx: Mutex::new(None),
             window_state: Mutex::new(None),
             window_dirty: AtomicBool::new(false),
@@ -640,6 +657,7 @@ mod tests {
                 config_mtime: Mutex::new(None),
                 snapshot: Mutex::new(s),
                 cache: None,
+                shared: None,
                 refresh_tx: Mutex::new(None),
                 window_state: Mutex::new(None),
                 window_dirty: AtomicBool::new(false),

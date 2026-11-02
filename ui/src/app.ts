@@ -1,20 +1,23 @@
-// Craft Status UI: renders the snapshot pushed by the Rust poller. main.ts
-// picks the Tauri API, or a browser stand-in, and calls `start`.
+// Craft Status UI: the window's chrome and tabs. Downloads and Fix first render the
+// snapshot pushed by the Rust status poller; the PR tab is pr-app.ts. main.ts picks
+// the Tauri API, or a browser stand-in, and calls `start`.
 
 import {
-  COLUMNS, RECENT, WINDOWS, MANUAL, windowById, value, orderedEntries, nextSort, dropIndex,
-  freshness, ago, totals, urgentAcross, tokenStatus, isRefreshing,
+  ALL_TIME, COLUMNS, RECENT, WINDOWS, MANUAL, windowById, value, orderedEntries, nextSort, dropIndex,
+  freshness, ago, formatRate, totals, urgentAcross, tokenStatus, isRefreshing, isThirdParty,
+  REPO_KINDS, isRepoHidden, toggleKind, manualOrder, reorderVisible,
 } from './model.ts';
 import type { Column, Meta, RepoEntry, Snapshot, Sort } from './model.ts';
+import { startPrs } from './pr-app.ts';
+import type { Route } from './pr-app.ts';
+import { $, DAY, classes, el, load, localTime, save } from './dom.ts';
+import type { Api } from './dom.ts';
 
-/** What the UI needs from the host: Tauri commands and events, window chrome. */
-export interface Api {
-  invoke<T = unknown>(cmd: string, args?: Record<string, unknown>): Promise<T>;
-  listen<T>(event: string, fn: (payload: T) => void): void;
-  startResize(): void;
-}
+export type { Api } from './dom.ts';
 
-type View = 'repos' | 'urgent';
+type View = 'repos' | 'prs' | 'urgent';
+
+const asView = (v: string | null): View => (v === 'urgent' || v === 'prs' ? v : 'repos');
 
 interface State {
   snap: Snapshot | null;
@@ -25,47 +28,16 @@ interface State {
   window: string;
   urgentRepo: string;
   criticalOnly: boolean;
-}
-
-const $ = <T extends HTMLElement = HTMLElement>(id: string): T => {
-  const n = document.getElementById(id);
-  if (!n) throw new Error(`#${id} is missing from index.html`);
-  return n as T;
-};
-
-function load<T>(k: string, d: T): T {
-  try { return (JSON.parse(localStorage.getItem(k) ?? 'null') as T | null) ?? d; } catch { return d; }
-}
-function save(k: string, v: unknown): void {
-  try { localStorage.setItem(k, JSON.stringify(v)); } catch { /* private mode */ }
+  /** The ids of the REPO_KINDS toggled off. */
+  hiddenKinds: string[];
 }
 
 // ───────────────────────────── formatting ─────────────────────────────
 
-type Child = Node | string | null | undefined | false;
-type Props = Record<string, unknown>;
-
-function el<K extends keyof HTMLElementTagNameMap>(tag: K, props: Props = {}, ...kids: (Child | Child[])[]): HTMLElementTagNameMap[K] {
-  const n = document.createElement(tag);
-  for (const [k, v] of Object.entries(props)) {
-    if (v === undefined || v === null || v === false) continue;
-    if (k === 'class') n.className = String(v);
-    else if (k === 'dataset') Object.assign(n.dataset, v);
-    else if (k.startsWith('on')) n.addEventListener(k.slice(2), v as EventListener);
-    else n.setAttribute(k, String(v));
-  }
-  for (const kid of kids.flat()) if (kid !== null && kid !== undefined && kid !== false) n.append(kid);
-  return n;
-}
-
-const localTime = (iso: string | null | undefined): string =>
-  (iso ? new Date(iso).toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' }) : '');
 const clock = (t: number): string => new Date(t).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' });
 const num = (n: number | string | null | undefined): string => Number(n ?? 0).toLocaleString('en-US');
 const gh = (repo: string, path = ''): string => `https://github.com/${repo}${path}`;
 const shortName = (repo: string): string => repo.split('/').pop() ?? repo;
-const classes = (...cs: (string | false | null | undefined)[]): string => cs.filter(Boolean).join(' ');
-const DAY = 86400e3;
 
 /** The toolbar's refresh arrow, as an element (SVG needs its namespace). */
 function refreshIcon(): SVGSVGElement {
@@ -79,17 +51,21 @@ function refreshIcon(): SVGSVGElement {
   return svg;
 }
 
-/** Starts the UI in the current document. Call once; returns a function that stops its clock. */
-export function start(api: Api): () => void {
+/**
+ * Starts the UI in the current document. Call once; returns a function that stops
+ * its clocks. `prRoute` opens the PR tab at that view.
+ */
+export function start(api: Api, prRoute?: Route): () => void {
   const state: State = {
     snap: null,
     meta: {},
-    view: (new URLSearchParams(location.search).get('view') ?? load<string>('view', 'repos')) === 'urgent' ? 'urgent' : 'repos',
+    view: prRoute ? 'prs' : asView(new URLSearchParams(location.search).get('view') ?? load<string>('view', 'repos')),
     sort: load<Sort>('sort', { key: 'urgency', dir: 'desc' }),
     order: load<string[]>('order', []),
     window: windowById(load('window', '')).id,
     urgentRepo: '',
     criticalOnly: load('criticalOnly', false),
+    hiddenKinds: load<string[]>('hiddenKinds', []),
   };
 
   function openUrl(url: string, ev?: Event): void {
@@ -126,6 +102,10 @@ export function start(api: Api): () => void {
     return el('span', { class: 'app-icon none', 'aria-hidden': 'true' }, shortName(entry.repo).charAt(0).toUpperCase());
   }
 
+  /** A "3P" tag for repos outside our own GitHub org; null for ours. */
+  const thirdPartyTag = (repo: string): HTMLElement | null =>
+    isThirdParty(repo) ? el('span', { class: 'third-party', title: `Third-party app (${repo.split('/')[0]})` }, '3P') : null;
+
   /** Cell content for a column. */
   function cell(entry: RepoEntry, col: Column): Node {
     const v = value(entry, col.key, state.window);
@@ -135,19 +115,23 @@ export function start(api: Api): () => void {
         ? `Last attempt failed: ${entry.error}`
         : entry.inaccessible ? 'Not accessible (private, or not found)'
         : entry.fetched_at ? `Fetched ${localTime(entry.fetched_at)}` : 'Not fetched yet';
-      return el('span', { class: 'repo', title: tip }, el('span', { class: 'dot' }), appIcon(entry), link(String(v), gh(entry.repo)),
+      return el('span', { class: 'repo', title: tip }, el('span', { class: 'dot' }), appIcon(entry), link(String(v), gh(entry.repo)), thirdPartyTag(entry.repo),
         entry.auto ? addedControls(entry) : null);
     }
     if (col.key === 'fetched') {
       const age = v ? el('span', { title: `Fetched ${localTime(String(v))}` }, ago(String(v))) : el('span', { class: 'muted', title: 'Not fetched yet' }, '—');
       return el('span', { class: 'fetched' }, age, rowRefresh(entry));
     }
+    if (col.key === 'category') return v ? el('span', { class: 'category' }, String(v)) : el('span', { class: 'muted' }, '—');
     if (!s) return entry.inaccessible ? document.createTextNode('') : el('span', { class: 'muted' }, '—');
     switch (col.key) {
       case 'urgency': {
         const a = Math.min(1, Number(v) / 350) * 0.45;
         return el('span', { class: 'urgency', style: `background: rgb(var(--hot-rgb) / ${a.toFixed(2)})` }, String(Math.round(Number(v))));
       }
+      case 'downloads_total':
+        if (v === null) return el('span', { class: 'muted', title: 'Only known for All time: choose it in the dropdown above' }, '—');
+        return document.createTextNode(num(v));
       case 'critical_issues': return el('span', { class: v ? 'crit' : 'zero' }, num(v));
       case 'open_prs': return link(num(v), gh(entry.repo, '/pulls'));
       case 'open_issues': return link(num(v), gh(entry.repo, '/issues'));
@@ -174,6 +158,12 @@ export function start(api: Api): () => void {
         const text = `${lag.basis === 'exact' ? '' : '~'}${num(v)}`;
         return el('span', { title: tip }, from ? link(text, gh(entry.repo, `/compare/${encodeURIComponent(from)}...HEAD`), v ? '' : 'zero') : text);
       }
+      case 'latest_build_rate':
+        if (v === null) return el('span', { class: 'muted' }, '—');
+        return el('span', {
+          class: v ? '' : 'zero',
+          title: `${num(s.latest_build_downloads)} downloads of ${s.latest_build}, out ${ago(s.latest_build_at, Date.parse(String(entry.fetched_at)))} when counted`,
+        }, formatRate(Number(v)));
       case 'latest_build':
         if (!v) return el('span', { class: 'muted' }, '—');
         return el('span', {}, link(String(v), gh(entry.repo, `/releases/tag/${encodeURIComponent(v)}`)),
@@ -253,9 +243,14 @@ export function start(api: Api): () => void {
     return i > 0 && COLUMNS[i - 1]!.group !== COLUMNS[i]!.group ? 'group-start' : '';
   }
 
+  /** The repos the toggles beside the tabs leave showing. */
+  const shownRepos = (snap: Snapshot): RepoEntry[] =>
+    snap.repos.filter((r) => !isRepoHidden(r.repo, r.category, state.hiddenKinds));
+
   function renderTable(snap: Snapshot): void {
     renderHead();
-    const rows = orderedEntries(snap.repos, state.sort, state.order, state.window);
+    const shown = shownRepos(snap);
+    const rows = orderedEntries(shown, state.sort, state.order, state.window);
     const now = Date.now();
     $('tbody').replaceChildren(...rows.map((e) => {
       const stale = !e.fetched_at || now - Date.parse(e.fetched_at) > snap.stale_after_secs * 1000;
@@ -272,11 +267,14 @@ export function start(api: Api): () => void {
       }, COLUMNS.map((c, i) => el('td', { class: groupStart(i) }, cell(e, c))));
     }));
     if (!rows.length) {
-      $('tbody').replaceChildren(el('tr', {}, el('td', { colspan: COLUMNS.length, class: 'empty' }, 'No repositories configured — Edit config.')));
+      const why = snap.repos.length ? 'Every repo is hidden by the toggles beside the tabs.' : 'No repositories configured — Edit config.';
+      $('tbody').replaceChildren(el('tr', {}, el('td', { colspan: COLUMNS.length, class: 'empty' }, why)));
     }
-    const t = totals(snap.repos, state.window);
+    const t = totals(shown, state.window);
+    const noTotal = (c: Column): boolean => c.kind !== 'num' || (c.allTimeOnly === true && state.window !== ALL_TIME);
+    const total = (c: Column): string => (noTotal(c) ? '' : num(Math.round(t[c.key] ?? 0)));
     $('tfoot').replaceChildren(el('tr', {}, COLUMNS.map((c, i) =>
-      el('td', { class: groupStart(i) }, i === 0 ? `${snap.repos.length} repos` : c.kind === 'num' ? num(Math.round(t[c.key] ?? 0)) : ''))));
+      el('td', { class: groupStart(i) }, i === 0 ? `${shown.length} repos` : total(c)))));
   }
 
   // ───────────────────────────── row dragging ─────────────────────────────
@@ -333,7 +331,8 @@ export function start(api: Api): () => void {
     // The click that follows this pointerup must not open the urgent view.
     justDragged = true;
     setTimeout(() => { justDragged = false; });
-    state.order = [...$('tbody').children].map((r) => (r as HTMLElement).dataset.repo ?? '');
+    const dragged = [...$('tbody').children].map((r) => (r as HTMLElement).dataset.repo ?? '');
+    state.order = reorderVisible(manualOrder(state.snap?.repos ?? [], state.order).map((r) => r.repo), dragged);
     state.sort = { key: MANUAL };
     save('order', state.order);
     save('sort', state.sort);
@@ -345,18 +344,20 @@ export function start(api: Api): () => void {
   }
 
   function renderUrgent(snap: Snapshot): void {
+    const shown = shownRepos(snap);
+    if (!shown.some((r) => r.repo === state.urgentRepo)) state.urgentRepo = '';
     const sel = $<HTMLSelectElement>('urgent-repo');
     sel.replaceChildren(el('option', { value: '' }, 'All repositories'),
-      ...snap.repos.map((r) => el('option', { value: r.repo }, shortName(r.repo))));
+      ...shown.map((r) => el('option', { value: r.repo }, shortName(r.repo))));
     sel.value = state.urgentRepo;
     $<HTMLInputElement>('critical-only').checked = state.criticalOnly;
-    const items = urgentAcross(snap.repos, { repo: state.urgentRepo, criticalOnly: state.criticalOnly });
+    const items = urgentAcross(shown, { repo: state.urgentRepo, criticalOnly: state.criticalOnly });
     const SEVERE = /crash|panic|freeze|hang|data loss|corruption|won't|blank|security/;
     $('urgent-list').replaceChildren(...items.map((u) => {
       const a = Math.min(1, u.score / 90) * 0.5;
       return el('li', { class: `urgent-item${u.critical ? ' critical' : ''}`, onclick: () => openUrl(u.url), title: u.url },
         el('span', { class: 'score', style: `background: rgb(var(--hot-rgb) / ${a.toFixed(2)})` }, String(u.score)),
-        el('span', { class: 'u-repo' }, appIcon(snap.repos.find((r) => r.repo === u.repo) ?? { repo: u.repo }), shortName(u.repo)),
+        el('span', { class: 'u-repo' }, appIcon(snap.repos.find((r) => r.repo === u.repo) ?? { repo: u.repo }), shortName(u.repo), thirdPartyTag(u.repo)),
         el('div', { class: 'u-title' },
           el('span', { class: 'num' }, `#${u.number}`), el('span', { class: 'text' }, u.title),
           el('div', { class: 'reasons' }, u.reasons.map((r) => el('span', { class: `reason${SEVERE.test(r) ? ' sev' : ''}` }, r)),
@@ -387,12 +388,15 @@ export function start(api: Api): () => void {
       `Last full refresh: ${localTime(snap.last_full_refresh_at) || '—'}`,
       `Stale after ${Math.round(snap.stale_after_secs / 60)} min without new data`,
     ].join('\n');
-    $('refresh').classList.toggle('spinning', !!snap.refreshing);
+    $('refresh').classList.toggle('spinning', !!snap.refreshing && state.view !== 'prs');
 
     const failing = snap.repos.filter((r) => r.error);
+    // A snapshot-wide problem (a broken config, a rate limit) matters on every tab.
+    const failures = failing.map((r) => `${shortName(r.repo)} (${r.error})`).join('; ');
+    const noun = failing.length > 1 ? 'repos' : 'repo';
     const msgs = [
       snap.error,
-      failing.length ? `${failing.length} repo${failing.length > 1 ? 's' : ''} failed last poll: ${failing.map((r) => `${shortName(r.repo)} (${r.error})`).join('; ')}` : null,
+      state.view !== 'prs' && failing.length ? `${failing.length} ${noun} failed last poll: ${failures}` : null,
     ].filter(Boolean);
     $('banner').hidden = !msgs.length;
     $('banner').textContent = msgs.join(' — ');
@@ -404,10 +408,11 @@ export function start(api: Api): () => void {
     $('token').textContent = token.text;
     $('token').title = token.title;
     $('token').classList.toggle('bad', token.bad);
-    const critical = snap.repos.reduce((n, r) => n + (r.stats?.critical_issues ?? 0), 0);
+    const shown = shownRepos(snap);
+    const critical = shown.reduce((n, r) => n + (r.stats?.critical_issues ?? 0), 0);
     $('urgent-count').textContent = critical ? String(critical) : '';
     $('urgent-count').title = `${critical} critical open issues`;
-    $('repo-count').textContent = String(snap.repos.length);
+    $('repo-count').textContent = String(shown.length);
   }
 
   function render(): void {
@@ -416,15 +421,28 @@ export function start(api: Api): () => void {
     const snap = state.snap;
     if (!snap || drag?.moved) return;
     renderStatus(snap);
-    document.querySelectorAll<HTMLElement>('.view').forEach((b) => b.setAttribute('aria-selected', String(b.dataset.view === state.view)));
+    if (state.view === 'repos') renderTable(snap);
+    else if (state.view === 'urgent') renderUrgent(snap);
+  }
+
+  /** What's on screen for the current tab, whether or not there's data yet. */
+  function renderTabs(): void {
+    const onPrs = state.view === 'prs';
+    document.querySelectorAll<HTMLElement>('[data-view]').forEach((b) => b.setAttribute('aria-selected', String(b.dataset.view === state.view)));
     $('repos-view').hidden = state.view !== 'repos';
     $('urgent-view').hidden = state.view !== 'urgent';
-    if (state.view === 'repos') renderTable(snap); else renderUrgent(snap);
+    $('prs-view').hidden = !onPrs;
+    for (const id of ['pr-nav', 'crumbs', 'pr-pill', 'pr-foot']) $(id).hidden = !onPrs;
+    for (const id of ['fresh-pill', 'refreshed', 'status-foot']) $(id).hidden = onPrs;
+    prs.setActive(onPrs);
   }
 
   function setView(v: View): void {
+    // Choosing the PR tab again goes back to its top, as a second Esc would.
+    if (v === 'prs' && state.view === 'prs') prs.home();
     state.view = v;
     save('view', v);
+    renderTabs();
     render();
   }
 
@@ -434,12 +452,38 @@ export function start(api: Api): () => void {
     $('pin').setAttribute('aria-pressed', String(!!state.meta.always_on_top));
     const mac = navigator.platform.toLowerCase().includes('mac');
     $('shortcut').textContent = (state.meta.shortcut ?? '').replace('CmdOrCtrl', mac ? '⌘' : 'Ctrl').replace('Shift', '⇧').replaceAll('+', '');
+    prs.setHighQuality(state.meta.high_quality);
   }
 
   // ───────────────────────────── wiring ─────────────────────────────
 
-  document.querySelectorAll<HTMLElement>('.view').forEach((b) => b.addEventListener('click', () => {
-    const view = b.dataset.view === 'urgent' ? 'urgent' : 'repos';
+  const prs = startPrs(api, prRoute);
+  prs.setHiddenKinds(state.hiddenKinds);
+
+  const kindToggles = REPO_KINDS.map((k) => el('button', {
+    class: 'kind',
+    'data-kind': k.id,
+    onclick: () => {
+      state.hiddenKinds = toggleKind(state.hiddenKinds, k.id);
+      save('hiddenKinds', state.hiddenKinds);
+      renderKinds();
+      prs.setHiddenKinds(state.hiddenKinds);
+      render();
+    },
+  }, k.label));
+  $('repo-kinds').replaceChildren(...kindToggles);
+
+  function renderKinds(): void {
+    REPO_KINDS.forEach((k, i) => {
+      const on = !state.hiddenKinds.includes(k.id);
+      kindToggles[i]!.setAttribute('aria-pressed', String(on));
+      kindToggles[i]!.title = `${on ? 'Hide' : 'Show'} ${k.label.toLowerCase()} on every tab`;
+    });
+  }
+  renderKinds();
+
+  document.querySelectorAll<HTMLElement>('[data-view]').forEach((b) => b.addEventListener('click', () => {
+    const view = asView(b.dataset.view ?? null);
     if (view === 'urgent' && state.view !== 'urgent') state.urgentRepo = '';
     setView(view);
   }));
@@ -449,17 +493,23 @@ export function start(api: Api): () => void {
     save('criticalOnly', state.criticalOnly);
     render();
   });
-  $('refresh').addEventListener('click', () => api.invoke('refresh_now'));
+  const refresh = (): void => {
+    if (state.view === 'prs') prs.refresh();
+    else void api.invoke('refresh_now');
+  };
+  $('refresh').addEventListener('click', refresh);
   $('pin').addEventListener('click', () => api.invoke('set_always_on_top', { on: !state.meta.always_on_top }));
   $('hide').addEventListener('click', () => api.invoke('hide_window'));
   $('edit-config').addEventListener('click', () => api.invoke('open_config'));
   $('resize').addEventListener('mousedown', (e) => { e.preventDefault(); api.startResize(); });
   document.addEventListener('keydown', (e) => {
     const mod = e.metaKey || e.ctrlKey;
-    if (e.key === 'Escape') api.invoke('hide_window');
-    else if (mod && e.key.toLowerCase() === 'r') { e.preventDefault(); api.invoke('refresh_now'); }
-    else if (mod && e.key === '1') setView('repos');
-    else if (mod && e.key === '2') setView('urgent');
+    if (state.view === 'prs' && prs.key(e)) e.preventDefault();
+    else if (e.key === 'Escape') void api.invoke('hide_window');
+    else if (mod && e.key.toLowerCase() === 'r') { e.preventDefault(); refresh(); }
+    else if (mod && e.key === '1') { e.preventDefault(); setView('repos'); }
+    else if (mod && e.key === '2') { e.preventDefault(); setView('prs'); }
+    else if (mod && e.key === '3') { e.preventDefault(); setView('urgent'); }
   });
 
   api.listen<Snapshot>('craft:snapshot', (s) => { state.snap = s; render(); });
@@ -467,6 +517,7 @@ export function start(api: Api): () => void {
   // Relative times and staleness change with the clock alone.
   const clockTimer = setInterval(render, 15_000);
 
+  renderTabs();
   (async () => {
     try {
       applyMeta(await api.invoke<Meta>('get_meta'));
@@ -480,5 +531,8 @@ export function start(api: Api): () => void {
     }
   })();
 
-  return () => clearInterval(clockTimer);
+  return () => {
+    clearInterval(clockTimer);
+    prs.stop();
+  };
 }
