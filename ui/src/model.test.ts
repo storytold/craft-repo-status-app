@@ -175,6 +175,19 @@ test('a repo is stale once its data is older than the limit, or never fetched', 
   assert.equal(isStale(entry('a', null, null), 1e9, now), true);
 });
 
+test('a check that found nothing changed keeps old data current', () => {
+  const now = Date.parse('2026-10-08T13:00:00Z');
+  const checked = { ...entry('a', {}), checked_at: '2026-10-08T12:55:00Z' };
+  assert.equal(isStale(entry('a', {}), 600, now), true, 'fetched an hour ago');
+  assert.equal(isStale(checked, 600, now), false, 'checked five minutes ago');
+  const snap = { stale_after_secs: 600, repos: [checked, entry('b', {}, '2026-10-08T12:52:00Z')] };
+  assert.deepEqual(freshness(snap, now), { oldest: Date.parse('2026-10-08T12:52:00Z'), stale: false });
+  // A check from before the fetch does not make the data current.
+  const early = { ...entry('a', {}), checked_at: '2026-10-08T11:00:00Z' };
+  assert.equal(isStale(early, 600, now), true);
+  assert.equal(freshness({ stale_after_secs: 600, repos: [early] }, now).oldest, Date.parse('2026-10-08T12:00:00Z'));
+});
+
 test('formatting', () => {
   const now = Date.parse('2026-10-08T12:00:00Z');
   assert.equal(ago('2026-10-08T11:59:55Z', now), 'now');

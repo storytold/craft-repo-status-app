@@ -5,7 +5,7 @@
 import {
   ALL_TIME, COLUMNS, RECENT, WINDOWS, MANUAL, windowById, value, orderedEntries, nextSort, dropIndex,
   freshness, ago, formatRate, totals, urgentAcross, tokenStatus, isRefreshing, isThirdParty,
-  REPO_KINDS, isRepoHidden, toggleKind, manualOrder, reorderVisible,
+  REPO_KINDS, isRepoHidden, toggleKind, manualOrder, reorderVisible, checkedAfterFetch, isStale,
 } from './model.ts';
 import type { Column, Meta, RepoEntry, Snapshot, Sort } from './model.ts';
 import { startPrs } from './pr-app.ts';
@@ -99,7 +99,9 @@ export function start(api: Api, prRoute?: Route): () => void {
       return el('span', { class: 'repo', title: tip }, el('span', { class: 'dot' }), appIcon(entry), link(String(v), gh(entry.repo)), thirdPartyTag(entry.repo));
     }
     if (col.key === 'fetched') {
-      const age = v ? el('span', { title: `Fetched ${localTime(String(v))}` }, ago(String(v))) : el('span', { class: 'muted', title: 'Not fetched yet' }, '—');
+      const checked = checkedAfterFetch(entry);
+      const tip = [`Fetched ${localTime(String(v))}`, checked && `Checked ${localTime(checked)}; nothing had changed since the fetch`].filter(Boolean).join('\n');
+      const age = v ? el('span', { title: tip }, ago(String(v))) : el('span', { class: 'muted', title: 'Not fetched yet' }, '—');
       return el('span', { class: 'fetched' }, age, rowRefresh(entry));
     }
     if (col.key === 'category') return v ? el('span', { class: 'category' }, String(v)) : el('span', { class: 'muted' }, '—');
@@ -233,7 +235,7 @@ export function start(api: Api, prRoute?: Route): () => void {
     const rows = orderedEntries(shown, state.sort, state.order, state.window);
     const now = Date.now();
     $('tbody').replaceChildren(...rows.map((e) => {
-      const stale = !e.fetched_at || now - Date.parse(e.fetched_at) > snap.stale_after_secs * 1000;
+      const stale = isStale(e, snap.stale_after_secs, now);
       return el('tr', {
         class: classes(stale && 'stale', e.error && 'error'),
         dataset: { repo: e.repo },
