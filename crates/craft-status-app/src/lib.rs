@@ -50,6 +50,8 @@ const BACKOFF_MAX: i64 = 60 * 60;
 /// Below this many GraphQL points left, pause for `LOW_BUDGET_PAUSE`.
 const BUDGET_FLOOR: u64 = 150;
 const LOW_BUDGET_PAUSE: i64 = 30 * 60;
+/// Below this many GraphQL points left, skip requests nobody asked for.
+const OPTIONAL_FLOOR: u64 = 1_500;
 /// How long to wait for the PR poller to finish talking to GitHub (it gives way
 /// between requests) before going ahead anyway: this poller is never starved.
 const LEASE_PATIENCE: Duration = Duration::from_secs(180);
@@ -242,6 +244,7 @@ fn reload_config_if_changed(app: &AppHandle) {
                 snap.sync_repos(&cfg.repos);
                 snap.poll_secs = cfg.poll_secs();
                 snap.stale_after_secs = cfg.stale_secs();
+                snap.parity_warn_days = cfg.parity_review_warn_days;
                 if snap
                     .error
                     .as_deref()
@@ -274,6 +277,58 @@ struct Pacing {
     forced_since: Option<DateTime<Utc>>,
 }
 
+/// What a fetch does about a repo's parity numbers.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum ParityStep {
+    /// The held numbers were read from the same documents: keep them.
+    Keep,
+    /// Read the documents; a repo without any needs no request.
+    Read,
+    /// Fewer than [`OPTIONAL_FLOOR`] points are left: keep the held numbers
+    /// until a later fetch.
+    Wait,
+}
+
+/// The [`ParityStep`] for a repo whose parity documents are `files` (blob
+/// ids by path) at commit `head`, holding `held`, after a fetch that left
+/// `left` GraphQL points.
+fn parity_step(
+    files: &std::collections::BTreeMap<String, String>,
+    head: Option<&str>,
+    held: Option<&craft_core::Parity>,
+    left: Option<u64>,
+) -> ParityStep {
+    if held.is_some_and(|p| p.is_current(files, head)) {
+        ParityStep::Keep
+    } else if files.is_empty() || left.is_none_or(|r| r >= OPTIONAL_FLOOR) {
+        ParityStep::Read
+    } else {
+        ParityStep::Wait
+    }
+}
+
+/// The retry time (as in `RateLimited`) when GitHub rate-limited a fetch's
+/// parity request.
+fn parity_rate_limit(parity: &Option<Result<craft_core::Parity, GhError>>) -> Option<String> {
+    match parity {
+        Some(Err(GhError::RateLimited(until))) => Some(until.clone()),
+        _ => None,
+    }
+}
+
+/// A fetch's outcome after its parity request. When GitHub rate-limited that
+/// request (`limited` holds the retry time), a fetch that otherwise succeeded
+/// returns `RateLimited`; an error is returned unchanged.
+fn with_parity_limit(
+    outcome: Result<Option<u64>, GhError>,
+    limited: Option<String>,
+) -> Result<Option<u64>, GhError> {
+    match (outcome, limited) {
+        (Ok(_), Some(until)) => Err(GhError::RateLimited(until)),
+        (outcome, _) => outcome,
+    }
+}
+
 /// Fetch `repo` into the snapshot. Errors about this repo land on its row;
 /// a missing or rejected token doesn't, since it isn't the repo's fault.
 fn fetch_into_snapshot(app: &AppHandle, cfg: &Config, repo: &str) -> Result<(), GhError> {
@@ -299,7 +354,6 @@ fn fetch_into_snapshot(app: &AppHandle, cfg: &Config, repo: &str) -> Result<(), 
         eprintln!("{repo}: the shared GitHub lease is still held; fetching anyway");
     }
     let result = gh.fetch_repo(repo, now, &mut raw, shared);
-    drop(lease);
     if let (Ok(_), Some(dir)) = (&result, &raw_dir) {
         if let Err(e) = raw.save(dir, repo) {
             eprintln!("{repo}: could not save raw cache: {e}");
@@ -321,6 +375,26 @@ fn fetch_into_snapshot(app: &AppHandle, cfg: &Config, repo: &str) -> Result<(), 
             .map(|oid| (oid.clone(), gh.icon(repo, oid))),
         Err(_) => None,
     };
+    // The parity documents are downloaded again only when one of them changed.
+    let parity = match &result {
+        Ok((stats, budget)) => {
+            let step = {
+                let snap = state.snapshot.lock().unwrap();
+                let held = snap
+                    .repos
+                    .iter()
+                    .find(|e| e.repo == repo)
+                    .and_then(|e| e.parity.as_ref());
+                let head = stats.head_oid.as_deref();
+                parity_step(&stats.parity_oids, head, held, budget.graphql_remaining)
+            };
+            (step == ParityStep::Read)
+                .then(|| gh.parity(repo, stats.head_oid.as_deref(), &stats.parity_oids))
+        }
+        Err(_) => None,
+    };
+    drop(lease);
+    let parity_limited = parity_rate_limit(&parity);
 
     let mut snap = state.snapshot.lock().unwrap();
     let outcome = {
@@ -346,6 +420,11 @@ fn fetch_into_snapshot(app: &AppHandle, cfg: &Config, repo: &str) -> Result<(), 
                 entry.fetched_at = Some(now);
                 entry.error = None;
                 entry.inaccessible = false;
+                match parity {
+                    Some(Ok(p)) => entry.parity = Some(p),
+                    Some(Err(e)) => eprintln!("{repo}: parity: {e}"),
+                    None => {}
+                }
                 Ok(budget.graphql_remaining)
             }
             Err(GhError::NotFound) => {
@@ -355,6 +434,7 @@ fn fetch_into_snapshot(app: &AppHandle, cfg: &Config, repo: &str) -> Result<(), 
                 entry.fetched_at = Some(now);
                 entry.error = None;
                 entry.inaccessible = true;
+                entry.parity = None;
                 Ok(None)
             }
             Err(GhError::Unauthorized) => Err(GhError::Unauthorized),
@@ -364,6 +444,12 @@ fn fetch_into_snapshot(app: &AppHandle, cfg: &Config, repo: &str) -> Result<(), 
             }
         }
     };
+    // The repo's numbers are stored; a rate limit on the parity request
+    // still pauses the next fetch.
+    if let (Ok(Some(left)), Some(_)) = (&outcome, &parity_limited) {
+        snap.rate_limit_remaining = Some(*left);
+    }
+    let outcome = with_parity_limit(outcome, parity_limited);
     match outcome {
         Ok(left) => {
             if left.is_some() {
@@ -413,6 +499,7 @@ fn step(app: &AppHandle, pacing: &mut Pacing) {
     let due = {
         let mut snap = state.snapshot.lock().unwrap();
         snap.sync_repos(&cfg.repos);
+        snap.parity_warn_days = cfg.parity_review_warn_days;
         snap.poll_secs = cfg.poll_secs();
         snap.stale_after_secs = cfg.stale_secs();
         // The PR poller was rate-limited on this account: hold off too.
@@ -931,6 +1018,7 @@ pub fn run() {
     snapshot.sync_repos(&config.repos);
     snapshot.poll_secs = config.poll_secs();
     snapshot.stale_after_secs = config.stale_secs();
+    snapshot.parity_warn_days = config.parity_review_warn_days;
     let (pr_review, pr_threads) = pr::init(&config, &snapshot);
 
     let (tx, rx) = mpsc::channel();
@@ -1090,5 +1178,103 @@ mod tests {
         assert!(tray_tooltip(&Snapshot::default(), now).contains("no data"));
         assert!(tray_tooltip(&snap_with(&[1], now), now).contains("updated"));
         assert!(tray_tooltip(&snap_with(&[1, 30], now), now).contains("STALE"));
+    }
+
+    #[test]
+    fn parity_documents_are_downloaded_only_when_one_changed() {
+        use craft_core::parity::{read, Input, PARITY_DOC, ROADMAP};
+        use std::collections::BTreeMap;
+        let files = |pairs: &[(&str, &str)]| -> BTreeMap<String, String> {
+            pairs
+                .iter()
+                .map(|(p, o)| (p.to_string(), o.to_string()))
+                .collect()
+        };
+        let docs = files(&[(ROADMAP, "a1"), (PARITY_DOC, "b1")]);
+        let held = read(&[
+            Input {
+                path: ROADMAP,
+                oid: "a1",
+                text: "## Headline numbers\n| | Value |\n|---|---|\n| Feature breadth | 50% |\n",
+            },
+            Input {
+                path: PARITY_DOC,
+                oid: "b1",
+                text: "# Parity\n",
+            },
+        ]);
+        let plenty = Some(OPTIONAL_FLOOR);
+        let low = Some(OPTIONAL_FLOOR - 1);
+        let head = Some("h1");
+        let step = |files, held, left| parity_step(files, head, held, left);
+        assert_eq!(step(&docs, Some(&held), plenty), ParityStep::Keep);
+        assert_eq!(step(&docs, Some(&held), low), ParityStep::Keep);
+        let changed = files(&[(ROADMAP, "a2"), (PARITY_DOC, "b1")]);
+        assert_eq!(step(&changed, Some(&held), plenty), ParityStep::Read);
+        assert_eq!(
+            step(&changed, Some(&held), None),
+            ParityStep::Read,
+            "GitHub sent no count"
+        );
+        assert_eq!(step(&changed, Some(&held), low), ParityStep::Wait);
+        assert_eq!(step(&docs, None, plenty), ParityStep::Read);
+        assert_eq!(step(&docs, None, Some(0)), ParityStep::Wait);
+        // Without documents there is nothing to download, whatever the budget.
+        let none = BTreeMap::new();
+        assert_eq!(step(&none, None, Some(0)), ParityStep::Read);
+        let empty = read(&[]);
+        assert_eq!(step(&none, Some(&empty), Some(0)), ParityStep::Keep);
+        assert_eq!(step(&none, Some(&held), Some(0)), ParityStep::Read);
+        // A report whose breadth row links to a document outside `docs` is
+        // read again at a new commit.
+        let mut linked = read(&[Input {
+            path: ROADMAP,
+            oid: "a1",
+            text: "## Headline numbers\n| | Value | Kind |\n|---|---|---|\n\
+                   | Feature breadth | 50% | [menus](docs/menus.md) |\n",
+        }]);
+        linked.commit = head.map(str::to_string);
+        let roadmap = files(&[(ROADMAP, "a1")]);
+        assert_eq!(step(&roadmap, Some(&linked), plenty), ParityStep::Keep);
+        assert_eq!(
+            parity_step(&roadmap, Some("h2"), Some(&linked), plenty),
+            ParityStep::Read
+        );
+    }
+
+    #[test]
+    fn a_rate_limited_parity_request_ends_the_fetch_rate_limited() {
+        let limited = Some(Err(GhError::RateLimited("the top of the hour".into())));
+        assert_eq!(
+            parity_rate_limit(&limited).as_deref(),
+            Some("the top of the hour")
+        );
+        assert_eq!(parity_rate_limit(&Some(Err(GhError::NotFound))), None);
+        assert_eq!(
+            parity_rate_limit(&Some(Ok(craft_core::Parity::default()))),
+            None
+        );
+        assert_eq!(parity_rate_limit(&None), None);
+
+        let until = || Some("the top of the hour".to_string());
+        for left in [Some(4_000), None] {
+            assert!(matches!(
+                with_parity_limit(Ok(left), until()),
+                Err(GhError::RateLimited(t)) if t == "the top of the hour"
+            ));
+            assert!(matches!(with_parity_limit(Ok(left), None), Ok(l) if l == left));
+        }
+        assert!(matches!(
+            with_parity_limit(Err(GhError::Unauthorized), until()),
+            Err(GhError::Unauthorized)
+        ));
+        assert!(matches!(
+            with_parity_limit(Err(GhError::RateLimited("noon".into())), until()),
+            Err(GhError::RateLimited(t)) if t == "noon"
+        ));
+        assert!(matches!(
+            with_parity_limit(Err(GhError::Http(502, "bad gateway".into())), None),
+            Err(GhError::Http(502, _))
+        ));
     }
 }

@@ -57,6 +57,7 @@ sort by a column again.
 | Open | open PRs · open issues · oldest open PR |
 | Latest | last commit to `main` · newest issue · newest PR |
 | Activity (dropdown) | commits to `main` · PRs opened · PRs merged · issues opened · people committing to `main` · **Total DLs** (downloads across all releases; only under All time) |
+| Parity | **Breadth** · **Ready**, from the repo's `ROADMAP.md` |
 | Downloads | the latest release's tag · its publish date · its download rate and downloads · **Unreleased** (commits on `main` since it) |
 
 - **Activity** covers the window picked in that group's header: the last
@@ -69,6 +70,38 @@ sort by a column again.
   differs per row (hover a number for the release and its date). Its commits
   are the **Unreleased** count; PRs, merges, issues and people count from the
   release's publish date. Repos with no release show `—`.
+- **Parity** reads the "Headline numbers" table of each repo's `ROADMAP.md`,
+  or the headline table of `docs/target-app-parity.md` when `ROADMAP.md` has
+  none. Breadth is the percentage in the Feature breadth row (the row marked
+  weighted when there are several). Ready is the percentage in the Ready for
+  real work row. Without that row, Ready comes from the "Readiness by
+  audience" table, then from the headline table of
+  `docs/target-app-parity.md`, then from the Feature depth row. Hover a number
+  for its row, whether the document calls it measured or estimated, and the
+  file's Last reviewed date. Click it to open `docs/target-app-parity.md` on
+  GitHub, or the row in `ROADMAP.md` when the repo has no such document. A
+  repo without the file, the table or the row shows `—`, and hovering it says
+  which is missing. A row whose value has no percentage shows `—` with an
+  amber dot.
+- **The Parity tab** (`⌘3`) shows each app's parity with its target app, read
+  from the same two documents plus `docs/gaps.md`, the machine checklists
+  (`docs/parity-checklist.md`, `docs/scorecard.md`, `parity/*.toml` and the
+  documents the Feature breadth rows link to) and every `docs/*-parity.md`.
+  The **Apps** view has a row per app: its stage; Ready, for the full target,
+  mainstream users or essentials (picked in the header), with its range and a
+  tick at Breadth; the hours to beta and to full parity; the dimension that
+  loses the most weighted points; the open gaps that block beta, with their
+  hours; a cell per dimension; a strip of feature areas; the checklist
+  progress; the age of the oldest Last reviewed date, amber after
+  `parity_review_warn_days` (default 14); and how long ago a parity document
+  last changed. Click a row, or press `Enter`, to open a pane with every
+  dimension, area, ranked gap, checklist and parser note. `↑` and `↓` move
+  between apps, and `Esc` closes the pane. **All gaps** lists every app's open
+  gaps, alpha blockers first, then beta blockers by rank, with filters for the
+  app, kind, beta blockers, closed gaps, hours and text, and the gaps and hours
+  per kind. The headline numbers, dimension cells, gaps, checklist rows and
+  parser notes link to the line they were read from, on GitHub at the commit
+  read. The tab's badge counts the open gaps that block alpha or beta.
 - **Builds** are GitHub releases. Drafts are ignored. Prereleases count, and
   they carry a `PRE` tag.
 - **Unreleased** counts the commits that have landed on `main` since the latest
@@ -239,6 +272,18 @@ above the 150 where the Downloads tab's polling pauses itself.
 - Each repo's icon is `assets/app-icon/hicolor/64x64/apps/*.png` on its default
   branch. It is downloaded once and again only when the file changes; it's
   kept in the cache. Repos without one (libraries) get a lettered tile.
+- Each repo fetch also reads the blob ids of the repo's parity documents:
+  `ROADMAP.md`, `docs/target-app-parity.md`, `docs/gaps.md`,
+  `docs/parity-checklist.md`, `docs/scorecard.md`, every `docs/*-parity.md`
+  and `parity/*.toml`, and `README.md` when there is no `ROADMAP.md`. The app
+  downloads their text, in one more GraphQL request, only when one of them has
+  changed since the parity numbers were read, and keeps the numbers in the
+  cache. One more request reads the last commit to each document, and
+  another reads the documents the Feature breadth rows link to that are not
+  in that list. A repo whose Feature breadth rows link to such a document is
+  read again after each new commit to its default branch. While fewer than
+  1,500 points remain, it waits, and the Parity columns and tab keep their
+  previous numbers.
 - If fewer than 150 points remain, fetching pauses for 30 minutes. If GitHub
   rate-limits the app, it pauses for 5 minutes, or until GitHub's retry time
   if that is later, doubling up to an hour while the limit persists. A repo

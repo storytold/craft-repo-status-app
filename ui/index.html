@@ -17,6 +17,7 @@
         <button class="view" data-view="repos" role="tab" title="Downloads (⌘1)">Downloads <span class="badge" id="repo-count"></span></button>
         <button class="view" data-view="prs" role="tab" title="PRs (⌘2)">PRs <span class="badge good" id="prs-count"></span></button>
         <button class="view" data-view="urgent" role="tab" title="Fix first (⌘3)">Fix first <span class="badge hot" id="urgent-count"></span></button>
+        <button class="view" data-view="parity" role="tab" title="Parity (⌘4)">Parity <span class="badge hot" id="parity-count"></span></button>
       </nav>
       <fieldset class="kinds" id="repo-kinds" aria-label="Which repos to show"></fieldset>
       <nav class="views sub" id="pr-nav" aria-label="PR views" hidden>
@@ -53,6 +54,20 @@
     </main>
 
     <main id="prs-view" hidden></main>
+
+    <main id="parity-view" hidden>
+      <div class="parity-bar">
+        <div class="segmented" role="tablist" aria-label="Parity view">
+          <button class="seg" data-pview="apps" role="tab">Apps</button>
+          <button class="seg" data-pview="gaps" role="tab">All gaps</button>
+        </div>
+        <div class="parity-filters" id="parity-filters"></div>
+      </div>
+      <div class="parity-body">
+        <div class="parity-main" id="parity-main"></div>
+        <aside class="parity-detail" id="parity-detail" aria-label="App detail" hidden></aside>
+      </div>
+    </main>
 
     <main id="urgent-view" hidden>
       <div class="urgent-controls">

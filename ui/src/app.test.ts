@@ -25,6 +25,7 @@ const stats = (s: Partial<RepoStats>): RepoStats => ({
   open_prs: 1, open_issues: 2, last_commit_at: NOW, last_issue_at: NOW, oldest_open_pr_at: NOW, newest_pr_at: NOW,
   recent: {}, latest_build: 'v1.0.0', latest_build_at: NOW, latest_build_prerelease: false, latest_build_sha: null,
   since_build: null, latest_build_downloads: 0, downloads_total: 0, urgency: 0, critical_issues: 0, urgent: [], icon_oid: null,
+  head_oid: null, parity_oids: {},
   ...s,
 });
 
@@ -253,6 +254,346 @@ test('links in a row open on GitHub without dragging or switching views', async 
   assert.deepEqual(h.calls.filter((c) => c.cmd === 'open_url').map((c) => c.args?.url), ['https://github.com/o/gamma']);
 });
 
+type ParityReport = NonNullable<RepoEntry['parity']>;
+type ParityGap = ParityReport['gaps'][number];
+const noValue = { state: 'absent', why: 'Not read yet' } as const;
+
+/** The parts of a parity report beyond the headline numbers, empty. */
+const parityParts = () => ({
+  breadth_links: [] as string[], reviewed: null, dims: [], heat: [], dims_total: noValue, top_drag: noValue, areas: [],
+  areas_total: noValue, area_alts: [], area_weight_sum: null, area_weights_why: null, gaps: [], checklists: [], docs: [],
+  gap_totals: { beta: null, partial: null, alpha: 0, alpha_none: false, stated: noValue, ids_stable: false, form: '', beta_unknown: true },
+});
+
+const okFigure = (pct: number, label: string, line = 12): ParityReport['breadth'] => ({
+  state: 'ok', pct, low: null, high: null, label, text: `~${pct}%`, kind: 'estimated', basis: 'estimated', path: 'ROADMAP.md', line, from: null,
+});
+
+/** A parity report read at commit c1, with Breadth 80% and Ready 55%. */
+const report = (p: Partial<ParityReport> = {}): ParityReport => ({
+  version: 2, commit: 'c1', roadmap_oid: 'r1', parity_doc: true, na: null, last_reviewed: '2026-10-10',
+  breadth: okFigure(80, 'Feature breadth'), ready: okFigure(55, 'Ready for real work', 13), breadth_alts: [], menu_breadth: noValue,
+  menu_hint: null, mainstream: noValue, essentials: noValue, to_alpha: noValue, to_beta: noValue, to_full: noValue, stage: noValue,
+  files: [], notes: [], ...parityParts(), ...p,
+});
+
+const parityGap = (id: string, g: Partial<ParityGap> = {}): ParityGap => ({
+  key: id, id, rank: 0, group: null, title: `Gap ${id}`, alpha: 'no', beta: 'no', blocks_src: null, scope_note: null, priority: null,
+  kinds: [], hours: noValue, counted_in: null, doc: null, workstream: null, src: { path: 'docs/gaps.md', line: 4 }, detail_src: null,
+  detail: null, closed: false, paired_with: [], issues: [], ...g,
+});
+
+test('the parity columns show Breadth and Ready, explain dashes, sort, and open the parity document', async () => {
+  type Parity = NonNullable<RepoEntry['parity']>;
+  type Figure = Parity['breadth'];
+  const figure = (pct: number, label: string): Figure => ({
+    state: 'ok', pct, low: null, high: null, label, text: `~${pct}%`, kind: 'estimated', basis: 'estimated', path: 'ROADMAP.md', line: 12, from: null,
+  });
+  const absent = (why: string): Figure => ({ state: 'absent', why });
+  const unread = { state: 'absent', why: 'Not read yet' } as const;
+  const parity = (p: Partial<Parity>): Parity => ({
+    version: 1, commit: 'abc123', roadmap_oid: 'r1', parity_doc: true, na: null, last_reviewed: '2026-10-10',
+    breadth: figure(80, 'Feature breadth'), ready: figure(50, 'Ready for real work'), breadth_alts: [], menu_breadth: unread,
+    menu_hint: null, mainstream: unread, essentials: unread, to_alpha: unread, to_beta: unread, to_full: unread,
+    stage: unread, files: [], notes: [], ...parityParts(), ...p,
+  });
+  const none = 'No ROADMAP.md or docs/target-app-parity.md at HEAD';
+  const h = await setup({ snap: snapshot([
+    repo('alpha', { urgency: 100 }, { parity: parity({ ready: figure(61, 'Ready for real work') }) }),
+    repo('beta', { urgency: 300 }, { parity: parity({ roadmap_oid: null, parity_doc: false, na: none, breadth: absent(none), ready: absent(none) }) }),
+    repo('gamma', { urgency: 200 }, { parity: parity({
+      parity_doc: false, breadth: { state: 'unreadable', why: 'No percentage in the Value cell of Feature breadth', raw: 'most', path: 'ROADMAP.md', line: 9 },
+    }) }),
+    repo('delta', null, { fetched_at: null }),
+    repo('gone', null, { inaccessible: true }),
+  ]) });
+  const col = (label: string) => [...h.doc.querySelectorAll('thead tr.cols th')].findIndex((th) => th.textContent === label);
+  const breadth = col('Breadth');
+  const ready = col('Ready');
+  assert.equal(ready, breadth + 1);
+  const groups = [...h.doc.querySelectorAll('thead tr.groups th')].map((th) => th.textContent);
+  assert.ok(groups.includes('Parity'));
+  const cell = (name: string, i: number) => h.row(name).cells[i]!;
+  assert.equal(cell('alpha', breadth).textContent, '80%');
+  assert.equal(cell('alpha', ready).textContent, '61%');
+  assert.match(cell('alpha', ready).querySelector<HTMLElement>('.parity')!.title, /^Ready for real work: ~61%\nEstimated · estimated\nROADMAP\.md last reviewed 2026-10-10\n/);
+  // A repo without the documents shows a plain dash, and its tooltip gives the reason.
+  assert.equal(cell('beta', ready).textContent, '—');
+  assert.equal(cell('beta', ready).querySelector<HTMLElement>('.parity')!.title, none);
+  assert.ok(cell('beta', ready).querySelector('.parity .muted'));
+  assert.equal(cell('beta', ready).querySelector('.link'), null);
+  // A row that did not parse shows a dash with an amber dot and links to its line.
+  assert.ok(cell('gamma', breadth).querySelector('.warn-dot'));
+  assert.match(cell('gamma', breadth).querySelector<HTMLElement>('.parity')!.title, /ROADMAP\.md line 9: most/);
+  // A repo not read yet shows a dash, and an inaccessible repo shows nothing.
+  assert.equal(cell('delta', ready).textContent, '—');
+  assert.equal(cell('delta', ready).querySelector<HTMLElement>('.muted')!.title, 'Not read yet');
+  assert.equal(cell('gone', ready).textContent, '');
+  // Percentages have no total in the footer.
+  assert.equal(h.doc.querySelector('tfoot tr')!.querySelectorAll('td')[ready]!.textContent, '');
+
+  header(h, 'Ready').click();
+  assert.deepEqual(h.rows(), ['alpha', 'gamma', 'beta', 'delta', 'gone'], 'highest first, missing numbers last');
+  cell('alpha', breadth).querySelector<HTMLElement>('.link')!.click();
+  cell('gamma', breadth).querySelector<HTMLElement>('.link')!.click();
+  assert.deepEqual(h.calls.filter((c) => c.cmd === 'open_url').map((c) => c.args?.url), [
+    'https://github.com/o/alpha/blob/abc123/docs/target-app-parity.md',
+    'https://github.com/o/gamma/blob/abc123/ROADMAP.md?plain=1#L9',
+  ]);
+  assert.equal(h.view(), 'repos', 'a click on the number does not open the urgent view');
+});
+
+// ───────────────────────────── parity tab ─────────────────────────────
+
+/** Two apps with parity documents (alpha, gamma), one without (beta), and one not accessible (gone). */
+function paritySnapshot(): Snapshot {
+  const daysAgo = (n: number) => new Date(Date.now() - n * 86400e3).toISOString().slice(0, 10);
+  const hours = (lo: number, hi: number) => ({ state: 'ok' as const, v: { lo, hi, approx: false, basis: null, note: null, raw: `${lo}–${hi} h`, counted_in: null }, src: { path: 'docs/gaps.md', line: 6 } });
+  const alpha = report({
+    reviewed: daysAgo(30),
+    stage: { state: 'ok', v: { name: 'alpha', steps: [] }, src: { path: 'ROADMAP.md', line: 3 } },
+    heat: [{ column: 'features', value: 70, text: '70%', rows: ['Features: 70%'], src: { path: 'ROADMAP.md', line: 20 } }],
+    files: [
+      { path: 'ROADMAP.md', oid: 'r1', reviewed: daysAgo(30), updated: daysAgo(30), generated: null, target: 'Some App 7', date_lines: 1, line: 2, why: null, commit_date: '2026-10-17T09:00:00Z', commit: 'c1' },
+      { path: 'docs/gaps.md', oid: 'g1', reviewed: daysAgo(2), updated: null, generated: null, target: null, date_lines: 1, line: 2, why: null, commit_date: null, commit: null },
+    ],
+    gaps: [
+      parityGap('G1', { rank: 1, beta: 'yes', title: 'Color management', hours: hours(40, 80), kinds: ['feature'], detail_src: { path: 'docs/gaps.md', line: 30 } }),
+      parityGap('G2', { rank: 2, alpha: 'yes', title: 'Crash on save', kinds: ['stability'] }),
+      parityGap('G3', { group: 'Later', title: 'Plugin store' }),
+    ],
+    gap_totals: { beta: { count: 1, lo: 40, hi: 80, unknown: 0 }, partial: null, alpha: 1, alpha_none: false, stated: noValue, ids_stable: true, form: 'table', beta_unknown: false },
+    areas: [{
+      name: 'Text', full_name: 'Text and type', key: 'text', weight: 2, weight_src: null, breadth: noValue,
+      ready: { state: 'ok', v: { kind: 'pct', value: 40, approx: false, low: null, high: null, basis: 'estimated', raw: '40%', note: null, computed: false }, src: { path: 'ROADMAP.md', line: 40 } },
+      ready_from: null, hours: noValue, missing: [{ text: 'vertical text', hover: null }], more: 0, chips_from: 'marker',
+      raw_gaps: 'Missing: vertical text', gaps_header: 'Gaps', unweighted: false, dup_lines: [], conflict: null, kind: '', doc: null,
+      counts: null, src: { path: 'ROADMAP.md', line: 40 }, shortfall: 3,
+    }],
+    notes: [{ level: 'warn', text: 'two date lines', src: { path: 'ROADMAP.md', line: 2 } }],
+  });
+  const gamma = report({
+    ready: okFigure(70, 'Ready for real work'),
+    reviewed: daysAgo(1),
+    gaps: [parityGap('H1', { rank: 1, beta: 'yes', title: 'Tables', kinds: ['feature'], hours: hours(10, 20) })],
+    gap_totals: { beta: { count: 1, lo: 10, hi: 20, unknown: 0 }, partial: null, alpha: 0, alpha_none: true, stated: noValue, ids_stable: true, form: 'table', beta_unknown: false },
+  });
+  const none = 'No ROADMAP.md or docs/target-app-parity.md at HEAD';
+  return {
+    ...snapshot([
+      repo('alpha', {}, { parity: alpha }),
+      repo('beta', {}, { parity: report({ na: none, roadmap_oid: null, parity_doc: false, breadth: { state: 'absent', why: none }, ready: { state: 'absent', why: none } }) }),
+      repo('gamma', {}, { parity: gamma }),
+      repo('gone', null, { inaccessible: true }),
+    ]),
+    parity_warn_days: 14,
+  };
+}
+
+const parityRows = (h: Harness) => [...h.doc.querySelectorAll<HTMLElement>('#parity-rows tr')].map((r) => r.dataset.repo?.slice(2));
+const parityCell = (h: Harness, name: string, label: string) => {
+  const i = [...h.doc.querySelectorAll('#parity-table thead tr.cols th')].findIndex((th) => th.textContent === label);
+  return h.doc.querySelector<HTMLTableRowElement>(`#parity-rows tr[data-repo="o/${name}"]`)!.cells[i]!;
+};
+const press = (h: Harness, key: string, mod = false) =>
+  h.doc.dispatchEvent(new h.win.KeyboardEvent('keydown', { key, metaKey: mod, bubbles: true }) as unknown as Event);
+
+test('the Parity tab lists each app’s numbers, opens with ⌘4, sorts, and remembers', async () => {
+  const h = await setup({ snap: paritySnapshot() });
+  assert.equal(h.doc.getElementById('parity-count')!.textContent, '3', 'G1, G2 and H1 block alpha or beta');
+  press(h, '4', true);
+  assert.equal(h.doc.getElementById('parity-view')!.hidden, false);
+  assert.equal(h.doc.getElementById('repos-view')!.hidden, true);
+  assert.equal(stored(h, 'view'), 'parity');
+  assert.deepEqual(parityRows(h), ['gamma', 'alpha', 'beta', 'gone'], 'by Ready, highest first; apps without numbers last');
+  assert.equal(parityCell(h, 'alpha', 'Ready').textContent, '55%');
+  assert.ok(parityCell(h, 'alpha', 'Ready').querySelector('.ready-bar .tick'), 'the tick marks Breadth');
+  assert.equal(parityCell(h, 'alpha', 'Breadth').textContent, '80%');
+  assert.equal(parityCell(h, 'alpha', 'Stage').textContent, 'alpha');
+  assert.equal(parityCell(h, 'alpha', 'Beta gaps').textContent, '1 · 40–80 h');
+  assert.equal(parityCell(h, 'alpha', 'Features').textContent, '70%');
+  assert.equal(parityCell(h, 'alpha', 'Reviewed').textContent, '30d');
+  assert.ok(parityCell(h, 'alpha', 'Reviewed').querySelector('.old'), 'older than parity_warn_days');
+  assert.ok(!parityCell(h, 'gamma', 'Reviewed').querySelector('.old'));
+  assert.match(parityCell(h, 'alpha', 'Changed').querySelector<HTMLElement>('span')!.title, /^Last commit to a parity document: /);
+  assert.equal(parityCell(h, 'beta', 'App').querySelector('.na')!.textContent, 'n/a');
+  assert.equal(parityCell(h, 'gone', 'Ready').textContent, '—');
+  assert.equal(h.doc.querySelector('#parity-table tfoot td')!.textContent, '2 of 4 apps');
+
+  const header = [...h.doc.querySelectorAll<HTMLElement>('#parity-table thead tr.cols th')].find((th) => th.textContent === 'App')!;
+  header.click();
+  assert.deepEqual(parityRows(h), ['alpha', 'gamma', 'beta', 'gone']);
+  assert.deepEqual(stored(h, 'paritySort'), { key: 'app', dir: 'asc' });
+  parityCell(h, 'alpha', 'Breadth').querySelector<HTMLElement>('.link')!.click();
+  assert.equal(h.calls.at(-1)?.args?.url, 'https://github.com/o/alpha/blob/c1/ROADMAP.md?plain=1#L12');
+  assert.equal(h.doc.getElementById('parity-detail')!.hidden, true, 'a click on a number does not open the detail pane');
+
+  // The audience dropdown survives a snapshot.
+  const picker = h.doc.querySelector<HTMLSelectElement>('#parity-table .window-picker')!;
+  h.emit('craft:snapshot', paritySnapshot());
+  assert.equal(h.doc.querySelector('#parity-table .window-picker'), picker);
+});
+
+test('a click on an app opens its detail pane; the arrows move it and Esc closes it before hiding the window', async () => {
+  const h = await setup({ snap: paritySnapshot(), storage: { view: 'parity', paritySort: { key: 'app', dir: 'asc' } } });
+  const pane = h.doc.getElementById('parity-detail')!;
+  assert.equal(pane.hidden, true);
+  h.doc.querySelector<HTMLElement>('#parity-rows tr[data-repo="o/alpha"]')!.click();
+  assert.equal(pane.hidden, false);
+  assert.equal(pane.querySelector('h2')!.textContent, 'alpha');
+  assert.match(pane.querySelector('.detail-head')!.textContent ?? '', /vs Some App 7/);
+  const numbers = [...pane.querySelectorAll('.number')].map((n) => n.textContent);
+  assert.ok(numbers.includes('Breadth80%Estimated'), numbers.join(' | '));
+  const gapTitles = () => [...pane.querySelectorAll<HTMLTableRowElement>('.detail-table.gaps tbody tr')].map((r) => r.cells[2]!.textContent);
+  assert.deepEqual(gapTitles(), ['Color management', 'Crash on save', 'Plugin store']);
+  assert.match(pane.querySelector('.gap-totals')!.textContent ?? '', /Σ beta gaps 40–80 h \(1\)/);
+  assert.match(pane.querySelector('.notes')!.textContent ?? '', /two date lines/);
+  const title = [...pane.querySelectorAll<HTMLElement>('.detail-table.gaps .link')].find((l) => l.textContent === 'Color management')!;
+  title.click();
+  assert.equal(h.calls.at(-1)?.args?.url, 'https://github.com/o/alpha/blob/c1/docs/gaps.md?plain=1#L30', 'the gap’s own heading');
+
+  const beta = h.doc.querySelector<HTMLInputElement>('#detail-beta')!;
+  beta.checked = true;
+  beta.dispatchEvent(new h.win.Event('change') as unknown as Event);
+  assert.deepEqual(gapTitles(), ['Color management']);
+
+  press(h, 'ArrowDown');
+  assert.equal(pane.querySelector('h2')!.textContent, 'gamma');
+  press(h, 'ArrowUp');
+  press(h, 'ArrowUp');
+  assert.equal(pane.querySelector('h2')!.textContent, 'alpha', 'the first row stays selected');
+
+  press(h, 'Escape');
+  assert.equal(pane.hidden, true);
+  assert.ok(!h.calls.some((c) => c.cmd === 'hide_window'), 'Esc closed the pane only');
+  press(h, 'Enter');
+  assert.equal(pane.hidden, false, 'Enter opens the selected app');
+  press(h, 'Escape');
+  press(h, 'Escape');
+  assert.ok(h.calls.some((c) => c.cmd === 'hide_window'));
+});
+
+test('the detail pane keeps an expanded section through a snapshot, and explains apps without numbers', async () => {
+  const h = await setup({ snap: paritySnapshot(), storage: { view: 'parity' } });
+  h.doc.querySelector<HTMLElement>('#parity-rows tr[data-repo="o/alpha"]')!.click();
+  const pane = h.doc.getElementById('parity-detail')!;
+  const area = () => pane.querySelector<HTMLDetailsElement>('details[data-key="area/text"]')!;
+  assert.equal(area().querySelector('.chip')!.textContent, 'vertical text');
+  area().setAttribute('open', '');
+  h.emit('craft:snapshot', paritySnapshot());
+  assert.ok(area().hasAttribute('open'), 'a new snapshot draws the pane again with the section open');
+
+  h.doc.querySelector<HTMLElement>('#parity-rows tr[data-repo="o/beta"]')!.click();
+  assert.equal(pane.querySelector('p.muted')!.textContent, 'No ROADMAP.md or docs/target-app-parity.md at HEAD');
+  h.doc.querySelector<HTMLElement>('#parity-rows tr[data-repo="o/gone"]')!.click();
+  assert.equal(pane.querySelector('p.muted')!.textContent, 'Not accessible (private, or not found).');
+});
+
+test('the Apps cells and the detail pane title each number with where it was read', async () => {
+  type ParityDim = ParityReport['dims'][number];
+  const hrs = (lo: number, hi: number) => ({ lo, hi, approx: false, basis: null, note: null, raw: `${lo}–${hi} h`, counted_in: null });
+  const src = (line: number) => ({ path: 'ROADMAP.md', line });
+  const pct = (value: number) => ({
+    state: 'ok' as const, v: { kind: 'pct' as const, value, approx: false, low: null, high: null, basis: 'estimated' as const, raw: `${value}%`, note: null, computed: false }, src: src(30),
+  });
+  const dim = (name: string, d: Partial<ParityDim> = {}): ParityDim => ({
+    name, group: 'features', weight: 2, weight_src: null, ready: pct(50), breadth: noValue, hours: noValue, kind: '', doc: null,
+    counted: null, child: false, fills: 'ready', only_in: null, src: src(20), shortfall: null, ...d,
+  });
+  const alpha = report({
+    stage: {
+      state: 'ok', v: { name: 'alpha', steps: [{ stage: 'beta', points: 12, hours: hrs(40, 60), text: '' }, { stage: 'full', points: null, hours: null, text: '' }] },
+      src: src(3), from: 'Stage row',
+    },
+    files: [
+      { path: 'ROADMAP.md', oid: 'r1', reviewed: '2026-10-01', updated: '2026-10-02', generated: null, target: null, date_lines: 2, line: 2, why: null, commit_date: null, commit: null },
+      { path: 'docs/gaps.md', oid: 'g1', reviewed: null, updated: null, generated: null, target: null, date_lines: 0, line: null, why: 'No date line', commit_date: null, commit: null },
+    ],
+    dims: [dim('Text', { shortfall: 4, only_in: 'w' }), dim('Vertical text', { child: true })],
+    areas: [{
+      name: 'Text', full_name: 'Text and type', key: 'text', weight: null, weight_src: null, breadth: noValue, ready: pct(40), ready_from: null,
+      hours: { state: 'ok', v: hrs(10, 20), src: src(40) }, missing: [], more: 0, chips_from: 'none', raw_gaps: '', gaps_header: null,
+      unweighted: false, dup_lines: [], conflict: null, kind: '', doc: null, counts: null, src: src(40), shortfall: null,
+    }],
+    area_weights_why: 'No Weight column',
+    checklists: [{
+      kind: 'tiered', path: 'parity/features.toml', overall: 50, more: 2,
+      tiers: [{ name: 'P0', done: 5, ahead: 1, partial: 2, missing: 3, excluded: 0, not_measured: 0, unrecognized: 4, pct: 50 }],
+      rows: [{ status: 'missing', group: 'P0', text: 'Row', notes: '', line: 4 }],
+    }],
+    gaps: [parityGap('G1', { rank: 1 })],
+    gap_totals: {
+      beta: null, partial: { count: 2, lo: 0, hi: 30, unknown: 1 }, alpha: 0, alpha_none: true, stated: { state: 'ok', v: hrs(100, 200), src: src(5) },
+      ids_stable: true, form: 'table', beta_unknown: false,
+    },
+    to_beta: { state: 'ok', v: hrs(300, 400), src: src(6) },
+  });
+  const none = 'No ROADMAP.md or docs/target-app-parity.md at HEAD';
+  const h = await setup({ snap: snapshot([
+    repo('alpha', {}, { parity: alpha }),
+    repo('beta', {}, { parity: report({ na: none }) }),
+    repo('delta', null, { fetched_at: null }),
+    repo('gone', null, { inaccessible: true }),
+  ]), storage: { view: 'parity' } });
+  const appTitle = (name: string) => parityCell(h, name, 'App').querySelector<HTMLElement>('.repo')!.title;
+  assert.deepEqual(['alpha', 'beta', 'delta', 'gone'].map(appTitle), ['Read at c1', none, 'Not read yet', 'Not accessible']);
+  assert.equal(parityCell(h, 'alpha', 'Stage').querySelector<HTMLElement>('.stage')!.title, 'next: beta, 12 points, 40–60 h\nnext: full\nFrom Stage row');
+  const betaGaps = parityCell(h, 'alpha', 'Beta gaps');
+  assert.equal(betaGaps.textContent, '0');
+  assert.equal(betaGaps.querySelector<HTMLElement>('span')!.title, 'Open gaps that block beta\n+ part of 2 gaps (up to 30 h, 1 unestimated)');
+
+  h.doc.querySelector<HTMLElement>('#parity-rows tr[data-repo="o/alpha"]')!.click();
+  const pane = h.doc.getElementById('parity-detail')!;
+  const chips = [...pane.querySelectorAll<HTMLElement>('.fresh-chip')];
+  assert.deepEqual(chips.map((c) => c.textContent), ['ROADMAP.md reviewed 2026-10-01 · updated 2026-10-02', 'gaps.md No date line']);
+  assert.deepEqual(chips.map((c) => c.title), ['ROADMAP.md\n2 date lines\nLast commit not read', 'docs/gaps.md\nLast commit not read']);
+  const dimRows = [...pane.querySelector('table.detail-table')!.querySelectorAll<HTMLTableRowElement>('tbody tr')];
+  assert.deepEqual(dimRows.map((r) => r.cells[0]!.title), ['Text\nOnly in the weight table', 'Vertical text\nPart of the row above; left out of the sums']);
+  assert.ok([...pane.querySelectorAll('h4')].some((x) => x.textContent === 'Areas (sorted by hours: No Weight column)'));
+  assert.equal(pane.querySelector<HTMLElement>('.tier')!.title, '5 done, 1 ahead, 2 partial, 3 missing, 0 out of scope, 4 unrecognized');
+  assert.equal(pane.querySelector('details[data-key="rows/parity/features.toml"] summary')!.textContent, 'Partial and missing rows (1, +2 more)');
+  assert.equal(pane.querySelector('.gap-totals')!.textContent,
+    'No beta gaps + part of 2 gaps (up to 30 h, 1 unestimated); docs/gaps.md says 100–200 h; ROADMAP says 300–400 h to beta');
+});
+
+test('All gaps lists every app’s open gaps by blocking band, filters them, and sorts by a column', async () => {
+  const h = await setup({ snap: paritySnapshot(), storage: { view: 'parity' } });
+  h.doc.querySelector<HTMLElement>('#parity-view .seg[data-pview="gaps"]')!.click();
+  assert.equal(stored(h, 'parityView'), 'gaps');
+  const ids = () => [...h.doc.querySelectorAll('#gaps-table tbody tr')].map((r) => r.querySelectorAll('td')[2]!.textContent);
+  assert.deepEqual(ids(), ['G2', 'G1', 'H1', 'G3'], 'the alpha blocker, the beta blockers by rank, then the rest');
+  assert.match(h.doc.getElementById('kind-sums')!.textContent ?? '', /^4 gaps · 50–100 h \+ 2 unestimated/);
+  const row = (id: string) => [...h.doc.querySelectorAll<HTMLTableRowElement>('#gaps-table tbody tr')].find((r) => r.cells[2]!.textContent === id)!;
+  assert.equal(row('G2').cells[4]!.textContent, 'A');
+  assert.equal(row('G1').cells[8]!.textContent, '2d', 'the age of docs/gaps.md’s review');
+
+  const chip = [...h.doc.querySelectorAll<HTMLElement>('.kind-chip')].find((c) => c.textContent?.startsWith('feature:'))!;
+  chip.click();
+  assert.deepEqual(ids(), ['G1', 'H1']);
+  assert.equal(stored(h, 'gapFilter') && (stored(h, 'gapFilter') as { kind: string }).kind, 'feature');
+  const text = h.doc.querySelector<HTMLInputElement>('#gap-text')!;
+  text.value = 'table';
+  text.dispatchEvent(new h.win.Event('input') as unknown as Event);
+  assert.deepEqual(ids(), ['H1']);
+  assert.equal(h.doc.querySelector('#gap-text'), text, 'the filter keeps its box while typing');
+  text.value = '';
+  text.dispatchEvent(new h.win.Event('input') as unknown as Event);
+
+  const hoursHeader = [...h.doc.querySelectorAll<HTMLElement>('#gaps-table thead th')].find((th) => th.textContent === 'Hours')!;
+  hoursHeader.click();
+  assert.deepEqual(ids(), ['G1', 'H1'], 'most hours first');
+  assert.equal(h.doc.getElementById('parity-detail')!.hidden, true, 'All gaps has no detail pane');
+  press(h, 'Escape');
+  assert.ok(h.calls.some((c) => c.cmd === 'hide_window'), 'Esc in All gaps hides the window');
+});
+
+test('All gaps drops a saved app filter for a repo no longer configured', async () => {
+  const h = await setup({ snap: paritySnapshot(), storage: { view: 'parity', parityView: 'gaps', gapFilter: { repo: 'o/removed' } } });
+  assert.equal(h.doc.querySelectorAll('#gaps-table tbody tr').length, 4);
+  assert.equal(h.doc.querySelector<HTMLSelectElement>('#gap-repo')!.value, '');
+  assert.equal((stored(h, 'gapFilter') as { repo: string }).repo, '');
+});
+
 test('the Fetched column shows each repo’s data age and sorts by it, freshest first ascending', async () => {
   const ago = (s: number) => new Date(Date.now() - s * 1000).toISOString();
   const h = await setup({ snap: snapshot([
@@ -408,9 +749,9 @@ test('keyboard shortcuts and buttons call the host', async () => {
 
 // ───────────────────────────── tabs ─────────────────────────────
 
-test('the tabs are Downloads, PRs and Fix first, in that order, opening on Downloads', async () => {
+test('the tabs are Downloads, PRs, Fix first and Parity, in that order, opening on Downloads', async () => {
   const h = await setup();
-  assert.deepEqual([...h.doc.querySelectorAll<HTMLElement>('[data-view]')].map((b) => b.dataset.view), ['repos', 'prs', 'urgent']);
+  assert.deepEqual([...h.doc.querySelectorAll<HTMLElement>('[data-view]')].map((b) => b.dataset.view), ['repos', 'prs', 'urgent', 'parity']);
   assert.match(h.doc.querySelector('[data-view="repos"]')!.textContent!, /Downloads/);
   assert.equal(h.view(), 'repos');
   assert.equal(h.doc.querySelector('[data-view="repos"]')!.getAttribute('aria-selected'), 'true');
@@ -489,6 +830,19 @@ test('hiding everything says why, and saved toggles apply from the start', async
   assert.equal(h.doc.querySelector('[data-kind="third_party"]')!.getAttribute('aria-pressed'), 'false');
   assert.equal(h.doc.querySelector('tr[data-repo]'), null);
   assert.match(h.doc.getElementById('tbody')!.textContent!, /hidden by the toggles/);
+});
+
+test('the toggles hide repos on the Parity tab and its badge too', async () => {
+  const h = await setup({ snap: paritySnapshot() });
+  const toggle = h.doc.querySelector<HTMLElement>('[data-kind="third_party"]')!;
+  press(h, '4', true);
+  assert.deepEqual(parityRows(h), ['gamma', 'alpha', 'beta', 'gone']);
+  toggle.click();
+  assert.equal(h.doc.querySelector('#parity-rows tr[data-repo]'), null, 'every o/ repo is third party');
+  assert.equal(h.doc.getElementById('parity-count')!.textContent, '');
+  toggle.click();
+  assert.deepEqual(parityRows(h), ['gamma', 'alpha', 'beta', 'gone']);
+  assert.equal(h.doc.getElementById('parity-count')!.textContent, '3');
 });
 
 test('Total DLs sits with the activity columns and only counts under All time', async () => {
