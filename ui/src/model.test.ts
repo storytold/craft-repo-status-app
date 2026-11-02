@@ -292,10 +292,11 @@ test('the Main CI hover lists each workflow, failures first, and each run of one
   assert.equal(mainCiUrl('o/a', both), 'https://github.com/o/a/actions/runs/108', 'the failed run');
   assert.equal(mainCiTip(ci([wf(2, mrun(2, 'timed_out', { at: null }))]), at).split('\n')[1], '✗ W2: timed out (push; time unknown; abcdef2)');
   assert.match(mainCiTip(ci([]), at), /No completed workflow run on main in the last 30 days/);
+  assert.equal(mainCiTip(ci([]), at).split('\n')[1], 'Checked at 12:00.', 'an empty result shows when it was read');
   assert.match(mainCiTip(null, at), /not been read yet/);
   const error = 'GitHub HTTP 403: forbidden';
   assert.equal(mainCiTip(null, at, error), `The last read of the workflow runs failed: ${error}`);
-  assert.match(mainCiTip(ci([]), at, error), /last 30 days.*\nThe last read of the workflow runs failed: GitHub HTTP 403/s);
+  assert.deepEqual(mainCiTip(ci([]), at, error).split('\n').slice(1), ['Checked at 12:00.', `The last read of the workflow runs failed: ${error}`]);
   assert.equal(mainCiTip(both, at, error).split('\n').at(-1), `The last read of the workflow runs failed: ${error}`, 'after the held result');
 });
 

@@ -408,8 +408,10 @@ export function mainCiTip(ci: MainCi | null | undefined, time: (iso: Time) => st
   const failed = error ? `The last read of the workflow runs failed: ${error}` : '';
   if (!ci) return failed || 'The workflow runs on the default branch have not been read yet.';
   const branch = ci.branch || 'main';
+  const checked = ci.checked_at ? `Checked ${time(ci.checked_at)}.` : '';
   if (!ci.workflows.length) {
-    return [`No completed workflow run on ${branch} in the last 30 days, canceled and skipped runs left out.`, failed].filter(Boolean).join('\n');
+    return [`No completed workflow run on ${branch} in the last 30 days, canceled and skipped runs left out.`, checked, failed]
+      .filter(Boolean).join('\n');
   }
   const when = (r: MainRun) => (r.at ? time(r.at) : 'time unknown');
   const mark = (failed: boolean) => (failed ? '✗' : '✓');
@@ -426,7 +428,7 @@ export function mainCiTip(ci: MainCi | null | undefined, time: (iso: Time) => st
       ...w.runs.map((r) => `    ${mark(runFailed(r))} ${conclusionText(r)}: ${r.title} (${when(r)})`)];
   });
   return [`Latest result of each workflow on ${branch}; canceled and skipped runs are left out.`, ...lines,
-    ci.checked_at ? `Checked ${time(ci.checked_at)}.` : '', failed].filter(Boolean).join('\n');
+    checked, failed].filter(Boolean).join('\n');
 }
 
 /** Where the Main CI cell links: the first failed run, otherwise the repo's runs on the default branch. */

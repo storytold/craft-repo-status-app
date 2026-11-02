@@ -312,10 +312,7 @@ fn fetch_into_snapshot(app: &AppHandle, cfg: &Config, repo: &str) -> Result<(), 
         _ => None,
     };
     drop(lease);
-    let ci_limited = match &main_ci {
-        Some(Err(GhError::RateLimited(until))) => Some(until.clone()),
-        _ => None,
-    };
+    let ci_error = main_ci.as_ref().and_then(main_ci_poll_error);
     if let (Ok(_), Some(dir)) = (&result, &raw_dir) {
         if let Err(e) = raw.save(dir, repo) {
             eprintln!("{repo}: could not save raw cache: {e}");
@@ -389,18 +386,17 @@ fn fetch_into_snapshot(app: &AppHandle, cfg: &Config, repo: &str) -> Result<(), 
             }
         }
     };
-    match outcome {
-        Ok(left) => {
-            if left.is_some() {
-                snap.rate_limit_remaining = left;
-            }
-            // The repo's numbers are stored. When GitHub rate-limited the CI
-            // requests, `step` pauses the next fetch.
-            match ci_limited {
-                Some(until) => Err(GhError::RateLimited(until)),
-                None => Ok(()),
-            }
+    let outcome = outcome.and_then(|left| {
+        if left.is_some() {
+            snap.rate_limit_remaining = left;
         }
+        // The repo's numbers are stored. When GitHub rate-limited the CI
+        // requests, `step` pauses the next fetch; when it rejected the token,
+        // the token is marked rejected.
+        ci_error.map_or(Ok(()), Err)
+    });
+    match outcome {
+        Ok(()) => Ok(()),
         Err(GhError::Unauthorized) => {
             if let Some(t) = snap.token.as_mut() {
                 t.rejected = true;
@@ -408,6 +404,16 @@ fn fetch_into_snapshot(app: &AppHandle, cfg: &Config, repo: &str) -> Result<(), 
             Err(GhError::Unauthorized)
         }
         Err(e) => Err(e),
+    }
+}
+
+/// The error a failed [`read_main_ci`] passes on to `step`, besides the
+/// repo's row: a rate limit or a rejected token.
+fn main_ci_poll_error(read: &Result<Option<MainCi>, GhError>) -> Option<GhError> {
+    match read {
+        Err(GhError::RateLimited(until)) => Some(GhError::RateLimited(until.clone())),
+        Err(GhError::Unauthorized) => Some(GhError::Unauthorized),
+        _ => None,
     }
 }
 
@@ -1182,6 +1188,21 @@ mod tests {
         assert!(open_url("https://evil.example/x".into()).is_err());
         assert!(open_url("file:///etc/passwd".into()).is_err());
         assert!(open_url("https://github.com.evil.example/x".into()).is_err());
+    }
+
+    #[test]
+    fn a_rate_limit_or_rejected_token_on_the_ci_read_reaches_the_poller() {
+        assert!(matches!(
+            main_ci_poll_error(&Err(GhError::RateLimited("later".into()))),
+            Some(GhError::RateLimited(until)) if until == "later"
+        ));
+        assert!(matches!(
+            main_ci_poll_error(&Err(GhError::Unauthorized)),
+            Some(GhError::Unauthorized)
+        ));
+        assert!(main_ci_poll_error(&Err(GhError::Http(403, "forbidden".into()))).is_none());
+        assert!(main_ci_poll_error(&Err(GhError::NotFound)).is_none());
+        assert!(main_ci_poll_error(&Ok(None)).is_none());
     }
 
     #[test]
