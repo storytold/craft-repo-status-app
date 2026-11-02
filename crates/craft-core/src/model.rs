@@ -247,11 +247,13 @@ impl Snapshot {
     }
 
     /// Queue `repo` to be fetched on its own, ahead of the schedule. False if
-    /// it isn't configured, or is already queued or being fetched.
+    /// it isn't configured, or is already queued or being fetched. Names
+    /// match in any letter case, as in [`Snapshot::entry`].
     pub fn request(&mut self, repo: &str) -> bool {
-        let known = self.repos.iter().any(|e| e.repo == repo);
+        let same = |r: &str| r.eq_ignore_ascii_case(repo);
+        let known = self.entry(repo).is_some();
         let pending =
-            self.fetching.as_deref() == Some(repo) || self.requested.iter().any(|r| r == repo);
+            self.fetching.as_deref().is_some_and(same) || self.requested.iter().any(|r| same(r));
         if !known || pending {
             return false;
         }
@@ -259,15 +261,31 @@ impl Snapshot {
         true
     }
 
-    /// The next repo refreshed by hand, dropping any no longer configured.
+    /// The next repo refreshed by hand, spelled as its entry is now,
+    /// dropping any no longer configured.
     pub fn take_requested(&mut self) -> Option<String> {
         while !self.requested.is_empty() {
             let repo = self.requested.remove(0);
-            if self.repos.iter().any(|e| e.repo == repo) {
-                return Some(repo);
+            if let Some(e) = self.entry(&repo) {
+                return Some(e.repo.clone());
             }
         }
         None
+    }
+
+    /// The entry for `repo`, in any letter case: a fetch that started before
+    /// [`Snapshot::sync_repos`] changed an entry's spelling still finds it.
+    pub fn entry(&self, repo: &str) -> Option<&RepoEntry> {
+        self.repos
+            .iter()
+            .find(|e| e.repo.eq_ignore_ascii_case(repo))
+    }
+
+    /// As [`Snapshot::entry`], for changing the entry.
+    pub fn entry_mut(&mut self, repo: &str) -> Option<&mut RepoEntry> {
+        self.repos
+            .iter_mut()
+            .find(|e| e.repo.eq_ignore_ascii_case(repo))
     }
 
     /// When the next repo falls due; `None` with nothing configured.
@@ -283,7 +301,9 @@ impl Snapshot {
                 .any(|r| r.is_stale(now, self.stale_after_secs))
     }
 
-    /// Make `repos` match the configured list, keeping data for repos that remain.
+    /// Make `repos` match the configured list, keeping data for repos that
+    /// remain. A repo listed again in other letter case keeps its data and
+    /// takes the configured spelling.
     pub fn sync_repos(&mut self, wanted: &[String]) {
         let mut old = std::mem::take(&mut self.repos);
         self.repos = wanted
@@ -292,7 +312,10 @@ impl Snapshot {
                 old.iter()
                     .position(|e| e.repo.eq_ignore_ascii_case(w))
                     .map(|i| {
-                        let mut entry = old.swap_remove(i);
+                        let mut entry = RepoEntry {
+                            repo: w.clone(),
+                            ..old.swap_remove(i)
+                        };
                         entry.category = category_of(&entry.repo);
                         entry
                     })
@@ -465,6 +488,30 @@ mod tests {
         assert_eq!(s.repos.len(), 2);
         assert_eq!(s.repos[0].repo, "o/c");
         assert_eq!(s.repos[1].error.as_deref(), Some("kept"));
-        assert_eq!(s.repos[1].name(), "b");
+        assert_eq!(s.repos[1].repo, "O/B", "the configured spelling");
+        assert_eq!(s.repos[1].name(), "B");
+        // A fetch that started with the old spelling still finds the entry.
+        s.entry_mut("o/b").unwrap().error = None;
+        assert_eq!(s.repos[1].error, None);
+        assert_eq!(s.entry("o/B").map(|e| e.repo.as_str()), Some("O/B"));
+        assert!(s.entry("o/x").is_none());
+    }
+
+    #[test]
+    fn a_respelled_repo_keeps_its_pending_refresh() {
+        let mut s = Snapshot::default();
+        s.sync_repos(&["o/a".into(), "o/b".into()]);
+        assert!(s.request("o/a"));
+        s.fetching = Some("o/b".into());
+        // Settings saves the list with both repos in other letter case.
+        s.sync_repos(&["O/A".into(), "O/B".into()]);
+        assert!(!s.request("O/A"), "already queued");
+        assert!(!s.request("O/B"), "being fetched");
+        assert_eq!(
+            s.take_requested().as_deref(),
+            Some("O/A"),
+            "the queued refresh survives, under the new spelling"
+        );
+        assert_eq!(s.take_requested(), None);
     }
 }

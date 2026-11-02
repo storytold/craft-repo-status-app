@@ -281,11 +281,12 @@ The app behaves like the Todo app:
 
 - It lives in the menu bar, with no Dock icon.
 - Left-click the tray icon to show or hide the window. Right-click it to get
-  Refresh Now, Always on Top, Edit Config… and Quit.
+  Refresh Now, Always on Top, Settings…, Open Config File and Quit.
 - `⌘⇧G` shows or hides the window from anywhere.
 - The window is chrome-less and semi-transparent, and it appears on every
   Space. It remembers its position and size in `~/.craft_status_state.toml`.
-- `Esc` hides the window (on the PRs tab, once it's back at the top).
+- `Esc` closes the Settings view when it is open; otherwise it hides the
+  window (on the PRs tab, once it's back at the top).
 
 ## Configuration: `~/.craft_status_config.toml`
 
@@ -297,6 +298,23 @@ its `[pr_review]` section, and all of them are optional: a file from before PR r
 moved in just gets the defaults. `~/.craft_pr_review_config.toml` is no longer read,
 so copy any changes you made there into that section (minus `[window]`, `[tray]` and
 `[shortcuts]`, which the main ones cover).
+
+The Settings view edits the file. Open it with the gear button, `⌘,`, the
+footer's Settings link or the tray's Settings… item. Save checks the values
+again and writes them into the file atomically, keeping its comments, its
+formatting and any keys the app does not know. It writes only the values you
+changed, so edits made to the file while the view was open stay unless you
+changed the same value. A value the app clamps, such as an interval out of
+range, also stays as the file has it, unless your changes would make the app
+read it differently. Always on top shows whether the window is pinned now, and
+a save pins or unpins the window only when you change that box. The view never
+shows the saved GitHub token: leave the field empty to keep it. A save that
+writes a token sets the file's mode to 0600. Fields marked `relaunch` (window
+width and height, Start hidden, No Dock icon) apply the next time the app
+launches; the others apply when you save. A repo you add is fetched before
+repos that are only due, once the 20 s gap after the previous fetch, or a
+pause, has passed. Open config file in the view, and Open Config File in the
+tray menu, open the file itself.
 
 ## Build, install, test
 

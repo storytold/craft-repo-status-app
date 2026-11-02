@@ -170,6 +170,43 @@ tfoot td { color: var(--muted); font-weight: 600; border-bottom: 0; position: st
 .reason.sev { color: var(--bad); background: color-mix(in srgb, var(--bad) 12%, transparent); }
 .u-age { color: var(--muted); font-variant-numeric: tabular-nums; white-space: nowrap; }
 
+/* ───── settings view ───── */
+#settings-view { display: flex; flex-direction: column; overflow: hidden; }
+.settings { flex: 1; min-height: 0; overflow: auto; padding: 4px 15px 12px; }
+.settings-path { color: var(--muted); font-size: 11px; margin: 6px 0; overflow-wrap: anywhere; }
+.settings-section { border: 0; border-top: 1px solid var(--border); margin: 0; padding: 8px 0 10px; display: grid; gap: 6px; }
+.settings-section legend { color: var(--muted); font-size: 10px; font-weight: 600; text-transform: uppercase; letter-spacing: .06em; padding: 0 6px 0 0; }
+.setting { display: grid; grid-template-columns: 210px 1fr; gap: 10px; align-items: baseline; }
+.setting > label { color: var(--fg); }
+.setting-input { display: flex; flex-wrap: wrap; gap: 4px 10px; align-items: baseline; }
+.settings input[type="text"], .settings input[type="number"], .settings input[type="password"] { font: inherit; color: inherit; background: var(--surface); border: 1px solid var(--border); border-radius: 6px; padding: 2px 6px; min-width: 0; }
+.settings input[type="number"] { width: 90px; }
+.settings input[type="text"], .settings input[type="password"] { width: 260px; }
+.settings input[aria-invalid="true"] { border-color: var(--bad); }
+.settings input:focus-visible { outline: 2px solid var(--accent); outline-offset: 0; }
+.help { color: var(--muted); font-size: 11px; }
+.help:empty { display: none; }
+.field-error { color: var(--bad); font-size: 11px; }
+.field-error:empty { display: none; }
+.relaunch { margin-left: 6px; font-size: 9px; font-weight: 700; letter-spacing: .05em; text-transform: uppercase; color: var(--warn); border: 1px solid currentColor; border-radius: 6px; padding: 0 4px; vertical-align: 1px; }
+.repo-editor { display: grid; gap: 6px; }
+.repo-list { list-style: none; margin: 0; padding: 0; max-width: 460px; border: 1px solid var(--border); border-radius: 6px; }
+.repo-list li { display: flex; align-items: center; gap: 2px; padding: 1px 4px 1px 8px; border-bottom: 1px solid var(--border); }
+.repo-list li:last-child { border-bottom: 0; }
+.repo-list li.empty { padding: 8px; color: var(--muted); }
+.repo-name { flex: 1; font-weight: 600; }
+.icon-button.small { width: 22px; height: 22px; font-size: 12px; }
+.icon-button:disabled { opacity: .3; cursor: default; }
+.repo-add { display: flex; gap: 6px; }
+.button { border: 1px solid var(--border); background: var(--surface); border-radius: 6px; padding: 2px 10px; }
+.button:hover:not(:disabled) { border-color: var(--accent); }
+.button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+.button:disabled { opacity: .45; cursor: default; }
+.settings-bar { display: flex; align-items: center; gap: 10px; padding: 7px 15px; border-top: 1px solid var(--border); }
+#settings-status { color: var(--muted); overflow-wrap: anywhere; }
+#settings-status.ok { color: var(--good); }
+#settings-status.error { color: var(--bad); }
+
 /* ───── PR tab ───── */
 .more { display: block; margin: 12px auto; border: 1px solid var(--border); background: var(--surface); border-radius: 6px; padding: 3px 12px; }
 
