@@ -66,6 +66,34 @@ close_to_tray = true
 [shortcuts]
 toggle_window = "CmdOrCtrl+Shift+G"   # "" disables
 
+[people]
+# The team roster for the People tab: the https:// URL of a sheet's CSV
+# export, or a CSV file path. The app reads it while running and keeps a
+# downloaded copy in its cache for an hour. Leave empty for none.
+roster = ""
+# GitHub logins of the owners, who decide pull requests held for the owner,
+# in every repo that [people.repo_owners] does not list.
+owner_logins = []
+# Logins that count as maintainers of every repo, besides the ones found from
+# membership, merges and closes.
+maintainers = []
+# Repos whose maintainers rebase contributors' branches themselves. In these
+# repos a conflict on a contributor's pull request that maintainers can push
+# to shows as a flag, and the People tab does not count it as the author's
+# work.
+rebase_repos = ["storytold/vectorcraft", "storytold/figcraft"]
+# Repos whose maintainers land contributors' work through a batch branch, so
+# a landed pull request may close without merging. The People tab's rankings
+# mark their merge and landed counts as unverified.
+batch_repos = ["storytold/designcraft", "storytold/deckcraft"]
+# The GitHub login whose open pull requests the My PRs tab lists. Leave empty
+# for the user the GitHub token belongs to.
+my_login = ""
+
+# Owners of one repo, in place of owner_logins:
+# [people.repo_owners]
+# "owner/name" = ["owner-login"]
+
 # ───── The PR tab ─────
 # Every setting here is optional. The PR tab covers the repos above, less third
 # parties and exclude_repos.
