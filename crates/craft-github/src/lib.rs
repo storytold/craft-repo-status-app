@@ -147,6 +147,9 @@ pub struct LedgerSync {
     pub cost: u64,
     pub remaining: Option<u64>,
     pub reset_at: Option<DateTime<Utc>>,
+    /// The walk updated `ledger` but could not save it, so the shared
+    /// ledger on disk is older than `ledger`.
+    pub unsaved: bool,
 }
 
 /// Rate-limit bookkeeping returned alongside each repo.
@@ -332,7 +335,11 @@ impl GitHub {
         fresh.fetched_at = Some(now);
         fresh.prune(since);
         let authors: Vec<CommitAuthor> = fresh.commits.values().cloned().collect();
-        let ledger = self.sync_ledger(repo, since, now, shared)?.ledger;
+        let sync = self.sync_ledger(repo, since, now, shared)?;
+        // A probe kept with this fetch lets `restat` read the shared ledger
+        // later, which is older than this fetch's when the save failed.
+        let probe = probe.filter(|_| !sync.unsaved);
+        let ledger = sync.ledger;
         let events = Events {
             prs_opened: ledger.opened_since(since),
             prs_merged: ledger.merged_since(since),
@@ -481,6 +488,7 @@ impl GitHub {
         out.ledger.finish_walk(plan, now, reached, oldest);
         if let Err(e) = shared.save_ledger(repo, &out.ledger) {
             eprintln!("{repo}: could not save the PR ledger: {e}");
+            out.unsaved = true;
         }
         if let Err(e) = shared.note_budget(out.remaining, out.reset_at, now) {
             eprintln!("could not save the shared budget: {e}");
@@ -967,7 +975,9 @@ fn holds_head(
 /// window at `then` as GitHub counted in `main`. [`aged_window_counts`]
 /// needs that. It fails when a history walk stopped at [`MAX_PAGES`], when
 /// an incremental fetch missed a commit dated before it started, and when a
-/// rewritten default branch left commits that are no longer on it.
+/// rewritten default branch left commits that are no longer on it. A
+/// window with no count matches only when `main` has no branch head and
+/// `commits` is empty, as for an empty repository.
 fn commits_match_counts(
     main: &Value,
     commits: &BTreeMap<String, CommitAuthor>,
@@ -976,7 +986,7 @@ fn commits_match_counts(
     let head = &main["repository"]["defaultBranchRef"]["target"];
     windows(then, None).all(|(_, key, start)| {
         let Some(n) = head[format!("c{key}")]["totalCount"].as_u64() else {
-            return true;
+            return !head.is_object() && commits.is_empty();
         };
         let start = start.trunc_subsecs(0);
         commits.values().filter(|(at, _)| *at >= start).count() as u64 == n
@@ -1858,11 +1868,17 @@ mod tests {
         // The fetch from scratch is due six hours after the last one.
         assert!(can_skip(&raw, Some(&probe), t("2026-10-08T06:59:00Z")));
         assert!(!can_skip(&raw, Some(&probe), t("2026-10-08T07:00:00Z")));
-        // GitHub counted one commit in the last 10 minutes at 03:25.
+        // The branch head with a commit count for each window, `c0` to `c6`.
+        let counts = |c: [u64; 7]| -> serde_json::Map<String, Value> {
+            c.iter()
+                .enumerate()
+                .map(|(i, n)| (format!("c{i}"), json!({"totalCount": n})))
+                .collect()
+        };
+        // GitHub counted one commit in each window at 03:25.
         let mut counted = raw.clone();
         if let Some(last) = counted.last.as_mut() {
-            last.main =
-                json!({"repository": {"defaultBranchRef": {"target": {"c0": {"totalCount": 1}}}}});
+            last.main = json!({"repository": {"defaultBranchRef": {"target": counts([1; 7])}}});
         }
         // A history walk that stopped early doesn't hold it.
         assert!(!can_skip(&counted, Some(&probe), now));
@@ -1870,6 +1886,21 @@ mod tests {
             .commits
             .insert("a".into(), (t("2026-10-08T03:20:00Z"), "ann".into()));
         assert!(can_skip(&counted, Some(&probe), now));
+        // An answer that left out a window's count can't be checked.
+        let mut partial = counted.clone();
+        if let Some(last) = partial.last.as_mut() {
+            if let Some(target) =
+                last.main["repository"]["defaultBranchRef"]["target"].as_object_mut()
+            {
+                target.remove("c3");
+            }
+        }
+        assert!(!can_skip(&partial, Some(&probe), now));
+        // Nor can one without the branch head, while commits are held.
+        if let Some(last) = partial.last.as_mut() {
+            last.main = json!({"repository": {"defaultBranchRef": {"target": null}}});
+        }
+        assert!(!can_skip(&partial, Some(&probe), now));
         // The cache holds a commit that a force-push removed from the branch.
         counted
             .commits
@@ -1877,23 +1908,31 @@ mod tests {
         assert!(!can_skip(&counted, Some(&probe), now));
         // The head h1 is dated inside the week, and an incremental fetch after
         // a rewrite did not walk it: the commits held miss it.
-        let head_dated = |date: &str| {
+        let head_dated = |date: &str, c: [u64; 7]| {
             let mut r = raw.clone();
             if let Some(last) = r.last.as_mut() {
-                last.main = json!({"repository": {"defaultBranchRef": {"target": {
-                    "all": {"totalCount": 9, "nodes": [{"committedDate": date}]}}}}});
+                let mut target = counts(c);
+                target.insert(
+                    "all".into(),
+                    json!({"totalCount": 9, "nodes": [{"committedDate": date}]}),
+                );
+                last.main = json!({"repository": {"defaultBranchRef": {"target": target}}});
             }
             r
         };
-        let mut rewritten = head_dated("2026-10-06T00:00:00Z");
+        let mut rewritten = head_dated("2026-10-06T00:00:00Z", [0, 0, 0, 0, 0, 0, 1]);
+        rewritten
+            .commits
+            .insert("y".into(), (t("2026-10-05T00:00:00Z"), "bo".into()));
         assert!(!can_skip(&rewritten, Some(&probe), now));
+        rewritten.commits.clear();
         rewritten
             .commits
             .insert("h1".into(), (t("2026-10-06T00:00:00Z"), "ann".into()));
         assert!(can_skip(&rewritten, Some(&probe), now));
         // A head older than the week isn't held, and needn't be.
         assert!(can_skip(
-            &head_dated("2026-09-01T00:00:00Z"),
+            &head_dated("2026-09-01T00:00:00Z", [0; 7]),
             Some(&probe),
             now
         ));
