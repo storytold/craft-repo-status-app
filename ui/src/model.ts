@@ -421,6 +421,7 @@ export const WINDOWS: readonly ActivityWindow[] = [
   { id: 'release', label: 'Since last release', span: 'since each repo’s latest release' },
   { id: 'all', label: 'All time', span: 'over all time' },
 ];
+export const ALL_TIME = 'all';
 export const DEFAULT_WINDOW = '4h';
 export const windowById = (id: string): ActivityWindow =>
   WINDOWS.find((w) => w.id === id) ?? windowById(DEFAULT_WINDOW);
@@ -446,6 +447,8 @@ export interface Column {
   asc?: boolean;
   /** The field of the selected window's `Activity` this column shows. */
   recent?: keyof Activity;
+  /** In the activity group, but only has a value when that dropdown says All time. */
+  allTimeOnly?: boolean;
   get?: (e: RepoEntry) => Value;
 }
 
@@ -474,11 +477,10 @@ export const COLUMNS: readonly Column[] = [
   { key: 'name', label: 'Repo', kind: 'text', group: '', get: (e) => e.repo.split('/').pop() ?? e.repo },
   { key: 'fetched', label: 'Fetched', kind: 'age', group: '', title: 'Time since this repo’s data was last fetched in full (failed polls keep the older time)', get: (e) => e.fetched_at ?? null },
   { key: 'category', label: 'Type', kind: 'text', group: '', title: 'What the repo is: app, library, assets, CI or tooling', get: (e) => CATEGORY_LABEL[e.category ?? 'other'] },
-  { key: 'latest_build_rate', label: 'Build DL Rate', kind: 'rate', group: 'Downloads', title: 'Build DLs divided by how long the most recent release had been out when they were counted', get: buildRate },
-  { key: 'latest_build_downloads', label: 'Build DLs', kind: 'num', group: 'Downloads', title: 'Downloads of the most recent release, all OSes and package types (checksums and update deltas excluded)' },
-  { key: 'downloads_total', label: 'Total DLs', kind: 'num', group: 'Downloads', title: 'Downloads across every published release' },
   { key: 'latest_build', label: 'Build', kind: 'version', group: 'Downloads', title: 'Most recent published release' },
   { key: 'latest_build_at', label: 'Built', kind: 'date', group: 'Downloads', title: 'When the most recent release was published' },
+  { key: 'latest_build_rate', label: 'Build DL Rate', kind: 'rate', group: 'Downloads', title: 'Build DLs divided by how long the most recent release had been out when they were counted', get: buildRate },
+  { key: 'latest_build_downloads', label: 'Build DLs', kind: 'num', group: 'Downloads', title: 'Downloads of the most recent release, all OSes and package types (checksums and update deltas excluded)' },
   { key: 'commits_since_build', label: 'Unreleased', kind: 'num', group: 'Downloads', title: 'Commits on main since the most recent release (~ means estimated: the release’s commit isn’t on main)', get: (e) => e.stats?.since_build?.commits ?? null },
   { key: 'urgency', label: 'Urgency', kind: 'num', group: 'Fix first', title: 'Sum of the top five open-issue urgency scores' },
   { key: 'critical_issues', label: 'Critical', kind: 'num', group: 'Fix first', title: 'Open issues that mention a crash, hang, freeze, data loss, launch failure or security problem' },
@@ -493,6 +495,7 @@ export const COLUMNS: readonly Column[] = [
   { key: 'recent_merged', recent: 'prs_merged', label: 'Merged', kind: 'num', group: RECENT, title: 'Pull requests merged {span}' },
   { key: 'recent_issues', recent: 'issues_opened', label: 'Issues', kind: 'num', group: RECENT, title: 'Issues opened {span}' },
   { key: 'recent_people', recent: 'people', label: 'People', kind: 'num', group: RECENT, title: 'People who committed to main {span} (all time: GitHub’s contributor count)' },
+  { key: 'downloads_total', label: 'Total DLs', kind: 'num', group: RECENT, allTimeOnly: true, title: 'Downloads across every published release (only known for All time)' },
   { key: 'parity_breadth', label: 'Breadth', kind: 'pct', group: 'Parity', title: 'Feature breadth from the Headline numbers of ROADMAP.md (or docs/target-app-parity.md): how much of the target app’s feature set exists', get: (e) => figurePct(e.parity?.breadth) },
   { key: 'parity_ready', label: 'Ready', kind: 'pct', group: 'Parity', title: 'Ready for real work from ROADMAP.md’s Headline numbers; without that row, from its Readiness by audience table, the headline table of docs/target-app-parity.md, or Feature depth', get: (e) => figurePct(e.parity?.ready) },
 ];
@@ -505,6 +508,7 @@ export const COLUMN: Readonly<Record<string, Column>> = Object.fromEntries(COLUM
  */
 export function value(entry: RepoEntry, key: string, window: string = DEFAULT_WINDOW): Value {
   const col = COLUMN[key];
+  if (col?.allTimeOnly && window !== ALL_TIME) return null;
   if (col?.get) return col.get(entry);
   if (col?.recent) return entry.stats?.recent?.[window]?.[col.recent] ?? null;
   const v = entry.stats ? (entry.stats as unknown as Record<string, unknown>)[key] : null;
