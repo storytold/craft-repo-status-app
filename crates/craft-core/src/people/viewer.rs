@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::model::Time;
-use crate::{atomic_write, Result};
+use crate::{atomic_write, Error, Result};
 
 /// The kept login and when the app read it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -44,6 +44,18 @@ pub fn keep(dir: &Path, login: &str, now: Time) -> Result<bool> {
     Ok(true)
 }
 
+/// Removes the kept login, if there is one.
+pub fn forget(dir: &Path) -> Result<()> {
+    let file = path(dir);
+    match std::fs::remove_file(&file) {
+        Err(source) if source.kind() != std::io::ErrorKind::NotFound => Err(Error::Io {
+            path: file.display().to_string(),
+            source,
+        }),
+        _ => Ok(()),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -66,6 +78,9 @@ mod tests {
         assert_eq!(load(&dir).map(|k| k.login).as_deref(), Some("Bo-Example"));
         std::fs::write(path(&dir), "{not json").unwrap();
         assert_eq!(load(&dir), None);
+        forget(&dir).unwrap();
+        assert!(!path(&dir).exists());
+        forget(&dir).unwrap();
         std::fs::remove_dir_all(&dir).ok();
     }
 }

@@ -863,7 +863,7 @@ fn run_people(app: &AppHandle, job: &PeopleJob, runs: &mut PeopleRuns) {
             if let Some(shared) = &state.shared {
                 gh = gh.with_lease(shared.clone(), LEASE_PATIENCE);
             }
-            runs.viewer.for_token(&token, || gh.viewer_login());
+            viewer_for_token(cache.dir(), &mut runs.viewer, &token, || gh.viewer_login());
             update_people(
                 app,
                 &gh,
@@ -877,6 +877,23 @@ fn run_people(app: &AppHandle, job: &PeopleJob, runs: &mut PeopleRuns) {
         }
         Err(e) => eprintln!("people: {e}"),
     }
+}
+
+/// Reads the login for `token` into `viewer` ([`Viewer::for_token`]). When
+/// `token` replaces an earlier one, it first removes the login kept in `dir`
+/// for `craft-mcp` ([`viewer::forget`]), and logs a failure.
+fn viewer_for_token(
+    dir: &Path,
+    viewer: &mut Viewer,
+    token: &str,
+    ask: impl FnOnce() -> Result<String, GhError>,
+) {
+    if !viewer.token.is_empty() && viewer.token != token {
+        if let Err(e) = viewer::forget(dir) {
+            eprintln!("people: removing the earlier token's login: {e}");
+        }
+    }
+    viewer.for_token(token, ask);
 }
 
 /// Keeps the token user's `login`, read at `now`, in `dir`'s `viewer.json`
@@ -1621,6 +1638,27 @@ mod tests {
             ("Ann-Example", Some(at(2))),
             "kept once, not rewritten for another letter case"
         );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_new_token_removes_the_login_kept_for_craft_mcp() {
+        let dir =
+            std::env::temp_dir().join(format!("craft-status-new-token-{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        let at = "2026-10-18T01:00:00Z".parse::<DateTime<Utc>>().unwrap();
+        keep_viewer(&dir, Some("Ann-Example"), at);
+        let mut v = Viewer::default();
+        viewer_for_token(&dir, &mut v, "t1", || Err(GhError::Unauthorized));
+        assert_eq!(
+            viewer::load(&dir).map(|k| k.login).as_deref(),
+            Some("Ann-Example"),
+            "the first token read since launch keeps the file"
+        );
+        viewer_for_token(&dir, &mut v, "t1", || Ok("Ann-Example".into()));
+        viewer_for_token(&dir, &mut v, "t2", || Err(GhError::Unauthorized));
+        assert_eq!(v.login, None);
+        assert_eq!(viewer::load(&dir), None, "another token's user is not kept");
         std::fs::remove_dir_all(&dir).ok();
     }
 
