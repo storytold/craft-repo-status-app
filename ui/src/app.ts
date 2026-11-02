@@ -5,6 +5,7 @@
 import {
   ALL_TIME, COLUMNS, RECENT, WINDOWS, MANUAL, windowById, value, orderedEntries, nextSort, dropIndex,
   freshness, ago, formatRate, totals, urgentAcross, tokenStatus, isRefreshing, isThirdParty,
+  mainCiFailing, mainCiText, mainCiTip, mainCiUrl,
   REPO_KINDS, isRepoHidden, toggleKind, manualOrder, reorderVisible,
 } from './model.ts';
 import type { Column, Meta, RepoEntry, Snapshot, Sort } from './model.ts';
@@ -103,6 +104,13 @@ export function start(api: Api, prRoute?: Route): () => void {
       return el('span', { class: 'fetched' }, age, rowRefresh(entry));
     }
     if (col.key === 'category') return v ? el('span', { class: 'category' }, String(v)) : el('span', { class: 'muted' }, '—');
+    if (col.key === 'main_ci' && !entry.inaccessible) {
+      const ci = entry.main_ci;
+      const failing = mainCiFailing(ci);
+      const title = mainCiTip(ci, localTime, entry.main_ci_error);
+      if (failing === null) return el('span', { class: 'muted', title }, mainCiText(ci));
+      return el('span', { class: failing ? 'ci-fail' : 'ci-ok', title }, link(mainCiText(ci), mainCiUrl(entry.repo, ci)));
+    }
     if (!s) return entry.inaccessible ? document.createTextNode('') : el('span', { class: 'muted' }, '—');
     switch (col.key) {
       case 'urgency': {

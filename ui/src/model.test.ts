@@ -3,8 +3,9 @@ import assert from 'node:assert/strict';
 import {
   sortEntries, manualOrder, orderedEntries, nextSort, dropIndex, MANUAL, versionKey, freshness, isStale, ago, compact, formatRate, buildRate, tokenStatus,
   totals, urgentAcross, isRefreshing, isThirdParty, isRepoHidden, toggleKind, reorderVisible, defaultDir, value, windowById, WINDOWS, COLUMNS, COLUMN,
+  mainCiFailing, mainCiText, mainCiTip, mainCiUrl,
 } from './model.ts';
-import type { Activity, RepoEntry, RepoStats, UrgentIssue } from './model.ts';
+import type { Activity, MainCi, MainRun, MainWorkflow, RepoEntry, RepoStats, UrgentIssue } from './model.ts';
 
 const entry = (repo: string, stats: Partial<RepoStats> | null, fetched_at: string | null = '2026-10-08T12:00:00Z'): RepoEntry =>
   ({ repo: `o/${repo}`, stats: stats as RepoStats | null, fetched_at });
@@ -241,6 +242,62 @@ test('recent-activity columns follow the selected window', () => {
   assert.equal(names(sortEntries(e, 'recent_merged', 'desc', 'all')), 'abold');
   assert.equal(value(a, 'recent_commits', 'release'), null, 'no release');
   assert.deepEqual(WINDOWS.map((w) => w.id), ['10m', '30m', '1h', '4h', '12h', '1d', '7d', 'release', 'all']);
+});
+
+const mrun = (id: number, conclusion: string, r: Partial<MainRun> = {}): MainRun => ({
+  run_id: 100 + id, conclusion, event: 'push', head_sha: `abcdef${id}0`, title: `Commit ${id}`, at: '2026-10-08T10:00:00Z',
+  url: `https://github.com/o/a/actions/runs/${100 + id}`, ...r,
+});
+const wf = (id: number, ...runs: MainRun[]): MainWorkflow => ({ workflow_id: id, name: `W${id}`, path: `.github/workflows/w${id}.yml`, runs });
+const ci = (workflows: MainWorkflow[]): MainCi => ({ branch: 'main', workflows, checked_at: '2026-10-08T12:00:00Z' });
+
+test('the Main CI column counts the workflows whose latest result failed, sorts them first and adds them up', () => {
+  assert.equal(mainCiFailing(null), null);
+  assert.equal(mainCiFailing(ci([])), null, 'no result is not a pass');
+  assert.equal(mainCiText(undefined), '—');
+  assert.equal(mainCiText(ci([wf(1, mrun(1, 'success')), wf(2, mrun(2, 'neutral'))])), '✓ 2');
+  const red = ci([wf(1, mrun(1, 'success')), wf(2, mrun(2, 'timed_out')), wf(3, mrun(3, 'startup_failure', { event: 'schedule' }))]);
+  assert.equal(mainCiText(red), '✗ 2 of 3');
+  assert.equal(mainCiText(ci([wf(1, mrun(1, 'action_required')), wf(2, mrun(2, 'stale'))])), '✗ 2 of 2', 'runs that did not pass');
+  assert.equal(mainCiUrl('o/a', red), 'https://github.com/o/a/actions/runs/102');
+  assert.equal(mainCiUrl('o/a', { ...ci([wf(1, mrun(1, 'success'))]), branch: 'trunk' }), 'https://github.com/o/a/actions?query=branch%3Atrunk');
+  const withCi = (name: string, c: MainCi | null): RepoEntry => ({ ...entry(name, { urgency: 1 }), main_ci: c });
+  const list = [withCi('green', ci([wf(1, mrun(1, 'success'))])), withCi('none', null), withCi('red', red), withCi('empty', ci([])), entry('old', { urgency: 1 })];
+  assert.equal(defaultDir('main_ci'), 'desc');
+  assert.deepEqual(sortEntries(list, 'main_ci', 'desc').map((e) => e.repo), ['o/red', 'o/green', 'o/empty', 'o/none', 'o/old'],
+    'most failures first; no result, or a snapshot from before the column, last');
+  assert.equal(value(list[2]!, 'main_ci'), 2);
+  assert.equal(totals(list).main_ci, 2);
+  assert.equal(COLUMNS.at(-1)!.key, 'main_ci', 'at the right end of the table');
+});
+
+test('the Main CI hover lists each workflow, failures first, and each run of one that ran twice on a commit', () => {
+  const at = (iso: string) => `at ${iso.slice(11, 16)}`;
+  const dependabot: MainWorkflow = {
+    workflow_id: 9, name: 'Dependabot Updates', path: 'dynamic/dependabot/dependabot-updates', runs: [
+      mrun(9, 'success', { event: 'dynamic', head_sha: '0d34a58bee', title: 'github_actions in /. - Update #2', at: '2026-10-08T10:32:00Z' }),
+      mrun(8, 'failure', { event: 'dynamic', head_sha: '0d34a58bee', title: 'cargo in /. - Update #1', at: '2026-10-08T10:39:00Z' }),
+    ],
+  };
+  const both = ci([wf(1, mrun(1, 'success')), dependabot]);
+  assert.equal(mainCiText(both), '✗ 1 of 2', 'one failed run fails its workflow');
+  assert.deepEqual(mainCiTip(both, at).split('\n'), [
+    'Latest result of each workflow on main; canceled and skipped runs are left out.',
+    '✗ Dependabot Updates: 1 of 2 runs failed (dynamic; 0d34a58)',
+    '    ✓ success: github_actions in /. - Update #2 (at 10:32)',
+    '    ✗ failure: cargo in /. - Update #1 (at 10:39)',
+    '✓ W1: success (push; at 10:00; abcdef1)',
+    'Checked at 12:00.',
+  ]);
+  assert.equal(mainCiUrl('o/a', both), 'https://github.com/o/a/actions/runs/108', 'the failed run');
+  assert.equal(mainCiTip(ci([wf(2, mrun(2, 'timed_out', { at: null }))]), at).split('\n')[1], '✗ W2: timed out (push; time unknown; abcdef2)');
+  assert.match(mainCiTip(ci([]), at), /No completed workflow run on main in the last 30 days/);
+  assert.equal(mainCiTip(ci([]), at).split('\n')[1], 'Checked at 12:00.', 'an empty result shows when it was read');
+  assert.match(mainCiTip(null, at), /not been read yet/);
+  const error = 'GitHub HTTP 403: forbidden';
+  assert.equal(mainCiTip(null, at, error), `The last read of the workflow runs failed: ${error}`);
+  assert.deepEqual(mainCiTip(ci([]), at, error).split('\n').slice(1), ['Checked at 12:00.', `The last read of the workflow runs failed: ${error}`]);
+  assert.equal(mainCiTip(both, at, error).split('\n').at(-1), `The last read of the workflow runs failed: ${error}`, 'after the held result');
 });
 
 test('a row is refreshing while its repo is being fetched or queued', () => {

@@ -13,7 +13,9 @@ use std::sync::{mpsc, Mutex};
 use std::time::{Duration, Instant, SystemTime};
 
 use chrono::{DateTime, Local, Timelike, Utc};
-use craft_core::{Cache, Config, Schedule, SharedCache, Snapshot, TokenStatus, WindowState};
+use craft_core::{
+    Cache, Config, MainCi, RepoEntry, Schedule, SharedCache, Snapshot, TokenStatus, WindowState,
+};
 use craft_github::{resolve_token, Error as GhError, GitHub, RawActivity};
 use serde::Serialize;
 use tauri::menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem};
@@ -50,6 +52,8 @@ const BACKOFF_MAX: i64 = 60 * 60;
 /// Below this many GraphQL points left, pause for `LOW_BUDGET_PAUSE`.
 const BUDGET_FLOOR: u64 = 150;
 const LOW_BUDGET_PAUSE: i64 = 30 * 60;
+/// Below this many GraphQL points left, skip requests nobody asked for.
+const OPTIONAL_FLOOR: u64 = 1_500;
 /// How long to wait for the PR poller to finish talking to GitHub (it gives way
 /// between requests) before going ahead anyway: this poller is never starved.
 const LEASE_PATIENCE: Duration = Duration::from_secs(180);
@@ -298,8 +302,17 @@ fn fetch_into_snapshot(app: &AppHandle, cfg: &Config, repo: &str) -> Result<(), 
     if lease.is_none() {
         eprintln!("{repo}: the shared GitHub lease is still held; fetching anyway");
     }
+    let branch_before = raw.default_branch.clone();
     let result = gh.fetch_repo(repo, now, &mut raw, shared);
+    // Read before the raw cache is saved, which keeps the runs' ETags.
+    let main_ci = match &result {
+        Ok((_, budget)) if optional_requests_allowed(budget.graphql_remaining) => {
+            Some(read_main_ci(&gh, repo, &mut raw, now))
+        }
+        _ => None,
+    };
     drop(lease);
+    let ci_error = main_ci.as_ref().and_then(main_ci_poll_error);
     if let (Ok(_), Some(dir)) = (&result, &raw_dir) {
         if let Err(e) = raw.save(dir, repo) {
             eprintln!("{repo}: could not save raw cache: {e}");
@@ -342,6 +355,13 @@ fn fetch_into_snapshot(app: &AppHandle, cfg: &Config, repo: &str) -> Result<(), 
                     }
                     None => {}
                 }
+                store_main_ci(
+                    entry,
+                    main_ci,
+                    branch_before.as_deref(),
+                    raw.default_branch.as_deref(),
+                    now,
+                );
                 entry.stats = Some(stats);
                 entry.fetched_at = Some(now);
                 entry.error = None;
@@ -352,6 +372,8 @@ fn fetch_into_snapshot(app: &AppHandle, cfg: &Config, repo: &str) -> Result<(), 
                 entry.stats = None;
                 entry.icon = None;
                 entry.icon_oid = None;
+                entry.main_ci = None;
+                entry.main_ci_error = None;
                 entry.fetched_at = Some(now);
                 entry.error = None;
                 entry.inaccessible = true;
@@ -364,13 +386,17 @@ fn fetch_into_snapshot(app: &AppHandle, cfg: &Config, repo: &str) -> Result<(), 
             }
         }
     };
-    match outcome {
-        Ok(left) => {
-            if left.is_some() {
-                snap.rate_limit_remaining = left;
-            }
-            Ok(())
+    let outcome = outcome.and_then(|left| {
+        if left.is_some() {
+            snap.rate_limit_remaining = left;
         }
+        // The repo's numbers are stored. When GitHub rate-limited the CI
+        // requests, `step` pauses the next fetch; when it rejected the token,
+        // the token is marked rejected.
+        ci_error.map_or(Ok(()), Err)
+    });
+    match outcome {
+        Ok(()) => Ok(()),
         Err(GhError::Unauthorized) => {
             if let Some(t) = snap.token.as_mut() {
                 t.rejected = true;
@@ -378,6 +404,77 @@ fn fetch_into_snapshot(app: &AppHandle, cfg: &Config, repo: &str) -> Result<(), 
             Err(GhError::Unauthorized)
         }
         Err(e) => Err(e),
+    }
+}
+
+/// The error a failed [`read_main_ci`] passes on to `step`, besides the
+/// repo's row: a rate limit or a rejected token.
+fn main_ci_poll_error(read: &Result<Option<MainCi>, GhError>) -> Option<GhError> {
+    match read {
+        Err(GhError::RateLimited(until)) => Some(GhError::RateLimited(until.clone())),
+        Err(GhError::Unauthorized) => Some(GhError::Unauthorized),
+        _ => None,
+    }
+}
+
+/// Whether a fetch that left `left` GraphQL points may send optional
+/// requests, such as the workflow runs on the default branch: not below
+/// [`OPTIONAL_FLOOR`].
+fn optional_requests_allowed(left: Option<u64>) -> bool {
+    left.is_none_or(|r| r >= OPTIONAL_FLOOR)
+}
+
+/// `repo`'s workflow results on its default branch, read into the runs `raw`
+/// keeps; `None` for a repository without a default branch.
+fn read_main_ci(
+    gh: &GitHub,
+    repo: &str,
+    raw: &mut RawActivity,
+    now: DateTime<Utc>,
+) -> Result<Option<MainCi>, GhError> {
+    let Some(branch) = raw.default_branch.clone() else {
+        return Ok(None);
+    };
+    gh.main_ci(repo, &branch, &mut raw.http.runs, now).map(Some)
+}
+
+/// Stores the outcome of [`read_main_ci`] (`None` when it did not run) in
+/// `entry`. A held result for a branch other than `default_branch` is
+/// dropped first, and so is the held error when the default branch changed
+/// from a known `branch_before`. A failed or skipped read keeps the held result,
+/// without the workflows whose newest run is older than the read's cutoff,
+/// next to the last error.
+fn store_main_ci(
+    entry: &mut RepoEntry,
+    read: Option<Result<Option<MainCi>, GhError>>,
+    branch_before: Option<&str>,
+    default_branch: Option<&str>,
+    now: DateTime<Utc>,
+) {
+    if entry
+        .main_ci
+        .as_ref()
+        .is_some_and(|ci| Some(ci.branch.as_str()) != default_branch)
+    {
+        entry.main_ci = None;
+        entry.main_ci_error = None;
+    }
+    if branch_before.is_some() && branch_before != default_branch {
+        entry.main_ci_error = None;
+    }
+    match read {
+        Some(Ok(ci)) => {
+            entry.main_ci = ci;
+            entry.main_ci_error = None;
+        }
+        Some(Err(e)) => {
+            eprintln!("{}: main CI: {e}", entry.repo);
+            entry.main_ci_error = Some(e.to_string());
+        }
+        None => {}
+    }
+    if let Some(ci) = entry.main_ci.as_mut() {
+        craft_github::ci::drop_expired(ci, now);
     }
 }
 
@@ -1053,6 +1150,7 @@ pub fn run() {
 mod tests {
     use super::*;
     use chrono::Duration as CDuration;
+    use craft_core::{MainRun, MainWorkflow};
 
     fn snap_with(ages_mins: &[i64], now: DateTime<Utc>) -> Snapshot {
         let mut s = Snapshot {
@@ -1078,10 +1176,136 @@ mod tests {
     }
 
     #[test]
+    fn optional_requests_wait_while_the_budget_is_low() {
+        assert!(!optional_requests_allowed(Some(OPTIONAL_FLOOR - 1)));
+        assert!(!optional_requests_allowed(Some(0)));
+        assert!(optional_requests_allowed(Some(OPTIONAL_FLOOR)));
+        assert!(optional_requests_allowed(None), "GitHub sent no count");
+    }
+
+    #[test]
     fn only_github_links_open() {
         assert!(open_url("https://evil.example/x".into()).is_err());
         assert!(open_url("file:///etc/passwd".into()).is_err());
         assert!(open_url("https://github.com.evil.example/x".into()).is_err());
+    }
+
+    #[test]
+    fn a_rate_limit_or_rejected_token_on_the_ci_read_reaches_the_poller() {
+        assert!(matches!(
+            main_ci_poll_error(&Err(GhError::RateLimited("later".into()))),
+            Some(GhError::RateLimited(until)) if until == "later"
+        ));
+        assert!(matches!(
+            main_ci_poll_error(&Err(GhError::Unauthorized)),
+            Some(GhError::Unauthorized)
+        ));
+        assert!(main_ci_poll_error(&Err(GhError::Http(403, "forbidden".into()))).is_none());
+        assert!(main_ci_poll_error(&Err(GhError::NotFound)).is_none());
+        assert!(main_ci_poll_error(&Ok(None)).is_none());
+    }
+
+    #[test]
+    fn main_ci_keeps_its_result_and_error_for_the_default_branch_only() {
+        let on = |branch: &str| MainCi {
+            branch: branch.into(),
+            ..Default::default()
+        };
+        let mut entry = RepoEntry {
+            repo: "o/r".into(),
+            ..Default::default()
+        };
+        let now = "2026-10-18T04:20:00Z".parse::<DateTime<Utc>>().unwrap();
+        let forbidden = || Some(Err(GhError::Http(403, "forbidden".into())));
+        let (main, trunk) = (Some("main"), Some("trunk"));
+        store_main_ci(&mut entry, Some(Ok(Some(on("main")))), main, main, now);
+        assert_eq!(entry.main_ci, Some(on("main")));
+        store_main_ci(&mut entry, forbidden(), main, main, now);
+        assert_eq!(
+            entry.main_ci,
+            Some(on("main")),
+            "a failed read keeps the result"
+        );
+        assert!(entry
+            .main_ci_error
+            .as_deref()
+            .is_some_and(|e| e.contains("403")));
+        store_main_ci(&mut entry, None, main, main, now);
+        assert!(
+            entry.main_ci_error.is_some(),
+            "a skipped read keeps the error"
+        );
+        store_main_ci(&mut entry, Some(Ok(Some(on("main")))), main, main, now);
+        assert_eq!(entry.main_ci_error, None, "a read clears the error");
+        store_main_ci(&mut entry, forbidden(), None, main, now);
+        assert_eq!(
+            entry.main_ci,
+            Some(on("main")),
+            "a result for the default branch stays without the raw cache's branch"
+        );
+        store_main_ci(&mut entry, None, main, trunk, now);
+        assert_eq!(
+            entry.main_ci, None,
+            "a result for another branch is dropped"
+        );
+        store_main_ci(&mut entry, forbidden(), trunk, trunk, now);
+        store_main_ci(&mut entry, None, trunk, main, now);
+        assert_eq!(
+            entry.main_ci_error, None,
+            "an error from another branch is dropped"
+        );
+        store_main_ci(&mut entry, Some(Ok(Some(on("main")))), main, main, now);
+        store_main_ci(&mut entry, Some(Err(GhError::NotFound)), main, None, now);
+        assert_eq!(
+            entry.main_ci, None,
+            "a repo without a default branch keeps no result"
+        );
+        assert!(entry.main_ci_error.is_some());
+
+        let ran = |id: u64, days: i64| MainWorkflow {
+            workflow_id: id,
+            runs: vec![MainRun {
+                at: Some(now - CDuration::days(days)),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let held = MainCi {
+            workflows: vec![ran(1, 29), ran(2, 31)],
+            ..on("main")
+        };
+        store_main_ci(
+            &mut entry,
+            Some(Ok(Some(held))),
+            main,
+            main,
+            now - CDuration::days(5),
+        );
+        assert_eq!(entry.main_ci.as_ref().map(|c| c.workflows.len()), Some(2));
+        store_main_ci(&mut entry, None, main, main, now);
+        let kept = entry.main_ci.as_ref().map(|c| {
+            c.workflows
+                .iter()
+                .map(|w| w.workflow_id)
+                .collect::<Vec<_>>()
+        });
+        assert_eq!(
+            kept,
+            Some(vec![1]),
+            "a skipped read drops results older than 30 days"
+        );
+        store_main_ci(
+            &mut entry,
+            forbidden(),
+            main,
+            main,
+            now + CDuration::days(2),
+        );
+        assert_eq!(
+            entry.main_ci.as_ref().map(|c| c.workflows.len()),
+            Some(0),
+            "and so does a failed read"
+        );
     }
 
     #[test]

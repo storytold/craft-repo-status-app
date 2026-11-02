@@ -321,6 +321,71 @@ test('a row’s refresh button refetches only that repo, and spins while it wait
   assert.ok(!h.doc.querySelector('.row-refresh.spinning'), 'done');
 });
 
+const ciRun = (id: number, conclusion: string) => ({
+  run_id: 100 + id, conclusion, event: 'push', head_sha: 'abc1234def', title: `Commit ${id}`, at: NOW,
+  url: `https://github.com/o/alpha/actions/runs/${100 + id}`,
+});
+const ciWorkflow = (id: number, ...runs: ReturnType<typeof ciRun>[]) => ({ workflow_id: id, name: `W${id}`, path: `.github/workflows/w${id}.yml`, runs });
+
+test('the Main CI column shows failing workflows, links the failed run, explains a dash and adds up failures', async () => {
+  const h = await setup({
+    snap: snapshot([
+      repo('alpha', { urgency: 100 }, {
+        main_ci: { branch: 'main', workflows: [ciWorkflow(1, ciRun(1, 'success')), ciWorkflow(2, ciRun(3, 'success'), ciRun(2, 'failure'))], checked_at: NOW },
+      }),
+      repo('beta', { urgency: 200 }, { main_ci: { branch: 'main', workflows: [ciWorkflow(3, ciRun(4, 'success'))], checked_at: NOW } }),
+      repo('gamma', { urgency: 300 }),
+    ]),
+  });
+  const i = COLUMNS.findIndex((c) => c.key === 'main_ci');
+  assert.equal(h.doc.querySelectorAll('thead tr.cols th')[i]!.textContent, 'Main CI');
+  const td = (name: string) => h.row(name).cells[i]!;
+  assert.equal(td('alpha').textContent, '✗ 1 of 2');
+  assert.match(td('alpha').querySelector<HTMLElement>('.ci-fail')!.title,
+    /\n✗ W2: 1 of 2 runs failed \(push; abc1234\)\n {4}✓ success: Commit 3 \([^)]+\)\n {4}✗ failure: Commit 2 \([^)]+\)\n✓ W1: success/);
+  td('alpha').querySelector<HTMLElement>('.link')!.click();
+  assert.deepEqual(h.calls.at(-1), { cmd: 'open_url', args: { url: 'https://github.com/o/alpha/actions/runs/102' } });
+  assert.equal(h.view(), 'repos', 'the link does not open the urgent view');
+  assert.equal(td('beta').textContent, '✓ 1');
+  assert.ok(td('beta').querySelector('.ci-ok'));
+  assert.equal(td('gamma').textContent, '—');
+  assert.match(td('gamma').querySelector<HTMLElement>('.muted')!.title, /not been read yet/);
+  assert.deepEqual(h.rows(), ['gamma', 'beta', 'alpha'], 'by urgency');
+  header(h, 'Main CI').click();
+  assert.deepEqual(h.rows(), ['alpha', 'beta', 'gamma'], 'most failures first, no result last');
+  assert.equal(h.doc.querySelector('tfoot tr')!.children[i]!.textContent, '1');
+});
+
+test('the Main CI hover shows a failed read, with or without a held result', async () => {
+  const error = 'GitHub HTTP 403: forbidden';
+  const h = await setup({
+    snap: snapshot([
+      repo('alpha', { urgency: 100 }, { main_ci: { branch: 'main', workflows: [ciWorkflow(1, ciRun(1, 'success'))], checked_at: NOW }, main_ci_error: error }),
+      repo('beta', { urgency: 200 }, { main_ci_error: error }),
+    ]),
+  });
+  const i = COLUMNS.findIndex((c) => c.key === 'main_ci');
+  const alpha = h.row('alpha').cells[i]!;
+  assert.equal(alpha.textContent, '✓ 1', 'the held result stays');
+  assert.match(alpha.querySelector<HTMLElement>('.ci-ok')!.title, /\nThe last read of the workflow runs failed: GitHub HTTP 403: forbidden$/);
+  const beta = h.row('beta').cells[i]!;
+  assert.equal(beta.textContent, '—');
+  assert.equal(beta.querySelector<HTMLElement>('.muted')!.title, `The last read of the workflow runs failed: ${error}`);
+});
+
+test('the Main CI hover gives times rather than ages and does not change as the clock ticks', async (t) => {
+  // setup()'s tick() needs the real setTimeout; the 15 s clock runs on the mocked setInterval.
+  t.mock.timers.enable({ apis: ['setInterval', 'Date'], now: Date.parse(NOW) + 25_000 });
+  const h = await setup({
+    snap: snapshot([repo('alpha', { urgency: 100 }, { main_ci: { branch: 'main', workflows: [ciWorkflow(1, ciRun(1, 'failure'))], checked_at: NOW } })]),
+  });
+  const i = COLUMNS.findIndex((c) => c.key === 'main_ci');
+  const title = () => h.row('alpha').cells[i]!.querySelector<HTMLElement>('.ci-fail')!.title;
+  const before = title();
+  for (let n = 0; n < 8; n++) t.mock.timers.tick(15_000);
+  assert.equal(title(), before, 'two minutes of clock ticks');
+});
+
 test('the window picker switches the activity columns and remembers', async () => {
   const h = await setup({ snap: snapshot([repo('alpha', { recent: { '7d': { commits: 7, prs_opened: 0, prs_merged: 0, issues_opened: 0, people: 0 } } })]) });
   const commits = () => h.row('alpha').cells[COLUMNS.findIndex((c) => c.key === 'recent_commits')]!.textContent;

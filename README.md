@@ -58,6 +58,7 @@ sort by a column again.
 | Latest | last commit to `main` · newest issue · newest PR |
 | Activity (dropdown) | commits to `main` · PRs opened · PRs merged · issues opened · people committing to `main` · **Total DLs** (downloads across all releases; only under All time) |
 | Downloads | the latest release's tag · its publish date · its download rate and downloads · **Unreleased** (commits on `main` since it) |
+| CI | **Main CI** (workflows whose latest result on the default branch failed) |
 
 - **Activity** covers the window picked in that group's header: the last
   10 min, 30 min, hour, 4 h (the default), 12 h, day or week, since the last
@@ -81,6 +82,17 @@ sort by a column again.
   rpm, flatpak, zips and tarballs. Checksum lists, signatures, `.zsync` delta
   files and updater manifests are left out, because machines fetch them, not
   people.
+- **Main CI** reads `✓ 4` when the latest result of each of the repo's four
+  GitHub Actions workflows with a result in the last 30 days passed, and
+  `✗ 1 of 4` when one failed. A run that ended as `action_required` or
+  `stale` counts as failed. A workflow's latest result is its newest
+  completed run on the default branch that was not canceled or skipped,
+  together with its other runs on the same commit and event that were created
+  within a minute of it, for example Dependabot's runs for each package
+  ecosystem. Scheduled runs count; pull request runs and disabled workflows
+  are left out. Hover the cell for each workflow's result, and click it to
+  open the failed run. When a read of the runs fails, the cell keeps the last
+  result for the default branch and its tooltip shows the error.
 - **Fix first** (`⌘2`) ranks open issues across every repo. Each issue shows
   the reasons behind its score. Click a row in the Repos table to filter the
   list to that repo. Click an issue to open it on GitHub.
@@ -236,6 +248,12 @@ above the 150 where the Downloads tab's polling pauses itself.
   request. It never uses search, which GitHub limits far more tightly (to
   about 30 a minute); PR and issue counts per window come from walking the
   recent PRs and issues.
+- For **Main CI**, each fetch also lists the repo's workflows, then the newest
+  20 completed runs of each active workflow on the default branch, reading up
+  to 10 pages of them while none holds a result. Each page is requested with
+  the ETag of its previous answer, so an unchanged list comes back as 304,
+  which does not count against GitHub's primary rate limit. These requests
+  are skipped while fewer than 1,500 GraphQL points remain.
 - Each repo's icon is `assets/app-icon/hicolor/64x64/apps/*.png` on its default
   branch. It is downloaded once and again only when the file changes; it's
   kept in the cache. Repos without one (libraries) get a lettered tile.
@@ -252,7 +270,8 @@ above the 150 where the Downloads tab's polling pauses itself.
   - `raw/<owner>@<repo>.json`: each repo's commit authors and issues from the
     last week (or since the latest build). Each poll fetches only what's new
     since the previous one, and refetches from scratch every six hours to drop
-    deleted issues and pick up late-dated commits.
+    deleted issues and pick up late-dated commits. It also keeps the ETags and
+    results of the Main CI requests.
   - `snapshot.json`: what the window shows, saved after each repo. On launch
     the window shows it at once, marked `STALE` if it's old. Repos whose
     data is still fresh aren't refetched at launch.

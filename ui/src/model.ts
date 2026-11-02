@@ -78,6 +78,48 @@ export interface RepoEntry {
   inaccessible?: boolean;
   icon?: string | null;
   icon_oid?: string | null;
+  /** The latest result of each workflow on the default branch; null (or absent, from an older build) until read. */
+  main_ci?: MainCi | null;
+  /** Error from the most recent read of `main_ci`, cleared when a read succeeds. */
+  main_ci_error?: string | null;
+}
+
+/** The latest result of each GitHub Actions workflow on a repo's default branch: `MainCi` in model.rs. */
+export interface MainCi {
+  branch: string;
+  /** One per active workflow with a result, by name. */
+  workflows: MainWorkflow[];
+  /** When GitHub last answered, an unchanged answer included. */
+  checked_at: Time | null;
+}
+
+/**
+ * One workflow's latest result: its newest completed run on the default branch
+ * that was not canceled or skipped, with its other such runs on the same
+ * commit and event created within 60 s of it (`MainWorkflow` in model.rs).
+ */
+export interface MainWorkflow {
+  workflow_id: number;
+  /** The workflow's own name, such as `CI` or `Dependabot Updates`. */
+  name: string;
+  path: string;
+  /** Newest first. */
+  runs: MainRun[];
+}
+
+/** A completed workflow run on the default branch: `MainRun` in model.rs. */
+export interface MainRun {
+  run_id: number;
+  /** success, failure, timed_out, startup_failure, action_required, neutral or stale. */
+  conclusion: string;
+  /** push, schedule, workflow_dispatch… */
+  event: string;
+  head_sha: string;
+  /** The run's title, such as the commit message or a Dependabot job. */
+  title: string;
+  /** When the run finished. */
+  at: Time | null;
+  url: string;
 }
 
 export interface Snapshot {
@@ -216,6 +258,7 @@ export const COLUMNS: readonly Column[] = [
   { key: 'recent_issues', recent: 'issues_opened', label: 'Issues', kind: 'num', group: RECENT, title: 'Issues opened {span}' },
   { key: 'recent_people', recent: 'people', label: 'People', kind: 'num', group: RECENT, title: 'People who committed to main {span} (all time: GitHub’s contributor count)' },
   { key: 'downloads_total', label: 'Total DLs', kind: 'num', group: RECENT, allTimeOnly: true, title: 'Downloads across every published release (only known for All time)' },
+  { key: 'main_ci', label: 'Main CI', kind: 'num', group: 'CI', title: 'Workflows whose latest result on the default branch failed, out of those with a result in the last 30 days (canceled and skipped runs are left out; scheduled runs count)', get: (e) => mainCiFailing(e.main_ci) },
 ];
 
 export const COLUMN: Readonly<Record<string, Column>> = Object.fromEntries(COLUMNS.map((c) => [c.key, c]));
@@ -327,6 +370,73 @@ export const FIRST_PARTY_OWNERS: readonly string[] = ['storytold'];
 export function isThirdParty(repo: string): boolean {
   const owner = repo.split('/')[0]?.toLowerCase() ?? '';
   return !FIRST_PARTY_OWNERS.includes(owner);
+}
+
+// ───────────────────────────── main CI ─────────────────────────────
+
+/** Conclusions that count as a failed run; `action_required` and `stale` runs did not pass. */
+const FAILED: readonly string[] = ['failure', 'timed_out', 'startup_failure', 'action_required', 'stale'];
+
+/** Whether a run failed: `failure`, `timed_out`, `startup_failure`, `action_required` or `stale`. */
+export const runFailed = (r: MainRun): boolean => FAILED.includes(r.conclusion);
+
+/** Whether a workflow's latest result failed: any of its runs did. */
+export const workflowFailed = (w: MainWorkflow): boolean => w.runs.some(runFailed);
+
+/** How many workflows' latest results failed; null with no result to count. */
+export function mainCiFailing(ci: MainCi | null | undefined): number | null {
+  return ci?.workflows.length ? ci.workflows.filter(workflowFailed).length : null;
+}
+
+/** The Main CI cell: `✓ 4` when no workflow failed, `✗ 2 of 4` when some did, `—` with no result. */
+export function mainCiText(ci: MainCi | null | undefined): string {
+  const failing = mainCiFailing(ci);
+  if (failing === null || !ci) return '—';
+  const n = ci.workflows.length;
+  return failing ? `✗ ${failing} of ${n}` : `✓ ${n}`;
+}
+
+const conclusionText = (r: MainRun): string => r.conclusion.replaceAll('_', ' ');
+
+/**
+ * The Main CI hover: one line per workflow, failures first, with what started
+ * its run, when it finished and its commit; a workflow with several runs on
+ * that commit lists each. `time` writes each time as a date. `error`, from
+ * the last read of the runs, is added as the last line.
+ */
+export function mainCiTip(ci: MainCi | null | undefined, time: (iso: Time) => string, error?: string | null): string {
+  const failed = error ? `The last read of the workflow runs failed: ${error}` : '';
+  if (!ci) return failed || 'The workflow runs on the default branch have not been read yet.';
+  const branch = ci.branch || 'main';
+  const checked = ci.checked_at ? `Checked ${time(ci.checked_at)}.` : '';
+  if (!ci.workflows.length) {
+    return [`No completed workflow run on ${branch} in the last 30 days, canceled and skipped runs left out.`, checked, failed]
+      .filter(Boolean).join('\n');
+  }
+  const when = (r: MainRun) => (r.at ? time(r.at) : 'time unknown');
+  const mark = (failed: boolean) => (failed ? '✗' : '✓');
+  const workflows = [...ci.workflows].sort((a, b) => Number(workflowFailed(b)) - Number(workflowFailed(a)));
+  const lines = workflows.flatMap((w) => {
+    const newest = w.runs[0];
+    if (!newest) return [];
+    const head = `${mark(workflowFailed(w))} ${w.name || w.path}`;
+    const sha = newest.head_sha.slice(0, 7);
+    if (w.runs.length === 1) return [`${head}: ${conclusionText(newest)} (${newest.event}; ${when(newest)}; ${sha})`];
+    const failed = w.runs.filter(runFailed).length;
+    const summary = failed ? `${failed} of ${w.runs.length} runs failed` : `${w.runs.length} runs, none failed`;
+    return [`${head}: ${summary} (${newest.event}; ${sha})`,
+      ...w.runs.map((r) => `    ${mark(runFailed(r))} ${conclusionText(r)}: ${r.title} (${when(r)})`)];
+  });
+  return [`Latest result of each workflow on ${branch}; canceled and skipped runs are left out.`, ...lines,
+    checked, failed].filter(Boolean).join('\n');
+}
+
+/** Where the Main CI cell links: the first failed run, otherwise the repo's runs on the default branch. */
+export function mainCiUrl(repo: string, ci: MainCi | null | undefined): string {
+  const failed = ci?.workflows.flatMap((w) => w.runs).find(runFailed);
+  if (failed?.url) return failed.url;
+  const query = encodeURIComponent(`branch:${ci?.branch || 'main'}`);
+  return `https://github.com/${repo}/actions?query=${query}`;
 }
 
 // ───────────────────────────── which repos show ─────────────────────────────
