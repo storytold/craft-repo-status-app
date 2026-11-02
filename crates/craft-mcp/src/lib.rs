@@ -566,6 +566,7 @@ mod tests {
             (json!(3 * 3600), json!(true))
         );
         assert_eq!(beta["error"], "timed out");
+        assert_eq!(beta["category"], "other", "a repo outside the defaults");
         let alpha = &rows[1];
         assert_eq!(
             (alpha["age_secs"].clone(), alpha["stale"].clone()),

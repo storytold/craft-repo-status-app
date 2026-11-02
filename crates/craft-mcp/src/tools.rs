@@ -353,6 +353,7 @@ fn repo_row(e: &RepoEntry, window: &str, d: &Data) -> Value {
     json!({
         "repo": e.repo,
         "name": e.name(),
+        "category": e.category,
         "fetched_at": e.fetched_at,
         "age_secs": d.secs_since(e.fetched_at),
         "stale": e.is_stale(d.now, d.snap.stale_after_secs),
