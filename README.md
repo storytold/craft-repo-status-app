@@ -2,10 +2,11 @@ Craft Repo Status App
 =====================
 
 Find out the status of the craft apps: a tray dashboard ("Craft Status") that
-polls the storytold `*craft` repositories on GitHub every 30 minutes, keeps a
-cache, and tells you what to fix first. Everything runs locally: no server.
+polls the storytold `*craft` repositories on GitHub, keeps a cache, and shows
+downloads, what to fix first, and how close each open PR is to landing, with
+CodeRabbit's findings and Claude's summaries. Everything runs locally: no server.
 
-![Craft Status: the Repos table, sorted by urgency](docs/screenshot.png)
+![Craft Status: the repos table](docs/screenshot.png)
 
 - **Rust workspace**
   - `craft-core`: the model, release/download accounting, the urgency
@@ -13,15 +14,33 @@ cache, and tells you what to fix first. Everything runs locally: no server.
     and it is unit-tested.
   - `craft-github`: the GitHub GraphQL/REST fetcher, plus a `craft-fetch` CLI
     that prints a table, for debugging.
-  - `craft-status-app`: the Tauri 2 shell (poll thread, tray, global
+  - `pr-core`: the PR model, CodeRabbit parser, landing heuristics, overlap
+    detection, fetch schedule and PR cache. No network either.
+  - `pr-github`: the PR fetcher, plus a `pr-fetch` CLI for debugging.
+  - `pr-claude`: the Claude Code CLI call, prompts and spending ledger.
+  - `craft-status-app`: the Tauri 2 shell (poll threads, tray, global
     shortcut, window).
 - **TypeScript, HTML and CSS** in `ui/`, with no framework or bundler. `tsc`
   compiles `ui/src/` to `ui/build/`, which `index.html` loads; the app's
   `build.rs` runs it, so building the app needs Node.js 24+ and `npm ci`.
-  `ui/src/model.ts` is pure; it and the UI itself (in happy-dom) are tested
+  `ui/src/model.ts` and `pr-model.ts` are pure; they and the UI itself (in happy-dom) are tested
   with `node --test`. No JavaScript is committed: see `CLAUDE.md`.
 
-## What it shows
+## Tabs
+
+| Tab | Key | What it's for | Third-party repos |
+| --- | --- | --- | --- |
+| **Downloads** | `⌘1` | Download counts and rates, builds, issues and activity for every repo | shown, tagged `3P` |
+| **PRs** | `⌘2` | Reviewing open PRs: grades, CodeRabbit findings, Claude's summaries | left out |
+| **Fix first** | `⌘3` | Open issues most worth fixing | shown, tagged `3P` |
+
+The chips beside the tabs show or hide kinds of repo on every tab: **3rd party**, **Apps**,
+**Libraries**, **Assets**, **CI** and **Tooling**. A repo hides if any kind it is has been
+turned off, so solidcraft goes with either 3rd party or Apps. Hiding only changes what's on
+screen, including totals and tab counts: the repo keeps being fetched, and fetch errors still
+show. The choice is remembered.
+
+## Downloads
 
 The default list covers the apps and also libraries, assets, CI and tooling repos.
 The **Type** column says which is which (`DEFAULT_REPOS` in
@@ -37,9 +56,9 @@ sort by a column again.
 | Fix first | **Urgency** (the sum of the top five open-issue scores) · **Critical** (open issues naming a crash, hang, freeze, data loss, launch failure or security problem) |
 | Open | open PRs · open issues · oldest open PR |
 | Latest | last commit to `main` · newest issue · newest PR |
-| Activity (dropdown) | commits to `main` · PRs opened · PRs merged · issues opened · people committing to `main` |
+| Activity (dropdown) | commits to `main` · PRs opened · PRs merged · issues opened · people committing to `main` · **Total DLs** (downloads across all releases; only under All time) |
 | Parity | **Breadth** · **Ready**, from the repo's `ROADMAP.md` |
-| Builds | most recent release tag · its publish date · **Unreleased** (commits on `main` since it) · its downloads · downloads across all releases |
+| Downloads | the latest release's tag · its publish date · its download rate and downloads · **Unreleased** (commits on `main` since it) |
 
 - **Activity** covers the window picked in that group's header: the last
   10 min, 30 min, hour, 4 h (the default), 12 h, day or week, since the last
@@ -107,6 +126,119 @@ Issues labelled `wontfix`, `duplicate` or `invalid` are dropped. For each
 repo, the 100 newest open issues and the 30 most-commented open issues are
 scored.
 
+## PRs
+
+The PR tab covers every watched repo except third-party ones: a repo counts as
+first party if its owner is in `first_party_owners`, and `exclude_repos` leaves out
+more. Solidcraft's PRs aren't fetched, graded or sent to Claude.
+
+**Repos** has one row per repo, and every column sorts: open PRs, how many have been
+inspected, landable, promising, reviewable, CI not run, approved, high quality,
+easy/medium/hard, needs work, conflicts, failing CI, CodeRabbit flags and nits,
+security flags and nits, PRs by core, frequent and new authors, interesting PRs,
+possibly related groups and ages. Its **Type** column says which are apps, libraries,
+assets, CI or tooling.
+
+**A repo** (click its row) lists its PRs, best first, with sortable columns (including
+who approved each one and what it's possibly related to), filters, search and **Group
+possibly related**. Drafts are hidden unless asked for.
+
+**A PR** (click its row) has the verdict and the reasons behind it, Claude's
+assessment, CodeRabbit findings worst first, security flags, the author's standing,
+the PRs it's possibly related to, checks, reviews, files and the description. **Read
+the diff** asks Claude for a closer look.
+
+**Review queue** is what someone can act on across every repo: Landable, Promising,
+Reviewable and CI not run. The number on the PRs tab counts these.
+
+`Esc` goes back a level and hides the window at the top. `/` searches. Choosing the PRs
+tab again goes back to its top; leaving it keeps your place. `⌘R` refreshes what's on
+screen.
+
+#### How PRs are graded
+
+All of it is deterministic, and the PR view shows the working
+(`crates/pr-core/src/assess.rs`).
+
+A PR has independent **flags** (Approved, Conflicted, CI failed…) and one **status**
+worked out from them, from this truth table. The first matching row wins, and `–`
+means that column doesn't matter. The `?` beside a PR table explains all of this in
+the app. A *problem* is a failed check, requested changes, an unresolved critical or
+major CodeRabbit finding, a failed security check, or an open conversation started by
+a person. *Running* means CI or CodeRabbit is going, or GitHub hasn't worked out
+mergeability.
+
+| Draft | Problem | Conflicted | Inspected | Running | CI | Approved | Quality ≥ 75 | Status |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| Y | – | – | – | – | – | – | – | **Draft** |
+| N | Y | – | – | – | – | – | – | **Needs work** |
+| N | N | Y | – | – | – | – | – | **Conflicted** |
+| N | N | N | N | – | – | – | – | **Not inspected** |
+| N | N | N | Y | Y | – | – | – | **Checking** |
+| N | N | N | Y | N | not run | – | – | **CI not run** |
+| N | N | N | Y | N | pass | Y | – | **Landable** |
+| N | N | N | Y | N | pass | N | Y | **Promising** |
+| N | N | N | Y | N | pass | N | N | **Reviewable** |
+
+- **Approved** means GitHub's review decision is approved, on the latest commit. An
+  approval of an older commit shows as a *Stale approval* flag and doesn't make a PR
+  Landable. The Approved by column also lists approvals GitHub doesn't count, usually
+  from people without write access, in grey.
+- **Cancelled and skipped checks** don't count as failures or as CI having run. Until a
+  PR is inspected, only GitHub's overall result is known, which counts a cancelled
+  run as a failure.
+- **The Status column** sorts best first, in the order Landable, Promising, Reviewable,
+  CI not run, Checking, Not inspected, Conflicted, Needs work, Draft. Quality, ease and
+  the author only break ties within a status.
+- **Possibly related** never changes a status. Each PR lists the others it may relate to,
+  and links go both ways: click a number to jump to its row, or ⌘-click to open it.
+- **Ease** adds up size (not counting lockfiles), files, spread, conflicts, failing
+  CI, flags and sensitive paths, less a point for authors who know the codebase.
+- **Quality** starts at 60. It moves with CI, conflicts, reviews, description, a
+  linked issue, tests, CodeRabbit's findings and the author's record. Until a PR is
+  inspected it shows as `~` and can't count as high quality.
+- **CodeRabbit**: critical and major findings are *flags*; minor and trivial are
+  *nits*. Resolved and outdated threads don't count.
+- **Security** means CodeRabbit findings in its `Security & Privacy` category (or
+  titled like one), failed checks named like security checks, and `sensitive_paths`
+  changed by someone without write access. The last doesn't count against a PR, since the
+  author can't do anything about it: it asks the reviewer to look closer.
+- **Authors**: *core* has write access or better, or is in the repo's
+  `contributors/people.toml`. Contributors may add their own entry there, so set
+  `people_toml_is_core = false` for a stricter list. *Frequent* has more than 30 PRs
+  merged across the craft apps, counted from merge history. *New* is GitHub's
+  first-time contributor.
+
+### Claude
+
+Claude runs through the Claude Code CLI (`claude -p`), using its existing login.
+It works through inspected PRs best first, and regroups each repo daily.
+
+- **Spending**: at most `max_runs_per_hour` background calls (12) and
+  `max_usd_per_day` ($5, as reported by the CLI). The footer shows the day's total.
+  At these limits only part of the backlog gets summarized each day, so change them
+  in the config's `[pr_review.claude]`, along with `model` and `enabled`.
+- **Safety**: PR text is written by strangers, so Claude gets no tools, MCP servers,
+  settings or project files, and its answers are only shown as text. It can mark a PR
+  harder or interesting, but can't change its status or raise its quality or ease.
+
+### PR polling
+
+There are too many open PRs to inspect in one go (about 7,900, at 16 points per 25),
+so work is split into tiers:
+
+1. **Lists** of every open PR, every 30 min if anything changed, and a full rewalk
+   every 4 h, which is the only way to see CI finishing on a PR nobody touched.
+2. **Who can write**, daily.
+3. **Merge history**, once, for the landed counts (about 160 pages).
+4. **Inspection**, best candidates first: findings, files, checks, reviews. A first
+   pass over everything takes a couple of hours, and after that only changed PRs
+   are refetched. The footer counts what's left.
+
+The PR cache is `~/Library/Caches/craft-pr-review/`. Fetching stops for the budget at
+`max_points_per_hour` (2500), and everything pauses below `budget_floor` (1000), well
+above the 150 where the Downloads tab's polling pauses itself.
+
 ## Polling and cache
 
 - The app fetches one repo at a time, 20 s apart: first any repo with no data
@@ -144,20 +276,19 @@ scored.
   - `snapshot.json`: what the window shows, saved after each repo. On launch
     the window shows it at once, marked `STALE` if it's old. Repos whose
     data is still fresh aren't refetched at launch.
-- A third cache, `~/Library/Caches/craft-github-cache/`, is shared with
-  [Craft PR Review](../craft-pr-review-tool), which uses this app's config and
-  token. Everything in it can be deleted.
-  - `prs/<owner>@<repo>.json`: a ledger of each repo's PRs, which is where this
-    app's PR counts come from. One walk, most recently updated first, serves both
-    apps, and a ledger either of them walked in the last 5 minutes isn't walked
-    again. A repo's first ledger is seeded from what its `raw/` file held about
+- A third cache, `~/Library/Caches/craft-github-cache/`, is shared by this
+  polling and the PR tab's. Everything in it can be deleted.
+  - `prs/<owner>@<repo>.json`: a ledger of each repo's PRs, which is where the
+    Downloads tab's PR counts come from. One walk, most recently updated first,
+    serves both, and a ledger either of them walked in the last 5 minutes isn't
+    walked again. A repo's first ledger is seeded from what its `raw/` file held about
     PRs, so upgrading doesn't refetch the last week.
-  - `lease.lock`: a file lock held while talking to GitHub, so the apps take turns
-    and can't overwrite each other's updates. This app waits up to 3 minutes for
-    it, then goes ahead anyway; Craft PR Review gives way. It releases if an app
-    dies.
+  - `lease.lock`: a file lock held while talking to GitHub, so the pollers take
+    turns and can't overwrite each other's updates. The status poller waits up to
+    3 minutes for it, then goes ahead anyway; the PR poller gives way. It releases
+    if the app dies.
   - `budget.json`: the last rate-limit reading and any backoff. When GitHub
-    rate-limits either app, both pause.
+    rate-limits either poller, both pause.
 - The GitHub token comes from the first of `$CRAFT_STATUS_GITHUB_TOKEN`,
   `$GITHUB_TOKEN` and `$GH_TOKEN` that is set, then from `github_token` in the
   config, then from `gh auth token`. The app is started by launchd, not a
@@ -174,14 +305,18 @@ The app behaves like the Todo app:
 - `⌘⇧G` shows or hides the window from anywhere.
 - The window is chrome-less and semi-transparent, and it appears on every
   Space. It remembers its position and size in `~/.craft_status_state.toml`.
-- `Esc` hides the window.
+- `Esc` hides the window (on the PRs tab, once it's back at the top).
 
 ## Configuration: `~/.craft_status_config.toml`
 
 The app creates this file from
 [`craft_status_config.template.toml`](craft_status_config.template.toml) the
 first time it launches. It re-reads the file before each poll, so edits to the
-repo list or the intervals take effect without a restart.
+repo list or the intervals take effect without a restart. PR review's settings are
+its `[pr_review]` section, and all of them are optional: a file from before PR review
+moved in just gets the defaults. `~/.craft_pr_review_config.toml` is no longer read,
+so copy any changes you made there into that section (minus `[window]`, `[tray]` and
+`[shortcuts]`, which the main ones cover).
 
 ## Build, install, test
 
@@ -192,6 +327,7 @@ Prerequisites:
 - `cargo install tauri-cli --version "^2"`
 - Xcode CLT on macOS
 - `gh auth login`, or a token in the config
+- Claude Code, for the PR tab's Claude features
 
 ```sh
 make install    # release .app → /Applications/Craft Status.app, start at login, launch
@@ -200,8 +336,10 @@ make run        # debug binary
 make test       # Rust + UI tests
 make check      # clippy + rustfmt + tsc type-check
 make snapshot   # fetch once, print a table, write ui/dev-snapshot.json
-make preview    # serve ui/ in a browser against that snapshot (no Tauri needed)
+make dump       # write the cached PR views to ui/dev-data.json, fetching nothing
+make preview    # serve ui/ in a browser against both (no Tauri needed)
 ```
 
 To start the app at login, `make install` adds
-`~/Library/LaunchAgents/ai.storyteller.craft-status.plist`.
+`~/Library/LaunchAgents/ai.storyteller.craft-status.plist`. Don't run a separate Craft
+PR Review alongside it: both would write to the same PR cache and spend the same quota.

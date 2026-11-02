@@ -1,7 +1,8 @@
-//! Tauri shell around `craft-core` + `craft-github`: the poll loop, the
-//! on-disk cache, tray icon, global shortcut and window management.
+//! Tauri shell: the status poll loop (`craft-core` + `craft-github`), its on-disk
+//! cache, tray icon, global shortcut and window management. The PR tab's commands
+//! and threads are in `pr`.
 //!
-//! One background thread owns polling. Every `poll_minutes` (and on demand)
+//! One background thread owns status polling. Every `poll_minutes` (and on demand)
 //! it fetches all repositories one at a time, publishing the snapshot to the
 //! UI and the cache after each repository lands.
 //! Failed repositories keep their previous numbers; staleness is derived from
@@ -23,6 +24,9 @@ use tauri::{
 };
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
 
+use pr::PrReview;
+
+mod pr;
 mod shrink;
 
 const MAIN: &str = "main";
@@ -48,8 +52,8 @@ const BUDGET_FLOOR: u64 = 150;
 const LOW_BUDGET_PAUSE: i64 = 30 * 60;
 /// Below this many GraphQL points left, skip requests nobody asked for.
 const OPTIONAL_FLOOR: u64 = 1_500;
-/// How long to wait for Craft PR Review to finish talking to GitHub (it gives way
-/// between requests) before going ahead anyway: this app is never starved.
+/// How long to wait for the PR poller to finish talking to GitHub (it gives way
+/// between requests) before going ahead anyway: this poller is never starved.
 const LEASE_PATIENCE: Duration = Duration::from_secs(180);
 /// Ignore manual refreshes this soon after the previous one.
 const MANUAL_DEBOUNCE: i64 = 15;
@@ -91,11 +95,14 @@ struct Meta {
     platform: &'static str,
     version: &'static str,
     shortcut: String,
+    frequent_over: u64,
+    high_quality: u8,
 }
 
 fn meta(app: &AppHandle) -> Meta {
     let state = app.state::<AppState>();
     let cfg = state.config.lock().unwrap();
+    let pr_cfg = app.state::<PrReview>().config.lock().unwrap().clone();
     Meta {
         config_path: Config::path()
             .map(|p| p.display().to_string())
@@ -110,6 +117,8 @@ fn meta(app: &AppHandle) -> Meta {
         platform: std::env::consts::OS,
         version: env!("CARGO_PKG_VERSION"),
         shortcut: cfg.shortcuts.toggle_window.clone(),
+        frequent_over: pr_cfg.frequent_over,
+        high_quality: pr_cfg.high_quality,
     }
 }
 
@@ -226,8 +235,10 @@ fn reload_config_if_changed(app: &AppHandle) {
         return;
     }
     *state.config_mtime.lock().unwrap() = mtime;
-    match Config::load_or_create() {
-        Ok(cfg) => {
+    // One file holds both pollers' settings, so a broken one keeps both's old ones.
+    let loaded = Config::load_or_create().and_then(|c| Ok((c, pr_core::Config::load()?)));
+    match loaded {
+        Ok((cfg, pr_cfg)) => {
             {
                 let mut snap = state.snapshot.lock().unwrap();
                 snap.sync_repos(&cfg.repos);
@@ -242,8 +253,10 @@ fn reload_config_if_changed(app: &AppHandle) {
                 }
             }
             *state.config.lock().unwrap() = cfg.clone();
+            *app.state::<PrReview>().config.lock().unwrap() = pr_cfg;
             apply_window_config(app, &cfg);
             let _ = app.emit(EV_META, meta(app));
+            pr::emit_changed(app);
         }
         Err(e) => {
             state.snapshot.lock().unwrap().error = Some(format!("Config error: {e}"));
@@ -485,7 +498,7 @@ fn step(app: &AppHandle, pacing: &mut Pacing) {
         snap.sync_repos(&cfg.repos);
         snap.poll_secs = cfg.poll_secs();
         snap.stale_after_secs = cfg.stale_secs();
-        // Craft PR Review was rate-limited on this account: hold off too.
+        // The PR poller was rate-limited on this account: hold off too.
         let shared_backoff = state.shared.as_ref().and_then(|s| s.budget().backoff(now));
         if let Some(until) = shared_backoff {
             pacing.not_before = Some(pacing.not_before.map_or(until, |t| t.max(until)));
@@ -517,7 +530,7 @@ fn step(app: &AppHandle, pacing: &mut Pacing) {
                 if let Some(end) = rate_limit_end(&until, now) {
                     resume = resume.max(end);
                 }
-                // Craft PR Review shares the account: it should stop too.
+                // The PR poller shares the account: it should stop too.
                 if let Err(e) = state
                     .shared
                     .as_ref()
@@ -736,10 +749,14 @@ fn tray_tooltip(snap: &Snapshot, now: DateTime<Utc>) -> String {
 }
 
 fn update_tray(app: &AppHandle) {
-    let tip = tray_tooltip(
+    let mut tip = tray_tooltip(
         &app.state::<AppState>().snapshot.lock().unwrap(),
         Utc::now(),
     );
+    let prs = app.state::<PrReview>().tray_line.lock().unwrap().clone();
+    if !prs.is_empty() {
+        tip = format!("{tip} · {prs}");
+    }
     if let Some(tray) = app.tray_by_id(TRAY) {
         let _ = tray.set_tooltip(Some(tip));
     }
@@ -953,7 +970,10 @@ fn build_tray(app: &tauri::App, cfg: &Config) -> tauri::Result<()> {
         .show_menu_on_left_click(false)
         .on_menu_event(|app, event| match event.id.as_ref() {
             "toggle" => toggle_window(app),
-            "refresh" => wake_poller(&app.state::<AppState>(), Wake::All),
+            "refresh" => {
+                wake_poller(&app.state::<AppState>(), Wake::All);
+                pr::refresh_all(&app.state::<PrReview>());
+            }
             "on_top" => {
                 let checked = app
                     .try_state::<TrayItems>()
@@ -994,6 +1014,7 @@ pub fn run() {
     snapshot.sync_repos(&config.repos);
     snapshot.poll_secs = config.poll_secs();
     snapshot.stale_after_secs = config.stale_secs();
+    let (pr_review, pr_threads) = pr::init(&config, &snapshot);
 
     let (tx, rx) = mpsc::channel();
     let state = AppState {
@@ -1014,6 +1035,7 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .manage(state)
+        .manage(pr_review)
         .invoke_handler(tauri::generate_handler![
             get_snapshot,
             get_meta,
@@ -1026,6 +1048,14 @@ pub fn run() {
             hide_window,
             log,
             quit,
+            pr::get_pr_overview,
+            pr::get_pr_repo,
+            pr::get_pr_queue,
+            pr::get_pr,
+            pr::refresh_prs,
+            pr::refresh_pr_repo,
+            pr::refresh_pr,
+            pr::analyze_pr,
         ])
         .setup(move |app| {
             let cfg = app.state::<AppState>().config.lock().unwrap().clone();
@@ -1040,6 +1070,7 @@ pub fn run() {
             apply_window_config(app.handle(), &cfg);
             update_tray(app.handle());
             spawn_poller(app.handle().clone(), rx);
+            pr::spawn(app.handle().clone(), pr_threads);
             Ok(())
         })
         .on_window_event(|window, event| match event {
@@ -1127,6 +1158,13 @@ mod tests {
         let hour = rate_limit_end("the top of the hour", now).unwrap();
         assert_eq!(hour.to_rfc3339(), "2026-10-18T05:00:00+00:00");
         assert!(rate_limit_end("later", now).is_none());
+    }
+
+    #[test]
+    fn only_github_links_open() {
+        assert!(open_url("https://evil.example/x".into()).is_err());
+        assert!(open_url("file:///etc/passwd".into()).is_err());
+        assert!(open_url("https://github.com.evil.example/x".into()).is_err());
     }
 
     #[test]

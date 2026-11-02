@@ -11,7 +11,7 @@
 //! other queries, even inside GraphQL;
 //! The authors and issues are kept between polls ([`RawActivity`]), so after the
 //! first poll those queries fetch only what's new. PR counts come from the
-//! [`PrLedger`] shared with Craft PR Review (see [`GitHub::sync_ledger`]), which
+//! [`PrLedger`] shared with the PR poller (see [`GitHub::sync_ledger`]), which
 //! either app may have brought up to date already;
 //! one (usually) REST call for the contributor list, which GraphQL lacks.
 //! The counts query also reads the blob ids of the parity documents;
@@ -827,7 +827,7 @@ pub struct Events {
 /// Activity kept between polls, in the cache directory, so each poll asks
 /// GitHub only for what's new. Keyed by commit oid and issue number, so
 /// overlapping fetches merge instead of double counting. PRs aren't here: they
-/// are in the [`PrLedger`] shared with Craft PR Review.
+/// are in the [`PrLedger`] shared with the PR poller.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct RawActivity {
