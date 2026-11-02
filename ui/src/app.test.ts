@@ -56,7 +56,7 @@ afterEach(async () => { await teardown?.(); teardown = null; });
 const tick = () => new Promise((r) => setTimeout(r, 0));
 
 /** A fresh document with the UI started in it. */
-async function setup({ snap = snapshot(), storage = {} as Record<string, unknown>, meta = {} as Meta } = {}): Promise<Harness> {
+async function setup({ snap = snapshot(), storage = {} as Record<string, unknown>, meta = {} as Meta, snapReply = Promise.resolve() } = {}): Promise<Harness> {
   const win = new Window({ url: 'http://localhost/index.html' });
   win.document.body.innerHTML = BODY;
   for (const [k, v] of Object.entries(storage)) win.localStorage.setItem(k, JSON.stringify(v));
@@ -77,7 +77,7 @@ async function setup({ snap = snapshot(), storage = {} as Record<string, unknown
   const api: Api = {
     async invoke<T>(cmd: string, args?: Record<string, unknown>) {
       calls.push({ cmd, args });
-      if (cmd === 'get_snapshot') return snap as T;
+      if (cmd === 'get_snapshot') { await snapReply; return snap as T; }
       if (cmd === 'get_meta') return meta as T;
       return null as T;
     },
@@ -615,6 +615,18 @@ test('the first data for a repo does not flash', async (t) => {
   h.emit('craft:snapshot', snapshot([repo('alpha', { open_prs: 4 }), repo('beta', {}), repo('delta', { open_prs: 5 })]));
   assert.equal(h.row('alpha').cells[PRS]!.textContent, '4');
   assert.equal(lit(h).length, 0, 'a repo fetched for the first time, and a repo new to the config');
+});
+
+test('a get_snapshot reply that arrives after a snapshot event does not replace it', async (t) => {
+  let reply = (): void => {};
+  const h = await setup({ snapReply: new Promise<void>((r) => { reply = r; }) });
+  h.emit('craft:snapshot', changed({ alpha: { open_prs: 9 } }));
+  reply();
+  await tick();
+  assert.equal(h.row('alpha').cells[PRS]!.textContent, '9');
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  h.emit('craft:snapshot', changed({ alpha: { open_prs: 9 } }));
+  assert.equal(lit(h).length, 0, 'the same data again');
 });
 
 test('a second change restarts the flash', async (t) => {

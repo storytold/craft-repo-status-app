@@ -694,8 +694,13 @@ export function start(api: Api, prRoute?: Route): () => void {
   (async () => {
     try {
       applyMeta(await api.invoke<Meta>('get_meta'));
-      state.snap = await api.invoke<Snapshot>('get_snapshot');
-      render('data');
+      const initial = await api.invoke<Snapshot>('get_snapshot');
+      // A craft:snapshot event that arrived first is kept: the host emits one
+      // after every change, so anything newer in this reply follows as an event.
+      if (!state.snap) {
+        state.snap = initial;
+        render('data');
+      }
     } catch (e) {
       console.error(e);
     } finally {
