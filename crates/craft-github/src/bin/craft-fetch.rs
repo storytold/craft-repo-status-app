@@ -17,9 +17,12 @@ use craft_core::people::record::PrCache;
 use craft_core::people::roster::{self, RosterRow};
 use craft_core::people::view::assemble;
 use craft_core::people::{maintainers, Directory};
-use craft_core::{Cache, Config, LagBasis, RepoEntry, Snapshot, ALL_TIME};
+use craft_core::{Cache, Config, LagBasis, RepoEntry, SharedCache, Snapshot, ALL_TIME};
 use craft_github::prs::{download_roster, PrInput, Seen, RUN_REQUESTS};
 use craft_github::{resolve_token, Error, GitHub, RawActivity};
+
+/// How long to wait for the PR poller to finish talking to GitHub.
+const LEASE_PATIENCE: std::time::Duration = std::time::Duration::from_secs(180);
 
 /// The app's cache directory, or the end of the program.
 fn cache_dir() -> PathBuf {
@@ -203,6 +206,7 @@ fn main() {
         return;
     }
     let now = Utc::now();
+    let shared = SharedCache::default_location().unwrap();
     let mut snap = Snapshot {
         poll_secs: cfg.poll_secs(),
         stale_after_secs: cfg.stale_secs(),
@@ -224,7 +228,8 @@ fn main() {
             .as_deref()
             .map(|d| RawActivity::load(d, repo))
             .unwrap_or_default();
-        match gh.fetch_repo(repo, now, &mut raw) {
+        let _lease = shared.lease(LEASE_PATIENCE);
+        match gh.fetch_repo(repo, now, &mut raw, &shared) {
             Ok((s, budget)) => {
                 if let Some(dir) = &raw_dir {
                     if let Err(e) = raw.save(dir, repo) {
