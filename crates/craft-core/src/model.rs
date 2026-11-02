@@ -7,7 +7,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::config::{category_of, RepoCategory};
-use crate::BuildLag;
+use crate::{BuildLag, Parity};
 
 pub type Time = DateTime<Utc>;
 
@@ -83,6 +83,11 @@ pub struct RepoStats {
     pub urgent: Vec<UrgentIssue>,
     /// Blob id of the app icon (`assets/app-icon/hicolor/64x64/apps/*.png`).
     pub icon_oid: Option<String>,
+    /// The commit at the head of the default branch.
+    pub head_oid: Option<String>,
+    /// Blob ids of the parity documents at the head of the default branch,
+    /// by path (see [`crate::parity`]); a missing document is left out.
+    pub parity_oids: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
@@ -120,6 +125,10 @@ pub struct RepoEntry {
     /// GitHub reported the repo missing (e.g. private and not visible to the
     /// token); shown as an empty row rather than an error.
     pub inaccessible: bool,
+    /// The parity numbers from the repo's parity documents, read again only
+    /// when one of them changes; `None` until read. Not part of
+    /// [`RepoEntry::is_hole`]: a repo is fetched for its stats alone.
+    pub parity: Option<Parity>,
     /// The app icon as a `data:` URI, downloaded once per blob id.
     pub icon: Option<String>,
     /// The blob `icon` was downloaded from; compared with `stats.icon_oid`.
@@ -330,6 +339,26 @@ mod tests {
         assert!(!s.repos[0].is_stale(now, s.stale_after_secs));
         s.repos[1].fetched_at = None;
         assert_eq!(s.oldest_data_at(), None);
+    }
+
+    #[test]
+    fn a_repo_without_parity_numbers_is_not_a_hole() {
+        let mut stats = RepoStats::default();
+        for (id, _) in WINDOWS {
+            stats.recent.insert(id.to_string(), Activity::default());
+        }
+        stats.recent.insert(ALL_TIME.into(), Activity::default());
+        let e = RepoEntry {
+            stats: Some(stats),
+            fetched_at: Some(Utc::now()),
+            ..RepoEntry::new("o/lib")
+        };
+        assert_eq!(e.parity, None);
+        assert!(!e.is_hole(), "parity is read with a fetch, never for one");
+        let old = r#"{"repos":[{"repo":"o/a","fetched_at":"2026-10-18T00:00:00Z","stats":{}}]}"#;
+        let s: Snapshot = serde_json::from_str(old).unwrap();
+        assert_eq!(s.repos[0].parity, None, "a cache from before parity loads");
+        assert!(s.repos[0].stats.as_ref().unwrap().parity_oids.is_empty());
     }
 
     #[test]
