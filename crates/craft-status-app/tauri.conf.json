@@ -34,7 +34,7 @@
     "targets": "all",
     "category": "DeveloperTool",
     "shortDescription": "Status of the storytold craft repositories",
-    "longDescription": "A tray dashboard that polls the craft repositories on GitHub every few minutes: PRs, issues, commits, builds, downloads, and the most urgent fixes.",
+    "longDescription": "A tray dashboard for the craft repositories: downloads, builds and activity, the most urgent fixes, and a PR review workspace that grades every open PR.",
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",

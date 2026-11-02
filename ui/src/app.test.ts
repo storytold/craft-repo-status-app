@@ -7,7 +7,7 @@ import { readFileSync } from 'node:fs';
 import { Window } from 'happy-dom';
 import { start } from './app.ts';
 import type { Api } from './app.ts';
-import { COLUMNS } from './model.ts';
+import { COLUMNS, RECENT } from './model.ts';
 import type { Config, Meta, RepoEntry, RepoStats, Settings, Snapshot, UrgentIssue } from './model.ts';
 
 const HTML = readFileSync(new URL('../index.html', import.meta.url), 'utf8');
@@ -106,7 +106,7 @@ async function setup({ snap = snapshot(), storage = {} as Record<string, unknown
     emit: (event, payload) => listeners.get(event)?.(payload),
     rows: () => [...tbody().querySelectorAll('tr')].map((r) => r.dataset.repo?.slice(2) ?? ''),
     row: (name) => tbody().querySelector<HTMLTableRowElement>(`tr[data-repo="o/${name}"]`)!,
-    view: () => (doc.getElementById('repos-view')!.hidden ? 'urgent' : 'repos'),
+    view: () => (['repos', 'prs', 'urgent'].find((v) => !doc.getElementById(`${v}-view`)!.hidden) ?? ''),
   };
 }
 
@@ -398,13 +398,13 @@ test('keyboard shortcuts and buttons call the host', async () => {
     h.doc.dispatchEvent(new h.win.KeyboardEvent('keydown', { key, metaKey: mod, bubbles: true }) as unknown as Event);
   key('r', true);
   key('Escape');
-  key('2', true);
+  key('3', true);
   assert.equal(h.view(), 'urgent');
   key('1', true);
   assert.equal(h.view(), 'repos');
   h.doc.getElementById('pin')!.click();
   h.doc.getElementById('resize')!.dispatchEvent(new h.win.MouseEvent('mousedown') as unknown as Event);
-  const cmds = h.calls.map((c) => c.cmd).filter((c) => !['get_meta', 'get_snapshot', 'window_ready'].includes(c));
+  const cmds = h.calls.map((c) => c.cmd).filter((c) => !['get_meta', 'get_snapshot', 'get_pr_overview', 'window_ready'].includes(c));
   assert.deepEqual(cmds, ['refresh_now', 'hide_window', 'set_always_on_top', 'startResize']);
   assert.deepEqual(h.calls.find((c) => c.cmd === 'set_always_on_top')?.args, { on: false });
   assert.equal(h.doc.getElementById('pin')!.getAttribute('aria-pressed'), 'true');
@@ -462,7 +462,7 @@ test('the gear, ⌘, the footer and the host’s event open Settings with the fi
   const h = await setup({ host: fileHost({ settings: settingsOf(config({ poll_minutes: 45 }), true) }) });
   await openSettings(h);
   assert.ok(settingsShown(h));
-  assert.equal(h.view(), 'urgent', 'the table is hidden');
+  assert.equal(h.view(), '', 'the table, the PRs and Fix first are hidden');
   assert.equal(field(h, 'poll_minutes').value, '45');
   assert.equal(field(h, 'window.opacity').value, '0.96');
   assert.equal(field(h, 'tray.close_to_tray').checked, true);
@@ -718,4 +718,105 @@ test('in a browser, where get_settings answers null, Settings says it needs the 
   assert.equal(settingsStatus(h), 'Settings need the app.');
   assert.equal(h.doc.querySelector('#settings-form fieldset'), null, 'no form to fill in');
   assert.equal(saveButton(h).disabled, true);
+});
+
+// ───────────────────────────── tabs ─────────────────────────────
+
+test('the tabs are Downloads, PRs and Fix first, in that order, opening on Downloads', async () => {
+  const h = await setup();
+  assert.deepEqual([...h.doc.querySelectorAll<HTMLElement>('[data-view]')].map((b) => b.dataset.view), ['repos', 'prs', 'urgent']);
+  assert.match(h.doc.querySelector('[data-view="repos"]')!.textContent!, /Downloads/);
+  assert.equal(h.view(), 'repos');
+  assert.equal(h.doc.querySelector('[data-view="repos"]')!.getAttribute('aria-selected'), 'true');
+});
+
+test('Downloads leads with the build, then its download columns', async () => {
+  const keys = COLUMNS.map((c) => c.key);
+  const first = keys.indexOf('latest_build');
+  assert.equal(first, keys.indexOf('category') + 1, 'right after the repo\'s name and type');
+  assert.deepEqual(keys.slice(first, first + 4), ['latest_build', 'latest_build_at', 'latest_build_rate', 'latest_build_downloads']);
+  const h = await setup();
+  const groups = [...h.doc.querySelectorAll('thead tr.groups th')].map((th) => th.textContent);
+  assert.equal(groups.includes('Downloads'), true);
+});
+
+test('third-party repos stay on Downloads and Fix first, tagged', async () => {
+  const third = { repo: 'tangency-labs/solidcraft', stats: stats({ urgent: [issue(9, 70, false)] }), fetched_at: NOW };
+  const h = await setup({ snap: snapshot([repo('alpha', {}), third]) });
+  const row = h.doc.querySelector('tr[data-repo="tangency-labs/solidcraft"]')!;
+  assert.equal(row.querySelector('.third-party')!.textContent, '3P');
+  h.doc.querySelector<HTMLElement>('[data-view="urgent"]')!.click();
+  assert.match(h.doc.getElementById('urgent-list')!.textContent!, /Issue 9/);
+});
+
+test('keys move between the tabs and refresh follows the tab', async () => {
+  const h = await setup();
+  const key = (k: string) => h.doc.dispatchEvent(new h.win.KeyboardEvent('keydown', { key: k, metaKey: true, bubbles: true }) as unknown as Event);
+  key('2');
+  assert.equal(h.view(), 'prs');
+  key('r');
+  assert.equal(h.calls.at(-1)!.cmd, 'refresh_prs');
+  key('3');
+  assert.equal(h.view(), 'urgent');
+  key('r');
+  assert.equal(h.calls.at(-1)!.cmd, 'refresh_now');
+  key('1');
+  assert.equal(h.view(), 'repos');
+});
+
+test('a config problem shows on the PR tab as well', async () => {
+  const h = await setup({ snap: { ...snapshot(), error: 'Config error: bad toml' }, storage: { view: 'prs' } });
+  assert.equal(h.view(), 'prs');
+  assert.match(h.doc.getElementById('banner')!.textContent!, /Config error/);
+});
+
+// ───────────────────────────── repo toggles ─────────────────────────────
+
+test('the toggles sit beside the tabs, hide repos on Downloads and Fix first, and are remembered', async () => {
+  const fonts = repo('fonts', { urgency: 1, urgent: [issue(7, 30, false)], critical_issues: 2 }, { category: 'assets' });
+  const third = { repo: 'tangency-labs/solidcraft', category: 'app' as const, stats: stats({ urgent: [issue(9, 70, false)] }), fetched_at: NOW };
+  const alpha = { ...repo('alpha', { open_prs: 3 }, { category: 'app' }), repo: 'storytold/alpha' };
+  const h = await setup({ snap: snapshot([alpha, { ...fonts, repo: 'storytold/fonts' }, third]) });
+  const toggle = (id: string) => h.doc.querySelector<HTMLElement>(`[data-kind="${id}"]`)!;
+  assert.equal(h.doc.getElementById('repo-kinds')!.previousElementSibling!.getAttribute('role'), 'tablist');
+  assert.equal(toggle('assets').getAttribute('aria-pressed'), 'true');
+  assert.equal(h.rows().length, 3);
+
+  toggle('assets').click();
+  assert.equal(toggle('assets').getAttribute('aria-pressed'), 'false');
+  assert.equal(h.rows().includes('orytold/fonts'), false);
+  assert.match(h.doc.getElementById('tfoot')!.textContent!, /2 repos/);
+  assert.equal(h.doc.getElementById('repo-count')!.textContent, '2');
+  assert.deepEqual(JSON.parse(h.win.localStorage.getItem('hiddenKinds')!), ['assets']);
+
+  toggle('third_party').click();
+  assert.equal(h.rows().length, 1, 'only the first party app is left');
+  h.doc.querySelector<HTMLElement>('[data-view="urgent"]')!.click();
+  assert.doesNotMatch(h.doc.getElementById('urgent-list')!.textContent!, /Issue (7|9)/);
+  assert.equal(h.doc.getElementById('urgent-count')!.textContent, '');
+  toggle('assets').click();
+  assert.match(h.doc.getElementById('urgent-list')!.textContent!, /Issue 7/);
+});
+
+test('hiding everything says why, and saved toggles apply from the start', async () => {
+  const h = await setup({ storage: { hiddenKinds: ['third_party'] } });
+  assert.equal(h.doc.querySelector('[data-kind="third_party"]')!.getAttribute('aria-pressed'), 'false');
+  assert.equal(h.doc.querySelector('tr[data-repo]'), null);
+  assert.match(h.doc.getElementById('tbody')!.textContent!, /hidden by the toggles/);
+});
+
+test('Total DLs sits with the activity columns and only counts under All time', async () => {
+  const i = COLUMNS.findIndex((c) => c.key === 'downloads_total');
+  assert.equal(COLUMNS[i]!.group, RECENT);
+  assert.equal(COLUMNS[i - 1]!.group, RECENT, 'beside the others, so the dropdown spans it');
+  const h = await setup({ snap: snapshot([repo('alpha', { downloads_total: 1234 })]), storage: { window: '4h' } });
+  const cell = () => h.row('alpha').cells[i]!.textContent;
+  const foot = () => (h.doc.getElementById('tfoot')!.querySelector('tr') as HTMLTableRowElement).cells[i]!.textContent;
+  assert.equal(cell(), '—');
+  assert.equal(foot(), '');
+  const picker = h.doc.querySelector<HTMLSelectElement>('.window-picker')!;
+  picker.value = 'all';
+  picker.dispatchEvent(new h.win.Event('change') as unknown as Event);
+  assert.equal(cell(), '1,234');
+  assert.equal(foot(), '1,234');
 });

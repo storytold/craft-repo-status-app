@@ -893,7 +893,7 @@ mod tests {
         let out = std::fs::read_to_string(&path).unwrap();
         assert_eq!(
             out,
-            TEMPLATE.replace("poll_minutes = 30.0", "poll_minutes = 45.0")
+            TEMPLATE.replacen("poll_minutes = 30.0", "poll_minutes = 45.0", 1)
         );
         std::fs::remove_dir_all(path.parent().unwrap()).ok();
     }

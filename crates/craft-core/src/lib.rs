@@ -1,4 +1,4 @@
-//! Everything Craft Status knows that isn't network or UI: the per-repo
+//! What the Downloads and Fix first tabs know that isn't network or UI: the per-repo
 //! statistics model, release/download accounting, the urgency heuristic for
 //! open issues, the config file, the on-disk cache and window geometry.
 
@@ -44,6 +44,8 @@ pub enum Error {
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
+
+use std::sync::atomic::{AtomicU64, Ordering};
 
 /// Write via a temp file + rename so readers never see a half-written file.
 /// A symlink is followed, so the file it points at is replaced (or created,
@@ -95,8 +97,10 @@ fn write_replacing(path: &std::path::Path, text: &str, private: bool) -> Result<
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir).map_err(io)?;
     }
-    // Per process, since Craft PR Review writes some of the same files.
-    let tmp = path.with_extension(format!("tmp{}", std::process::id()));
+    // Per call, since the status and PR pollers write some of the same files.
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    let n = NEXT.fetch_add(1, Ordering::Relaxed);
+    let tmp = path.with_extension(format!("tmp{}-{n}", std::process::id()));
     // The temporary file is created with its final mode, before the text
     // goes in: 0600 when private, else the mode of the file it replaces.
     let replaced = std::fs::metadata(path).ok().map(|m| m.permissions());
@@ -133,10 +137,34 @@ fn write_replacing(path: &std::path::Path, text: &str, private: bool) -> Result<
     std::fs::rename(&tmp, path).map_err(io)
 }
 
-#[cfg(all(test, unix))]
+#[cfg(test)]
 mod tests {
     use super::*;
 
+    #[test]
+    fn threads_writing_one_file_do_not_collide() {
+        let dir = std::env::temp_dir().join(format!("craft-atomic-{}", std::process::id()));
+        let path = dir.join("budget.json");
+        let writers: Vec<_> = (0..8)
+            .map(|i| {
+                let path = path.clone();
+                std::thread::spawn(move || {
+                    for _ in 0..50 {
+                        atomic_write(&path, &i.to_string().repeat(1000)).unwrap();
+                    }
+                })
+            })
+            .collect();
+        for w in writers {
+            w.join().unwrap();
+        }
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(text.len(), 1000);
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1, "no temp left");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[cfg(unix)]
     #[test]
     fn atomic_write_keeps_a_dangling_symlink() {
         let dir = std::env::temp_dir().join(format!("craft-dangling-{}", std::process::id()));

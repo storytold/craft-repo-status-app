@@ -13,12 +13,20 @@
         <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M2 14V9M6 14V6M10 14V4M14 14V1"/></svg>
         <span data-tauri-drag-region>Craft Status</span>
       </div>
-      <nav class="views" role="tablist">
-        <button class="view" data-view="repos" role="tab">Repos <span class="badge" id="repo-count"></span></button>
-        <button class="view" data-view="urgent" role="tab">Fix first <span class="badge hot" id="urgent-count"></span></button>
+      <nav class="views" role="tablist" aria-label="Tabs">
+        <button class="view" data-view="repos" role="tab" title="Downloads (⌘1)">Downloads <span class="badge" id="repo-count"></span></button>
+        <button class="view" data-view="prs" role="tab" title="PRs (⌘2)">PRs <span class="badge good" id="prs-count"></span></button>
+        <button class="view" data-view="urgent" role="tab" title="Fix first (⌘3)">Fix first <span class="badge hot" id="urgent-count"></span></button>
       </nav>
+      <fieldset class="kinds" id="repo-kinds" aria-label="Which repos to show"></fieldset>
+      <nav class="views sub" id="pr-nav" aria-label="PR views" hidden>
+        <button class="view" data-pr-view="apps">Repos <span class="badge" id="apps-count"></span></button>
+        <button class="view" data-pr-view="queue">Review queue <span class="badge good" id="queue-count"></span></button>
+      </nav>
+      <nav class="crumbs" id="crumbs" aria-label="Breadcrumb" hidden></nav>
       <div class="status" data-tauri-drag-region>
         <span id="fresh-pill" class="pill"></span>
+        <span id="pr-pill" class="pill" hidden></span>
         <span id="refreshed" class="refreshed" data-tauri-drag-region></span>
       </div>
       <div class="actions">
@@ -37,6 +45,7 @@
       </div>
     </header>
     <div class="banner" id="banner" hidden></div>
+    <div class="banner" id="pr-banner" hidden></div>
 
     <main id="repos-view">
       <table id="table">
@@ -45,6 +54,8 @@
         <tfoot id="tfoot"></tfoot>
       </table>
     </main>
+
+    <main id="prs-view" hidden></main>
 
     <main id="urgent-view" hidden>
       <div class="urgent-controls">
@@ -67,9 +78,17 @@
     </main>
 
     <footer data-tauri-drag-region>
-      <span id="next" data-tauri-drag-region></span>
-      <span id="budget" data-tauri-drag-region></span>
-      <span id="token" data-tauri-drag-region></span>
+      <span class="foot-group" id="status-foot" data-tauri-drag-region>
+        <span id="next" data-tauri-drag-region></span>
+        <span id="budget" data-tauri-drag-region></span>
+        <span id="token" data-tauri-drag-region></span>
+      </span>
+      <span class="foot-group" id="pr-foot" data-tauri-drag-region hidden>
+        <span id="activity" data-tauri-drag-region></span>
+        <span id="backlog" data-tauri-drag-region></span>
+        <span id="pr-budget" data-tauri-drag-region></span>
+        <span id="claude" data-tauri-drag-region></span>
+      </span>
       <span class="spacer" data-tauri-drag-region></span>
       <button class="footer-link" id="edit-config">Settings</button>
       <span id="shortcut"></span>
