@@ -17,6 +17,7 @@
         <button class="view" data-view="repos" role="tab" title="Downloads (⌘1)">Downloads <span class="badge" id="repo-count"></span></button>
         <button class="view" data-view="prs" role="tab" title="PRs (⌘2)">PRs <span class="badge good" id="prs-count"></span></button>
         <button class="view" data-view="urgent" role="tab" title="Fix first (⌘3)">Fix first <span class="badge hot" id="urgent-count"></span></button>
+        <button class="view" data-view="people" role="tab" title="Open pull requests by work state, and rankings (⌘4)">People <span class="badge" id="people-count"></span></button>
       </nav>
       <fieldset class="kinds" id="repo-kinds" aria-label="Which repos to show"></fieldset>
       <nav class="views sub" id="pr-nav" aria-label="PR views" hidden>
@@ -61,6 +62,26 @@
         <span class="hint">Scored by severity words, labels, user reports, 👍/💬, the latest build and freshness. Click to open on GitHub.</span>
       </div>
       <ol class="urgent-list" id="urgent-list"></ol>
+    </main>
+
+    <main id="people-view" hidden>
+      <div class="people-bar">
+        <div class="segmented" role="tablist" aria-label="People view">
+          <button class="seg" data-pmode="work" role="tab">Work</button>
+          <button class="seg" data-pmode="rankings" role="tab">Rankings</button>
+        </div>
+        <label class="toggle" title="One section per repo, with that repo’s figures for each person"><input type="checkbox" id="people-group"> Group by repo</label>
+        <input type="search" id="people-search" placeholder="Search people (⌘F)" aria-label="Search people by login, name or repo" spellcheck="false" autocomplete="off">
+        <output class="hint" id="people-matches"></output>
+        <select id="people-window" aria-label="Window for flow and reviews"></select>
+        <select id="people-repo" aria-label="Repository"></select>
+        <select id="people-rank" aria-label="Ranking"></select>
+        <select id="people-type" aria-label="Type to sort by"></select>
+        <span class="hint legend" id="people-hint"></span>
+        <span class="hint" id="people-cached"></span>
+        <span class="hint" id="people-age"></span>
+      </div>
+      <div class="people-main" id="people-main"></div>
     </main>
 
     <footer data-tauri-drag-region>
