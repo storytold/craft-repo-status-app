@@ -153,7 +153,9 @@ fn run(
         }
         let out = json!({
             "overview": rows,
-            "queue": views::queue(&store, &watched, &cfg, 300),
+            "queue": views::queue(&store, &watched, &cfg, &facts, 300),
+            "issues": views::issues(&store, &watched, &cfg, &facts),
+            "icons": views::icons(&facts),
             "repos": repo_views,
             "prs": prs,
         });

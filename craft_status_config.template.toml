@@ -66,12 +66,18 @@ close_to_tray = true
 [shortcuts]
 toggle_window = "CmdOrCtrl+Shift+G"   # "" disables
 
+# Which way each tab's main table labels its columns: "horizontal" or "vertical".
+# Vertical makes narrower columns. Applies within a poll, without a restart.
+[table_headings]
+downloads = "horizontal"
+prs = "vertical"
+
 # ───── The PR tab ─────
 # Every setting here is optional. The PR tab covers the repos above, less third
 # parties and exclude_repos.
 [pr_review]
-# Repos owned by anyone else are third party (solidcraft): they stay on the
-# Downloads and Fix first tabs, but their PRs aren't fetched or reviewed.
+# Repos owned by anyone else are third party (solidcraft): they stay on Downloads
+# and their issues still show, but their PRs aren't fetched or reviewed.
 first_party_owners = ["storytold"]
 # First-party repos to leave out of the PR tab, as "owner/name".
 exclude_repos = []
