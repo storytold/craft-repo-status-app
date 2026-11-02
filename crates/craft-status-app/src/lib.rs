@@ -807,7 +807,11 @@ fn run_people(app: &AppHandle, job: &PeopleJob, runs: &mut PeopleRuns) {
     runs.last_start = Some(now);
     match resolve_token(&job.cfg.github_token).and_then(|t| GitHub::new(t.value)) {
         Ok(gh) => {
-            let gh = gh.in_background(state.gate.clone());
+            let mut gh = gh.in_background(state.gate.clone());
+            // Each People request holds the lease, as the PR poller's do.
+            if let Some(shared) = &state.shared {
+                gh = gh.with_lease(shared.clone(), LEASE_PATIENCE);
+            }
             update_people(
                 app,
                 &gh,
