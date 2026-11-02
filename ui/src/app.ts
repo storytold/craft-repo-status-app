@@ -6,8 +6,18 @@ import {
   ALL_TIME, COLUMNS, RECENT, WINDOWS, MANUAL, windowById, value, orderedEntries, nextSort, dropIndex,
   freshness, ago, formatRate, totals, urgentAcross, tokenStatus, isRefreshing, isThirdParty,
   REPO_KINDS, isRepoHidden, toggleKind, manualOrder, reorderVisible,
+  NOT_READ_YET, PEOPLE_COLUMNS, ROLE_LABELS, roleHeading, peopleRows, personFigures, personRepos, nextPeopleSort, repoItems,
+  stateBreakdown, stateLabel, stateTip, countText, fromTextTip, durationText, waitsOn, heldCount, cachedText, recordsAge,
+  RANK_MODES, RANK_COLUMNS, TYPES, PRODUCT, rankRows, nextRankSort, rankSortFor, linesText, guessTip, batchText,
+  BATCH_TIP, UNVERIFIED_TIP, DIRECT_MISSING_TIP, RELEASE_TIP, TIME_NOTE, workLead, repoFigures, prRefs,
+  MINE_COLUMNS, heldTip, mineRows, mineValue, myLogin, nextMineSort, replyTip, waitsText,
 } from './model.ts';
-import type { Column, Meta, RepoEntry, Snapshot, Sort } from './model.ts';
+import type {
+  Column, Meta, RepoEntry, Snapshot, Sort,
+  DetailRow, Flow, Given, Item, MainChecks, PeopleView, PersonDetail, PersonFigures, PersonResponse, PersonRow, Rank, RankColumn, RankMode, RankRow,
+  RepoFigures, RepoFlow, RepoPeople,
+  StateTime, WorkState, MineRow,
+} from './model.ts';
 import { startPrs } from './pr-app.ts';
 import type { Route } from './pr-app.ts';
 import { $, DAY, classes, el, load, localTime, save } from './dom.ts';
@@ -15,9 +25,7 @@ import type { Api } from './dom.ts';
 
 export type { Api } from './dom.ts';
 
-type View = 'repos' | 'prs' | 'urgent';
-
-const asView = (v: string | null): View => (v === 'urgent' || v === 'prs' ? v : 'repos');
+type View = 'repos' | 'prs' | 'urgent' | 'people' | 'mine';
 
 interface State {
   snap: Snapshot | null;
@@ -30,7 +38,32 @@ interface State {
   criticalOnly: boolean;
   /** The ids of the REPO_KINDS toggled off. */
   hiddenKinds: string[];
+  /** The People tab's view from the host; null until the records are read. */
+  people: PeopleView | null;
+  peopleWindow: string;
+  /** The People tab's repo filter; '' for every repo. */
+  peopleRepo: string;
+  peopleSort: Sort;
+  /** The people whose caret is open. */
+  peopleOpen: Set<string>;
+  /** The People tab's sub-view: open work by state, or the rankings. */
+  peopleMode: 'work' | 'rankings';
+  rankMode: RankMode;
+  rankSort: Sort;
+  /** The people whose caret is open in the rankings. */
+  rankOpen: Set<string>;
+  /** Directory rows opened to their modules, as `person|directory`. */
+  dirOpen: Set<string>;
+  /** The repos whose caret is open in the Repos table. */
+  repoOpen: Set<string>;
+  mineSort: Sort;
+  /** My PRs shows only those whose blocker is on you or that wait for your reply. */
+  mineNeedsOnly: boolean;
 }
+
+/** The view a tab button, a shortcut or the saved view names; the Repos table for anything else. */
+const viewOf = (v: string | null | undefined): View =>
+  (v === 'urgent' || v === 'prs' || v === 'people' || v === 'mine' ? v : 'repos');
 
 // ───────────────────────────── formatting ─────────────────────────────
 
@@ -38,6 +71,136 @@ const clock = (t: number): string => new Date(t).toLocaleTimeString(undefined, {
 const num = (n: number | string | null | undefined): string => Number(n ?? 0).toLocaleString('en-US');
 const gh = (repo: string, path = ''): string => `https://github.com/${repo}${path}`;
 const shortName = (repo: string): string => repo.split('/').pop() ?? repo;
+
+// ───────────────────────────── people text ─────────────────────────────
+// The lines, cells and hints of the People tab and the Repos table's carets
+// that need none of the UI's state.
+
+/** How long an item has been in its state: "3h in state", or for an item not read yet when GitHub last saw it change. */
+function stateAge(i: Item, now: number): string {
+  if (!i.work.since) return 'time in state unknown';
+  const a = ago(i.work.since, now);
+  if (i.work.state !== NOT_READ_YET) return `${a} in state`;
+  return a === 'now' ? 'updated just now' : `updated ${a} ago`;
+}
+
+/** The time a state's items have spent in it, for a person's breakdown. */
+function stateAgeNote(s: StateTime): string {
+  if (s.state === NOT_READ_YET) return 'their work state comes when the app reads them';
+  if (s.medianSecs === null) return 'time in this state unknown';
+  return `median ${durationText(s.medianSecs)}, longest ${durationText(s.maxSecs)} in this state`;
+}
+
+/** Gives the focus back to the element under `scope` whose `data-focus` key is `focused`. */
+function refocus(scope: string, focused: string | undefined): void {
+  if (focused) [...document.querySelectorAll<HTMLElement>(`${scope} [data-focus]`)].find((n) => n.dataset.focus === focused)?.focus();
+}
+
+/** A section of a detail: a heading and what follows it. */
+const detailSection = (title: string, ...kids: (Node | string | null | false)[]): HTMLElement => el('div', {}, el('h4', {}, title), ...kids);
+/** The muted line a detail section shows when it has nothing. */
+const noneLine = (text: string): HTMLElement => el('p', { class: 'muted small' }, text);
+/** A line of a detail as a small paragraph. */
+const smallLine = (text: string): HTMLElement => el('p', { class: 'small' }, text);
+/** `lines` as small paragraphs, or `none` as a muted line when there are none. */
+const smallLines = (lines: readonly string[], none: string): HTMLElement[] => (lines.length ? lines.map(smallLine) : [noneLine(none)]);
+/** `lines` as small paragraphs, or `none` as one when there are none. */
+const smallLinesOr = (lines: readonly string[], none: string): HTMLElement[] => (lines.length ? lines : [none]).map(smallLine);
+
+/** A repo's open pull requests that wait on one role: the count, its share and the count in each state. */
+function roleLine(g: RepoFigures['byRole'][number]): string {
+  const states = g.states.map((s) => `${stateLabel(s.state)} ${s.count}`).join(', ');
+  return `${roleHeading(g.role)}: ${num(g.count)} (${Math.round(g.share * 100)}%). ${states}.`;
+}
+
+/** `rec` as "label count" pairs with the counts formatted; the label defaults to the key with spaces for underscores. */
+const repoParts = (rec: Record<string, number>, label: (k: string) => string = (k) => k.replaceAll('_', ' ')): string =>
+  Object.entries(rec).map(([k, n]) => `${label(k)} ${num(n)}`).join(', ');
+
+/** The checks on a repo's main: their rollup and the failing ones, or that they have not been read. */
+function mainChecksLine(main: MainChecks | null): string {
+  if (!main) return 'The checks on main have not been read yet.';
+  const rollup = main.rollup ? main.rollup.toLowerCase() : 'none reported';
+  const failing = main.failing.length ? `, failing ${main.failing.join(', ')}` : '';
+  return `Checks on main: ${rollup}${failing}.`;
+}
+
+/** Where a repo's pull requests went in the window: merges and by whom, closes, the median times, and merge methods and mergers. */
+function repoFlowLines(fl: RepoFlow): string[] {
+  const by = fl.merged ? ` (${repoParts(fl.merged_by)})` : '';
+  return [
+    `Merged ${num(fl.merged)}${by}, landed elsewhere ${num(fl.landed_elsewhere)}.`,
+    Object.keys(fl.closed).length ? `Closed without merging: ${repoParts(fl.closed, stateLabel)}.` : '',
+    `Median ${durationText(fl.median_merge_secs) || 'unknown'} to merge, ${durationText(fl.median_response_secs) || 'unknown'} to the first maintainer response.`,
+    fl.merged ? `Merge method: ${repoParts(fl.methods, (k) => k)}. Mergers: ${repoParts(fl.mergers, (k) => k)}.` : '',
+  ].filter(Boolean);
+}
+
+/** A person's responses: how they answer maintainer requests and how maintainers first respond to them. */
+function responseLines(r: PersonResponse, now: number): string[] {
+  const their = r.their_answered
+    ? `They answered ${num(r.their_answered)} maintainer requests in a median of ${durationText(r.their_median_secs)}.`
+    : 'They have no answered maintainer requests.';
+  const first = r.m_answered
+    ? `Maintainers first responded to ${num(r.m_answered)} of their pull requests in a median of ${durationText(r.m_median_secs)}.`
+    : 'No maintainer has responded to their pull requests yet.';
+  return [
+    their,
+    r.unanswered ? `${num(r.unanswered)} requests are unanswered; the oldest was made ${ago(r.oldest_unanswered, now)} ago.` : '',
+    first,
+    r.awaiting_first ? `${num(r.awaiting_first)} await a first response; the oldest has waited ${ago(r.oldest_awaiting, now)}.` : '',
+  ].filter(Boolean);
+}
+
+/** The reviews a person gave, with a maintainer's requests, holds, merges and closes. */
+function givenLines(g: Given, maintainer: boolean): string[] {
+  return [
+    `${num(g.comments)} comments and ${num(g.reviews)} reviews on ${num(g.prs)} pull requests: ${num(g.approved)} approvals, ${num(g.changes_requested)} change requests.`,
+    maintainer ? `${num(g.requests)} requests, ${num(g.holds)} holds, ${num(g.merges)} merges and ${num(g.closes)} closes.` : '',
+  ].filter(Boolean);
+}
+
+/** The name of a detail table row: a module under its directory, or a row with an empty caret (`blank`) that lines it up with the directories that open. */
+function detailName(name: string, sub: boolean, blank: boolean): HTMLElement {
+  return el('span', { class: sub ? 'module' : '' }, blank ? el('span', { class: 'tw', 'aria-hidden': 'true' }) : null, name);
+}
+
+/** A count, muted when it is zero. */
+const plainCount = (n: number): HTMLElement => el('span', { class: n ? '' : 'zero' }, num(n));
+
+/** A ranking's lines cell, flagged with a note when stacked or cut-short pull requests make the count incomplete. */
+function rankLines(r: Rank): HTMLElement {
+  const notes = [
+    r.stacked ? `${r.stacked} merged pull requests credit no lines: every commit was counted in an earlier one (stacked).` : '',
+    r.truncated ? `${r.truncated} merged pull requests have a commit, file or review list the fetch cut short. A commit list not read in full credits every line to the author; a file list not read in full counts its unread lines as product lines.` : '',
+  ].filter(Boolean).join('\n');
+  return el('span', { class: notes ? 'flagged' : '', title: notes || null }, linesText(r.added, r.removed));
+}
+
+/** A ranking cell for a `type:` column, with a ? when a fallback rule set some of the count, or for any other numeric column. */
+function rankOther(key: string, r: Rank): HTMLElement {
+  if (key.startsWith('type:')) {
+    const t = key.slice(5);
+    const n = r.types[t] ?? 0;
+    const g = r.guessed[t] ?? 0;
+    return el('span', {}, plainCount(n), g ? el('span', { class: 'q', title: guessTip(t, n, g) }, '?') : null);
+  }
+  const v = (r as unknown as Record<string, unknown>)[key];
+  return plainCount(typeof v === 'number' ? v : 0);
+}
+
+/** `rec` as "label count" pairs. */
+const countParts = (rec: Record<string, number>, label: (k: string) => string): string => Object.entries(rec).map(([k, n]) => `${label(k)} ${n}`).join(', ');
+
+/** Where a person's pull requests went: merged and by whom, landed elsewhere, closed, and the time to merge. */
+function personFlowLines(fl: Flow): string[] {
+  const by = fl.merged ? ` (${countParts(fl.merged_by, (k) => k.replaceAll('_', ' '))})` : '';
+  return [
+    `Merged ${num(fl.merged)}${by}, landed elsewhere ${num(fl.landed_elsewhere)}.`,
+    Object.keys(fl.closed).length ? `Closed without merging: ${countParts(fl.closed, stateLabel)}.` : '',
+    fl.median_merge_secs === null ? '' : `Median ${durationText(fl.median_merge_secs)} to merge, ${durationText(fl.median_ready_secs)} from ready.`,
+  ].filter(Boolean);
+}
 
 /** The toolbar's refresh arrow, as an element (SVG needs its namespace). */
 function refreshIcon(): SVGSVGElement {
@@ -59,13 +222,26 @@ export function start(api: Api, prRoute?: Route): () => void {
   const state: State = {
     snap: null,
     meta: {},
-    view: prRoute ? 'prs' : asView(new URLSearchParams(location.search).get('view') ?? load<string>('view', 'repos')),
+    view: prRoute ? 'prs' : viewOf(new URLSearchParams(location.search).get('view') ?? load<string>('view', 'repos')),
     sort: load<Sort>('sort', { key: 'urgency', dir: 'desc' }),
     order: load<string[]>('order', []),
     window: windowById(load('window', '')).id,
     urgentRepo: '',
     criticalOnly: load('criticalOnly', false),
     hiddenKinds: load<string[]>('hiddenKinds', []),
+    people: null,
+    peopleWindow: windowById(load('peopleWindow', '7d')).id,
+    peopleRepo: '',
+    peopleSort: load<Sort>('peopleSort', { key: 'on_them', dir: 'desc' }),
+    peopleOpen: new Set(),
+    peopleMode: load<string>('peopleMode', 'work') === 'rankings' ? 'rankings' : 'work',
+    rankMode: RANK_MODES.find((m) => m.id === load<string>('rankMode', 'merged'))?.id ?? 'merged',
+    rankSort: load<Sort>('rankSort', { key: 'merged', dir: 'desc' }),
+    rankOpen: new Set(),
+    dirOpen: new Set(),
+    repoOpen: new Set(),
+    mineSort: load<Sort>('mineSort', { key: 'blocker', dir: 'asc' }),
+    mineNeedsOnly: load('mineNeedsOnly', false),
   };
 
   function openUrl(url: string, ev?: Event): void {
@@ -267,7 +443,7 @@ export function start(api: Api, prRoute?: Route): () => void {
   let justDragged = false;
 
   function startRowDrag(e: PointerEvent): void {
-    if (e.button !== 0 || (e.target as Element).closest('.link, .row-refresh')) return;
+    if (e.button !== 0 || (e.target as Element).closest('.link, .row-refresh, .caret')) return;
     drag = { row: e.currentTarget as HTMLTableRowElement, startY: e.clientY, moved: false };
     window.addEventListener('pointermove', moveRowDrag);
     window.addEventListener('pointerup', endRowDrag);
@@ -311,7 +487,7 @@ export function start(api: Api, prRoute?: Route): () => void {
     // The click that follows this pointerup must not open the urgent view.
     justDragged = true;
     setTimeout(() => { justDragged = false; });
-    const dragged = [...$('tbody').children].map((r) => (r as HTMLElement).dataset.repo ?? '');
+    const dragged = [...$('tbody').children].map((r) => (r as HTMLElement).dataset.repo ?? '').filter(Boolean);
     state.order = reorderVisible(manualOrder(state.snap?.repos ?? [], state.order).map((r) => r.repo), dragged);
     state.sort = { key: MANUAL };
     save('order', state.order);
@@ -347,6 +523,724 @@ export function start(api: Api, prRoute?: Route): () => void {
     if (!items.length) {
       $('urgent-list').replaceChildren(el('li', { class: 'empty' }, snap.repos.some((r) => r.stats) ? 'Nothing urgent. 🎉' : 'Waiting for the first poll…'));
     }
+  }
+
+  // ───────────────────────────── people ─────────────────────────────
+  // The People tab: one row per person, and a caret that opens a row per
+  // repo and the person's detail; or the rankings. The data is the view
+  // `get_people` and `craft:people` send. The tab is drawn again for a new
+  // view, the user's own changes, a changed repo list and when it is shown,
+  // and keeps the focused caret. The clock and a snapshot update only the
+  // records' age.
+
+  /** What the People tab and a repo's caret say before `get_people` has records; the browser preview never has any. */
+  const NO_RECORDS = 'No pull request records yet. The app reads them after each repo’s fetch; the browser preview has none.';
+
+  /** The repos the People picker lists, so a poll leaves an open dropdown alone. */
+  let peoplePickerRepos: string | null = null;
+  /** Set when the People tab has to be drawn again at the next render. */
+  let peopleRedraw = true;
+
+  /** Draws the People tab again, and the open carets of the Repos table. */
+  function redrawPeople(): void {
+    peopleRedraw = true;
+    repoDetailRedraw = true;
+    render();
+  }
+
+  /** A state as a chip: dotted when it was read from comment text, with a ? at low confidence. A click opens the matched comment. */
+  function stateChip(w: WorkState): HTMLElement {
+    const url = w.evidence?.url;
+    return el('span', {
+      class: classes('wstate', w.guess && 'guess', w.low && 'low', w.state === NOT_READ_YET && 'unread'),
+      title: stateTip(w),
+      dataset: url ? { url } : {},
+      onclick: url ? (e: Event) => openUrl(url, e) : null,
+    }, stateLabel(w.state), w.low ? el('span', { class: 'q', 'aria-label': 'low confidence' }, '?') : null);
+  }
+
+  /** One state's chip in a person's breakdown, with the part read from comment text. */
+  function stateGroupChip(s: StateTime): HTMLElement {
+    const tip = s.state === NOT_READ_YET ? stateTip(s.items[0]!.work) : [
+      `${stateLabel(s.state)}: ${countText(s.items.length, s.guessed)}`,
+      s.guessed ? `${fromTextTip(s.items.length, s.guessed)}; hover an item’s state for its rule and sentence.` : 'Read from GitHub fields.',
+      s.low ? `${s.low} at low confidence.` : '',
+    ].filter(Boolean).join('\n');
+    return el('span', { class: classes('wstate', s.guessed > 0 && 'guess', s.state === NOT_READ_YET && 'unread'), title: tip },
+      stateLabel(s.state), s.low ? el('span', { class: 'q', 'aria-label': 'low confidence' }, '?') : null);
+  }
+
+  /** A count cell: dotted, with the part read from comment text, when there is one. */
+  function countCell(n: number, guessed: number): HTMLElement {
+    const plain = n ? '' : 'zero';
+    return el('span', {
+      class: guessed ? 'guess-count' : plain,
+      title: guessed ? fromTextTip(n, guessed) : null,
+    }, countText(n, guessed));
+  }
+
+  function itemLine(i: Item, now: number, withAuthor = false): HTMLElement {
+    return el('div', {},
+      link(`#${i.number}`, i.url), ' ', i.title, ' ',
+      el('span', { class: 'muted' }, [withAuthor && i.author, shortName(i.repo), stateAge(i, now)].filter(Boolean).join(', ')),
+      ' ', stateChip(i.work));
+  }
+
+  /** A person's first cell: the caret that opens their repos, their login and their name. */
+  function personCell(p: PersonRow, open: boolean): HTMLTableCellElement {
+    return el('td', { class: 'person' },
+      el('button', {
+        class: 'caret',
+        'aria-expanded': String(open),
+        'aria-label': `${open ? 'Hide' : 'Show'} ${p.login} by repo`,
+        dataset: { focus: `caret:${p.key}` },
+        onclick: () => togglePerson(p.key),
+      }, open ? '▾' : '▸'),
+      link(p.login, `https://github.com/${p.login}`, 'who'),
+      p.name ? el('span', { class: 'name', title: p.name }, p.name) : null);
+  }
+
+  function personRow(f: PersonFigures, p: PersonRow, open: boolean, repo = ''): HTMLTableRowElement {
+    const entry = state.snap?.repos.find((e) => e.repo === repo);
+    const first = repo
+      ? el('td', { class: 'person' }, appIcon(entry ?? { repo }), ' ', shortName(repo))
+      : personCell(p, open);
+    const others = Object.entries(f.onOthers).map(([role, n]) => `${ROLE_LABELS[role as keyof typeof ROLE_LABELS]} ${n}`).join(', ');
+    const plain = (n: number) => el('span', { class: n ? '' : 'zero' }, num(n));
+    const cells: Node[] = [
+      countCell(f.open, f.openGuessed),
+      countCell(f.onThem, f.onThemGuessed),
+      el('span', { class: f.onOthersTotal ? '' : 'zero', title: others ? `Waiting on ${others}` : null }, num(f.onOthersTotal)),
+      countCell(f.held, f.heldGuessed),
+      plain(f.merged),
+      plain(f.landed),
+      plain(f.closed),
+      el('span', {}, durationText(f.mergeMedian)),
+      el('span', {}, f.landedRate === null ? '' : `${Math.round(f.landedRate * 100)}%`),
+      el('span', { title: f.unanswered ? `${f.unanswered} requests unanswered` : null }, durationText(f.theirResponse), f.unanswered ? el('span', { class: 'old' }, ` · ${f.unanswered} open`) : null),
+      el('span', { title: f.awaitingFirst ? `${f.awaitingFirst} awaiting a first response` : null }, durationText(f.responseToThem), f.awaitingFirst ? el('span', { class: 'old' }, ` · ${f.awaitingFirst} waiting`) : null),
+      plain(f.reviews),
+    ];
+    return el('tr', { class: repo ? 'sub' : 'person-row', dataset: { key: p.key, repo } }, first, ...cells.map((c) => el('td', {}, c)));
+  }
+
+  /** The detail under an open person: open work by state with time in state, work waiting on them, holds, responses, reviews given and flow, in `repo` ('' for every repo). */
+  function personDetail(v: PeopleView, p: PersonRow, f: PersonFigures, now: number, repo: string): HTMLElement {
+    const items = repoItems(v, repo);
+    const own = items.filter((i) => i.author === p.key);
+    const theirs = items.filter((i) => i.author !== p.key && waitsOn(i, p.key));
+    const holds = own.filter((i) => i.work.hold);
+    const parked = own.filter((i) => i.work.state === 'author_declared_hold');
+    const responses = f.response ? responseLines(f.response, now) : [];
+    const maintainer = p.maintainer_of.length > 0;
+    const given = f.given ? givenLines(f.given, maintainer) : [];
+    if (maintainer) {
+      const answeredQueue = items.filter((i) => i.work.state === 'author_responded_awaiting_maintainer' && waitsOn(i, p.key)).length;
+      given.push(`${num(answeredQueue)} authors have answered their requests and wait on them.`);
+    }
+    const flow = f.flow ? personFlowLines(f.flow) : [];
+    const windowLabel = windowById(state.peopleWindow).label.toLowerCase();
+    const where = repo ? `Where their work went in ${shortName(repo)}` : 'Where their work went';
+    return el('div', { class: 'person-detail' },
+      detailSection('Open work by state', ...stateGroups(own, now)),
+      detailSection('Waiting on them', theirs.length ? el('div', {}, theirs.map((i) => itemLine(i, now, true))) : noneLine('Nothing else waits on them.')),
+      detailSection('Held for the owner',
+        holds.length ? el('div', {}, holds.map((i) => holdLine(i, now))) : noneLine('None of their pull requests is held.'),
+        parked.length ? el('div', {}, el('div', { class: 'muted small' }, 'Parked by them pending a decision'), parked.map((i) => itemLine(i, now))) : null),
+      detailSection('Responses', ...smallLines(responses, 'No pull requests.')),
+      detailSection(`Reviews given, ${windowLabel}`, ...smallLines(given, 'None in this window.')),
+      detailSection(`Flow, ${windowLabel}`, ...smallLines(flow, 'Nothing merged or closed in this window.')),
+      el('div', { class: 'wide' }, el('h4', {}, `${where}, ${windowLabel}`), personTables(p.key, repo)));
+  }
+
+  /** A person's open work grouped by who it waits on and by state, with time in state and the oldest items. */
+  function stateGroups(own: readonly Item[], now: number): HTMLElement[] {
+    const groups = stateBreakdown(own, now).map((g) => el('div', {},
+      el('div', { class: 'muted small' }, roleHeading(g.role)),
+      el('ul', {}, g.states.map((s) => el('li', {},
+        el('div', { class: 'state-line' }, stateGroupChip(s), el('span', {}, countText(s.items.length, s.guessed)),
+          el('span', { class: 'muted' }, stateAgeNote(s))),
+        el('div', { class: 'oldest' }, s.oldest.map((i) => itemLine(i, now))))))));
+    return groups.length ? groups : [noneLine('No open pull requests.')];
+  }
+
+  /** A held item: its link, title, how long and by whom it is held, and its state. */
+  function holdLine(i: Item, now: number): HTMLElement {
+    const h = i.work.hold!;
+    const bits = [`held ${ago(h.since, now)}`, h.by && `by ${h.by}`, h.category, h.reaffirmed && `held again ${ago(h.reaffirmed, now)} ago`];
+    return el('div', {}, link(`#${i.number}`, i.url), ' ', i.title, ' ', el('span', { class: 'muted' }, bits.filter(Boolean).join(', ')), ' ', stateChip(i.work));
+  }
+
+  function togglePerson(key: string): void {
+    if (state.peopleOpen.has(key)) state.peopleOpen.delete(key); else state.peopleOpen.add(key);
+    redrawPeople();
+  }
+
+  // The carets' tables come from the host when a caret opens:
+  // `person_detail(login, window, repo)` and `repo_detail(repo, window)`.
+  // Answers are kept by person or repo and window. After a new People view,
+  // a kept answer is still shown while the host is asked again, and the new
+  // answer replaces it.
+
+  /** A kept answer: `gen` is the People view it was asked under, `read` the last view a render read it in. */
+  type Kept<T> = { value: T | null; gen: number; read: number };
+  const personDetails = new Map<string, Kept<PersonDetail>>();
+  const repoDetails = new Map<string, Kept<RepoPeople>>();
+  const asking = new Set<string>();
+  /** Counts People views: an answer asked for before the latest one is dropped. */
+  let generation = 0;
+
+  /** The kept answer to `cmd` for `key`, asking the host again when it is from an earlier People view; undefined while the first is asked. */
+  function ask<T>(cache: Map<string, Kept<T>>, cmd: string, key: string, args: Record<string, unknown>): T | null | undefined {
+    const kept = cache.get(key);
+    if (kept) kept.read = generation;
+    if (kept?.gen === generation) return kept.value;
+    const asked = generation;
+    const tag = `${asked}|${cmd}|${key}`;
+    if (!asking.has(tag)) {
+      asking.add(tag);
+      const keep = (d: T | null) => { if (asked === generation) cache.set(key, { value: d, gen: asked, read: asked }); };
+      api.invoke<T | null>(cmd, args)
+        .then((d) => keep(d ?? null))
+        // A failed request keeps the earlier answer when there is one.
+        .catch((e: unknown) => { console.warn(e); keep(cache.get(key)?.value ?? null); })
+        .finally(() => { asking.delete(tag); redrawPeople(); });
+    }
+    return kept?.value;
+  }
+
+  /** Starts a new People view: answers no render read in the last one are dropped, and the rest are asked again when next read. */
+  function newPeopleView(): void {
+    for (const cache of [personDetails, repoDetails] as Map<string, Kept<unknown>>[]) {
+      for (const [key, kept] of cache) if (kept.read < generation) cache.delete(key);
+    }
+    generation += 1;
+  }
+
+  /** `key`'s tables in `window`, in `repo` alone when it is not ''. */
+  const personDetailOf = (key: string, window: string, repo: string) =>
+    ask<PersonDetail>(personDetails, 'person_detail', `${key}|${window}|${repo}`, { login: key, window, ...(repo ? { repo } : {}) });
+  const repoDetailOf = (repo: string, window: string) =>
+    ask<RepoPeople>(repoDetails, 'repo_detail', `${repo}|${window}`, { repo, window });
+
+  /** A share of the person's own total as a bar and a percentage. */
+  function shareBar(share: number): HTMLElement {
+    const pct = Math.round(share * 100);
+    return el('span', { class: 'share', title: `${pct}% of their own total` },
+      el('span', { class: 'share-bar' }, el('span', { class: 'share-fill', style: `width: ${pct}%` })), el('span', { class: 'share-pct' }, `${pct}%`));
+  }
+
+  /** The caret and name of a directory row whose modules under src/ open under it; `openKey` is `dirOf|directory`. */
+  function dirToggle(openKey: string, name: string): HTMLElement {
+    const open = state.dirOpen.has(openKey);
+    return el('button', {
+      class: 'dir-toggle', 'aria-expanded': String(open), dataset: { focus: `dir:${openKey}` },
+      title: `${open ? 'Hide' : 'Show'} the modules under ${name}/src/`,
+      onclick: () => {
+        if (open) state.dirOpen.delete(openKey);
+        else state.dirOpen.add(openKey);
+        redrawPeople();
+      },
+    }, el('span', { class: 'tw', 'aria-hidden': 'true' }, open ? '▾' : '▸'), name);
+  }
+
+  /** One of a person's detail tables. `repoCols` adds merges, reviews and review commits; `label` names a row. */
+  function detailTable(title: string, list: readonly DetailRow[], opts: { repoCols?: boolean; label?: (k: string) => string; type?: boolean; dirOf?: string } = {}): HTMLElement {
+    // [header, column class]; style.css gives each class a fixed width.
+    const cols: [string, string][] = [['', 'name'], ['Merged', 'n'], ['Lines', 'lines'], ['Share', 'share'],
+      ...(opts.repoCols ? [['Merges', 'n'], ['Reviews', 'n'], ['Review commits', 'wide-n']] as [string, string][] : [])];
+    const body = el('tbody');
+    const dirs = opts.dirOf !== undefined;
+    const line = (r: DetailRow, sub: boolean) => {
+      const name = opts.label?.(r.key) ?? r.key;
+      // A directory with modules under src/ opens them; the others get an
+      // empty caret of the same width.
+      const first = dirs && !sub && r.children.length ? dirToggle(`${opts.dirOf}|${r.key}`, name) : detailName(name, sub, dirs && !sub);
+      const guess = opts.type && r.guessed ? el('span', { class: 'q', title: `${guessTip(r.key, r.merged, r.guessed)}\n${r.rules.join('\n')}` }, '?') : null;
+      return el('tr', { class: sub ? 'sub' : '' },
+        el('td', { title: [name, ...(opts.type ? [] : r.rules)].join('\n') }, first, guess),
+        el('td', {}, num(r.merged)),
+        el('td', {}, linesText(r.added, r.removed)),
+        el('td', { class: 'share-td' }, shareBar(r.share)),
+        ...(opts.repoCols ? [el('td', {}, num(r.merges)), el('td', {}, num(r.reviews)), el('td', {}, num(r.review_commits))] : []));
+    };
+    for (const r of list) {
+      body.append(line(r, false));
+      if (dirs && state.dirOpen.has(`${opts.dirOf}|${r.key}`)) for (const c of r.children) body.append(line(c, true));
+    }
+    if (!list.length) body.append(el('tr', {}, el('td', { colspan: cols.length, class: 'muted' }, 'Nothing in this window.')));
+    return el('div', { class: classes('work-table', opts.repoCols && 'wide') }, el('h4', {}, title),
+      el('table', { class: classes('figures', 'fixed', opts.repoCols && 'repo-cols') },
+        el('colgroup', {}, cols.map(([, c]) => el('col', { class: `c-${c}` }))),
+        el('thead', {}, el('tr', {}, cols.map(([h]) => el('th', {}, h)))), body));
+  }
+
+  /** Where a person's work went in the People window: by repository, area, type and directory; in `repo` alone when it is not ''. */
+  function personTables(key: string, repo = ''): HTMLElement {
+    const d = personDetailOf(key, state.peopleWindow, repo);
+    if (d === undefined) return el('p', { class: 'muted small' }, 'Loading where their work went…');
+    if (d === null) return el('p', { class: 'muted small' }, 'Not available until the pull request records are read.');
+    const windowLabel = windowById(state.peopleWindow).label.toLowerCase();
+    return el('div', { class: 'work-tables' },
+      el('p', { class: 'muted small' }, `${workLead(d.merged, d.added, d.removed, windowLabel)} ${TIME_NOTE}`),
+      detailTable('By repository', d.by_repo, { repoCols: true, label: shortName }),
+      // The three narrow tables share a grid with no full-width row.
+      el('div', { class: 'work-small' },
+        detailTable('By area', d.by_area),
+        detailTable('By type', d.by_type, { type: true }),
+        detailTable('By directory', d.by_dir, { dirOf: repo ? `${repo}|${d.key}` : d.key })));
+  }
+
+  /** An unverified marker for a count from a batch-branch repository. */
+  const unverified = (on: boolean) => (on ? el('span', { class: 'unverified', title: UNVERIFIED_TIP }, '*') : null);
+
+  /** The person cell of a ranking row: a caret that opens where their work went when `focusPrefix` is set, their login and name. */
+  function rankPerson(row: RankRow, open: boolean, focusPrefix: string): HTMLElement {
+    let caret: HTMLElement | null = null;
+    if (focusPrefix) {
+      caret = el('button', {
+        class: 'caret', 'aria-expanded': String(open), 'aria-label': `${open ? 'Hide' : 'Show'} where ${row.login}’s work went`,
+        dataset: { focus: `${focusPrefix}:${row.key}` },
+        onclick: () => {
+          if (state.rankOpen.has(row.key)) state.rankOpen.delete(row.key);
+          else state.rankOpen.add(row.key);
+          redrawPeople();
+        },
+      }, open ? '▾' : '▸');
+    }
+    return el('span', { class: 'person' }, caret,
+      link(row.login, `https://github.com/${row.login}`, 'who'),
+      row.name ? el('span', { class: 'name', title: row.name }, row.name) : null);
+  }
+
+  /** The cell of ranking column `c` for a person with figures `r`. */
+  function rankCell(c: RankColumn, row: RankRow, r: Rank, open: boolean, focusPrefix: string): Node {
+    switch (c.key) {
+      case 'person': return rankPerson(row, open, focusPrefix);
+      case 'merged': return el('span', {}, plainCount(r.merged), unverified(r.unverified && r.merged > 0));
+      case 'landed': return el('span', {}, plainCount(r.landed), unverified(r.unverified && r.landed > 0));
+      case 'lines': return rankLines(r);
+      case 'generated': return el('span', { class: r.gen_added + r.gen_removed ? '' : 'zero' }, linesText(r.gen_added, r.gen_removed));
+      case 'review_lines': return el('span', { class: r.review_added + r.review_removed ? '' : 'zero' }, linesText(r.review_added, r.review_removed));
+      case 'direct': return r.direct === null ? el('span', { class: 'muted', title: DIRECT_MISSING_TIP }, '—') : plainCount(r.direct);
+      case 'merges': return el('span', {}, plainCount(r.merges), unverified(r.unverified && r.merges > 0),
+        r.batch_merges ? el('span', { class: 'batch', title: BATCH_TIP }, batchText(r)) : null);
+      case PRODUCT: return plainCount((r.types.feature ?? 0) + (r.types.fix ?? 0));
+      default: return rankOther(c.key, r);
+    }
+  }
+
+  /** The Rankings view: one row per person in the selected ranking and window, sortable, with a caret that opens where their work went. */
+  function renderRankings(v: PeopleView): void {
+    const mode = state.rankMode;
+    const sort = rankSortFor(state.rankSort, mode);
+    const cols = RANK_COLUMNS[mode];
+    const rows = rankRows(v, state.peopleWindow, mode, sort);
+    const release = state.peopleWindow === 'release';
+    const head = el('tr', { class: 'cols' }, cols.map((c) => {
+      const sorted = sort.key === c.key;
+      return el('th', {
+        title: release && c.key !== 'person' ? `${c.title}\n${RELEASE_TIP}` : c.title,
+        class: classes(sorted && 'sorted', sorted && sort.dir === 'asc' && 'asc'),
+        onclick: () => { state.rankSort = nextRankSort(sort, c.key); save('rankSort', state.rankSort); redrawPeople(); },
+      }, c.label);
+    }));
+    const body = el('tbody');
+    for (const { row, rank } of rows) {
+      const open = state.rankOpen.has(row.key);
+      body.append(el('tr', { class: 'rank-row', dataset: { key: row.key } }, cols.map((c) => el('td', {}, rankCell(c, row, rank, open, 'rank-caret')))));
+      if (open) body.append(el('tr', { class: 'detail', dataset: { key: row.key } }, el('td', { colspan: cols.length }, personTables(row.key))));
+    }
+    if (!rows.length) body.append(el('tr', {}, el('td', { colspan: cols.length, class: 'empty' }, 'Nobody has anything in this ranking in this window.')));
+    const notes: Node[] = [];
+    const co = Object.entries(v.co_unlinked?.[state.peopleWindow] ?? {});
+    if (co.length) {
+      const names = co.map(([n, c]) => `${n} (${c})`).join(', ');
+      notes.push(el('p', { class: 'muted small' }, `Co-authors without a known account: ${names}.`));
+    }
+    if (v.unlinked?.length) notes.push(el('p', { class: 'muted small', id: 'rank-unlinked' }, `Not linked to a GitHub account: ${v.unlinked.join(', ')}.`));
+    $('people-main').replaceChildren(el('table', { class: 'people-table', id: 'rank-table' }, el('thead', {}, head), body), ...notes);
+  }
+
+  /** Fills the People tab's window and repo pickers; returns the configured repos. */
+  function peoplePickers(snap: Snapshot): string[] {
+    const win = $<HTMLSelectElement>('people-window');
+    if (!win.options.length) win.append(...WINDOWS.map((w) => el('option', { value: w.id }, w.label)));
+    if (win.value !== state.peopleWindow) win.value = state.peopleWindow;
+    const repos = snap.repos.map((r) => r.repo);
+    const sel = $<HTMLSelectElement>('people-repo');
+    if (repos.join('\n') !== peoplePickerRepos) {
+      sel.replaceChildren(el('option', { value: '' }, 'All repositories'), ...repos.map((r) => el('option', { value: r }, shortName(r))));
+      peoplePickerRepos = repos.join('\n');
+      // A filter on a repo that left the list goes back to every repo; a
+      // repo listed again in other letter case keeps it.
+      state.peopleRepo = repos.find((r) => r.toLowerCase() === state.peopleRepo.toLowerCase()) ?? '';
+    }
+    if (sel.value !== state.peopleRepo) sel.value = state.peopleRepo;
+    return repos;
+  }
+
+  /** Sets the People tab's sub-view buttons, shows the pickers `mode` uses and hides the others, and sets the hint. */
+  function peopleModeControls(mode: State['peopleMode']): void {
+    const ranking = mode === 'rankings';
+    document.querySelectorAll<HTMLElement>('#people-view .seg').forEach((b) => b.setAttribute('aria-selected', String(b.dataset.pmode === mode)));
+    const rankSel = $<HTMLSelectElement>('people-rank');
+    if (!rankSel.options.length) rankSel.append(...RANK_MODES.map((m) => el('option', { value: m.id }, m.label)));
+    if (rankSel.value !== state.rankMode) rankSel.value = state.rankMode;
+    const typeSel = $<HTMLSelectElement>('people-type');
+    if (!typeSel.options.length) {
+      // The Person header sorts the table too, so the picker lists it.
+      typeSel.append(el('option', { value: 'person' }, 'Sort by person'), el('option', { value: PRODUCT }, 'Sort by product work'),
+        ...TYPES.map((t) => el('option', { value: `type:${t}` }, `Sort by ${t}`)));
+    }
+    const typeKey = rankSortFor(state.rankSort, 'type').key;
+    if (typeSel.value !== typeKey) typeSel.value = typeKey;
+    $('people-repo').hidden = ranking;
+    rankSel.hidden = !ranking;
+    typeSel.hidden = !ranking || state.rankMode !== 'type';
+    const hint = $('people-hint');
+    hint.textContent = ranking
+      ? '? marks a type set by a fallback rule, * an unverified count. Hover a header for what it counts.'
+      : 'Dotted states were read from comment text, not from GitHub fields; ? marks low confidence. Hover a state for its rule and sentence.';
+    hint.title = hint.textContent;
+  }
+
+  function renderPeople(snap: Snapshot): void {
+    const repos = peoplePickers(snap);
+    peopleModeControls(state.peopleMode);
+    const v = state.people;
+    const cached = $('people-cached');
+    cached.textContent = cachedText(v);
+    cached.title = cached.textContent;
+    const focused = (document.activeElement as HTMLElement | null)?.dataset?.focus;
+    if (!v) {
+      $('people-main').replaceChildren(el('p', { class: 'empty' }, NO_RECORDS));
+      return;
+    }
+    if (state.peopleMode === 'rankings') {
+      renderRankings(v);
+      refocus('#people-main', focused);
+    } else {
+      renderPeopleTable(v, repos);
+      refocus('#people-table', focused);
+    }
+  }
+
+  /** The People tab's work table: one row per person in the window and repo, sortable, with a caret that opens their repos and detail. */
+  function renderPeopleTable(v: PeopleView, repos: readonly string[]): void {
+    const now = Date.now();
+    const rows = peopleRows(v, state.peopleWindow, state.peopleRepo, state.peopleSort);
+    const head = el('tr', { class: 'cols' }, PEOPLE_COLUMNS.map((c) => {
+      const sorted = state.peopleSort.key === c.key;
+      return el('th', {
+        title: c.title,
+        class: classes(sorted && 'sorted', sorted && state.peopleSort.dir === 'asc' && 'asc'),
+        onclick: () => { state.peopleSort = nextPeopleSort(state.peopleSort, c.key); save('peopleSort', state.peopleSort); redrawPeople(); },
+      }, c.label);
+    }));
+    const body = el('tbody');
+    for (const f of rows) {
+      const p = v.people.find((x) => x.key === f.key)!;
+      const open = state.peopleOpen.has(f.key);
+      body.append(personRow(f, p, open));
+      if (!open) continue;
+      for (const repo of personRepos(v, p, state.peopleWindow, state.peopleRepo ? [] : repos)) {
+        body.append(personRow(personFigures(v, p, state.peopleWindow, repo), p, false, repo));
+      }
+      body.append(el('tr', { class: 'detail', dataset: { key: p.key } }, el('td', { colspan: PEOPLE_COLUMNS.length }, personDetail(v, p, f, now, state.peopleRepo))));
+    }
+    if (!rows.length) body.append(el('tr', {}, el('td', { colspan: PEOPLE_COLUMNS.length, class: 'empty' }, 'Nobody has open work or activity here in this window.')));
+    $('people-main').replaceChildren(el('table', { class: 'people-table', id: 'people-table' }, el('thead', {}, head), body));
+  }
+
+  /** The People tab's record age: "Pull requests as of 10:05 (3h ago)", in
+   * the alert color once older than the snapshot's stale limit or while a
+   * repo was never checked. Every render updates it, the clock's included. */
+  function renderPeopleAge(snap: Snapshot): void {
+    const node = $('people-age');
+    const age = recordsAge(state.people, snap.stale_after_secs);
+    if (!age) { node.textContent = ''; node.className = 'hint'; node.title = ''; return; }
+    const parts: string[] = [];
+    if (age.oldest !== null) {
+      const a = ago(new Date(age.oldest).toISOString());
+      const since = a === 'now' ? 'now' : `${a} ago`;
+      parts.push(`Pull requests as of ${clock(age.oldest)} (${since})`);
+    }
+    if (age.unchecked.length) parts.push(`not checked yet: ${age.unchecked.map(shortName).join(', ')}`);
+    node.textContent = parts.join(' · ');
+    node.className = classes('hint', age.stale && 'stale');
+    node.title = [
+      `Oldest pull request records: ${age.oldest !== null ? localTime(new Date(age.oldest).toISOString()) : '—'}`,
+      `Stale after ${Math.round(snap.stale_after_secs / 60)} min without an update`,
+    ].join('\n');
+  }
+
+  /** Shows the People tab and draws it when it was hidden or something it shows changed. */
+  function renderPeopleView(snap: Snapshot): void {
+    const pane = $('people-view');
+    const shown = pane.hidden;
+    pane.hidden = false;
+    renderPeopleAge(snap);
+    if (shown || peopleRedraw || snap.repos.map((r) => r.repo).join('\n') !== peoplePickerRepos) {
+      peopleRedraw = false;
+      renderPeople(snap);
+    }
+  }
+
+  /** The People tab's badge: the open pull requests held for the owner. */
+  function renderPeopleBadge(): void {
+    const held = heldCount(state.people);
+    $('people-count').textContent = held ? String(held) : '';
+    $('people-count').title = `${held} open pull requests held for the owner`;
+  }
+
+  // ───────────────────────────── my prs ─────────────────────────────
+  // My PRs lists one login's open pull requests in the configured repos from
+  // the People view's items. The tab is drawn again for a new People view,
+  // the user's own changes, a changed repo list and when it is shown.
+
+  /** Set when My PRs has to be drawn again at the next render. */
+  let mineRedraw = true;
+  /** The repos My PRs was last drawn for. */
+  let mineDrawnFor: string | null = null;
+
+  /** The rows My PRs shows, for the badge and the table. */
+  function mine(repos: readonly string[], needsOnly: boolean): MineRow[] {
+    const login = myLogin(state.people);
+    if (!login || !state.people) return [];
+    return mineRows(state.people, repos, login, state.mineSort, Date.now(), needsOnly);
+  }
+
+  /** A My PRs row's blocker: its chip, which opens the matched comment when there is one, and a conflict note. */
+  function mineBlocker(r: MineRow): HTMLElement {
+    const i = r.item;
+    const url = i.work.evidence?.url;
+    return el('span', {},
+      el('span', {
+        class: classes('wstate', 'blocker', `tone-${r.blocker.tone}`, i.work.guess && 'guess', r.blocker.tone === 'unread' && 'unread'),
+        title: stateTip(i.work),
+        dataset: url ? { url } : {},
+        onclick: url ? (e: Event) => openUrl(url, e) : null,
+      }, r.blocker.label, i.work.low ? el('span', { class: 'q', 'aria-label': 'low confidence' }, '?') : null),
+      i.work.flags.includes('conflict')
+        ? el('span', { class: 'muted small flag-note', title: 'Conflicts with main; maintainers of this repo rebase contributors’ branches themselves.' }, 'conflict')
+        : null);
+  }
+
+  /** A My PRs row's Reply needed chip, which opens the request; an empty cell when nothing waits for your reply. */
+  function mineReply(r: MineRow, now: number): HTMLElement {
+    const reply = r.reply;
+    if (!reply) return el('span', { class: 'zero' }, '');
+    const url = reply.url || r.item.url;
+    return el('span', { class: 'wstate tone-me', title: replyTip(reply, now), dataset: { url }, onclick: (e: Event) => openUrl(url, e) }, 'Reply needed');
+  }
+
+  function mineCell(key: string, r: MineRow, login: string, now: number): Node {
+    const i = r.item;
+    switch (key) {
+      case 'repo': {
+        const entry = state.snap?.repos.find((e) => e.repo.toLowerCase() === i.repo.toLowerCase());
+        return el('span', { class: 'person' }, appIcon(entry ?? { repo: i.repo }), ' ', shortName(i.repo));
+      }
+      case 'number': return link(`#${i.number}`, i.url);
+      case 'title': return el('span', { class: 'mine-title', title: i.title }, i.title);
+      case 'blocker': return mineBlocker(r);
+      case 'reply': return mineReply(r, now);
+      case 'held': return r.held ? el('span', { class: 'wstate tone-them', title: heldTip(i, now) }, 'Held') : el('span', { class: 'zero' }, '');
+      case 'waits': return el('span', {}, waitsText(i, login));
+      case 'in_state': return el('span', { title: i.work.since ? localTime(i.work.since) : 'Time in state unknown' }, durationText(mineValue(r, 'in_state', login, now) as number | null));
+      case 'age': return el('span', { title: localTime(i.created_at) }, ago(i.created_at, now));
+      default: return document.createTextNode('');
+    }
+  }
+
+  function renderMine(snap: Snapshot): void {
+    const repos = snap.repos.map((r) => r.repo);
+    $<HTMLInputElement>('mine-needs').checked = state.mineNeedsOnly;
+    const v = state.people;
+    const login = myLogin(v);
+    const whose = v?.my_login ? '' : ' (the token’s user; set people.my_login in the config to list another login)';
+    $('mine-who').textContent = login ? `Open pull requests by ${login} in the ${repos.length} configured repos${whose}` : '';
+    const main = $('mine-main');
+    if (!v) {
+      main.replaceChildren(el('p', { class: 'empty' }, NO_RECORDS));
+      return;
+    }
+    if (!login) {
+      main.replaceChildren(el('p', { class: 'empty' }, 'No login yet. Set people.my_login in the config, or wait until the app reads the token’s user with its next pull request update.'));
+      return;
+    }
+    const now = Date.now();
+    const rows = mine(repos, state.mineNeedsOnly);
+    const head = el('tr', { class: 'cols' }, MINE_COLUMNS.map((c) => {
+      const sorted = state.mineSort.key === c.key;
+      return el('th', {
+        title: c.title,
+        class: classes(sorted && 'sorted', sorted && state.mineSort.dir === 'asc' && 'asc'),
+        onclick: () => { state.mineSort = nextMineSort(state.mineSort, c.key); save('mineSort', state.mineSort); mineRedraw = true; render(); },
+      }, c.label);
+    }));
+    const body = el('tbody');
+    for (const r of rows) {
+      body.append(el('tr', { class: classes('mine-row', r.needsMe && 'needs-me'), dataset: { key: `${r.item.repo}#${r.item.number}` } },
+        MINE_COLUMNS.map((c) => el('td', { class: c.text ? 'text' : '' }, mineCell(c.key, r, login, now)))));
+    }
+    if (!rows.length) {
+      const text = state.mineNeedsOnly ? `Nothing by ${login} needs you right now.` : `No open pull requests by ${login} in the configured repos.`;
+      body.append(el('tr', {}, el('td', { colspan: MINE_COLUMNS.length, class: 'empty' }, text)));
+    }
+    main.replaceChildren(el('table', { class: 'people-table', id: 'mine-table' }, el('thead', {}, head), body));
+  }
+
+  /** Shows My PRs and draws it when it was hidden or something it shows changed. */
+  function renderMineView(snap: Snapshot): void {
+    const pane = $('mine-view');
+    const shown = pane.hidden;
+    pane.hidden = false;
+    const repos = snap.repos.map((r) => r.repo).join('\n');
+    if (shown || mineRedraw || repos !== mineDrawnFor) {
+      mineRedraw = false;
+      mineDrawnFor = repos;
+      renderMine(snap);
+    }
+  }
+
+  /** My PRs' badge: the pull requests whose blocker waits on you or that wait for your reply. */
+  function renderMineBadge(): void {
+    const needs = mine(state.snap?.repos.map((r) => r.repo) ?? [], true).length;
+    $('mine-count').textContent = needs ? String(needs) : '';
+    $('mine-count').title = `${needs} of your open pull requests wait on you or for your reply`;
+  }
+
+  // ───────────────────────────── repo carets ─────────────────────────────
+  // The caret on a row of the Repos table opens a detail row under it with
+  // the repo's people in the table's window and its open work. The rows come
+  // from renderTable; this adds the carets to them and puts each open
+  // repo's detail row under its row. A detail row is kept between renders
+  // and drawn again only for a new People view, an answer from the host or
+  // the user's own changes, so a snapshot or the clock leaves its tooltips
+  // and selection alone.
+
+  /** The detail row under each repo whose caret is open. */
+  const repoDetailRows = new Map<string, HTMLTableRowElement>();
+  /** Set when the open detail rows have to be drawn again at the next render. */
+  let repoDetailRedraw = false;
+  /** The window the detail rows were drawn for. */
+  let repoDetailWindow = '';
+
+  function toggleRepo(repo: string): void {
+    if (state.repoOpen.has(repo)) state.repoOpen.delete(repo); else state.repoOpen.add(repo);
+    render();
+    [...document.querySelectorAll<HTMLElement>('#tbody .caret')].find((b) => b.dataset.focus === `repo-caret:${repo}`)?.focus();
+  }
+
+  /** Adds the caret to the name cell of a Repos row when it has none, and sets it for `open`. */
+  function repoCaret(tr: HTMLTableRowElement, repo: string, open: boolean): void {
+    const name = tr.querySelector<HTMLElement>('.repo');
+    if (!name) return;
+    let caret = name.querySelector<HTMLButtonElement>(':scope > .caret');
+    if (!caret) {
+      caret = el('button', {
+        class: 'caret',
+        dataset: { focus: `repo-caret:${repo}` },
+        onclick: (e: Event) => { e.stopPropagation(); toggleRepo(repo); },
+      });
+      name.prepend(caret);
+    }
+    caret.textContent = open ? '▾' : '▸';
+    caret.setAttribute('aria-expanded', String(open));
+    caret.setAttribute('aria-label', `${open ? 'Hide' : 'Show'} the people and open work of ${shortName(repo)}`);
+  }
+
+  /** Puts the detail row of an open repo under its row, drawing it when it is new or `redraw` is set. */
+  function placeRepoDetail(tr: HTMLTableRowElement, repo: string, redraw: boolean): void {
+    let detail = repoDetailRows.get(repo);
+    const fresh = !detail;
+    if (!detail) {
+      detail = el('tr', { class: 'repo-detail', dataset: { detail: repo } }, el('td', { colspan: COLUMNS.length }));
+      repoDetailRows.set(repo, detail);
+    }
+    if (fresh || redraw) detail.cells[0]!.replaceChildren(repoDetail(repo));
+    if (tr.nextElementSibling !== detail) tr.after(detail);
+  }
+
+  /** Adds the carets to the rows renderTable drew and puts the open detail rows under them; `focused` is the `data-focus` key that had the focus before. */
+  function renderRepoCarets(focused?: string): void {
+    const tbody = $('tbody');
+    const rows = [...tbody.querySelectorAll<HTMLTableRowElement>(':scope > tr[data-repo]')];
+    const shown = new Set(rows.map((tr) => tr.dataset.repo!));
+    for (const [repo, tr] of repoDetailRows) {
+      if (!state.repoOpen.has(repo) || !shown.has(repo)) { tr.remove(); repoDetailRows.delete(repo); }
+    }
+    const redraw = repoDetailRedraw || repoDetailWindow !== state.window;
+    repoDetailRedraw = false;
+    repoDetailWindow = state.window;
+    for (const tr of rows) {
+      const repo = tr.dataset.repo!;
+      const open = state.repoOpen.has(repo);
+      repoCaret(tr, repo, open);
+      if (open) placeRepoDetail(tr, repo, redraw);
+    }
+    const active = (document.activeElement as HTMLElement | null)?.dataset?.focus;
+    if (focused?.startsWith('repo-caret:') && active !== focused) {
+      [...tbody.querySelectorAll<HTMLElement>('.caret')].find((b) => b.dataset.focus === focused)?.focus();
+    }
+  }
+
+  /** The detail under a repo's row: its people in the table's window and its open work by state, queues, health and flow. */
+  function repoDetail(repo: string): HTMLElement {
+    const v = state.people;
+    if (!v) return el('p', { class: 'muted small' }, NO_RECORDS);
+    const now = Date.now();
+    const f = repoFigures(v, repo, state.window, now);
+    const windowLabel = windowById(state.window).label.toLowerCase();
+    const p = smallLine;
+    const line = repoItemLine;
+    const conflicting = f.holdsConflicting ? `, ${num(f.holdsConflicting)} of them also conflict` : '';
+    const competing = f.competing.map(([a, b]) => `#${a} and #${b}`).join(', ');
+    return el('div', { class: 'person-detail repo-figures' },
+      el('div', { class: 'wide' }, el('h4', {}, `People, ${windowLabel}`), repoPeopleTable(repo)),
+      detailSection(`Open pull requests: ${num(f.open)}`, ...smallLinesOr(f.byRole.map(roleLine), 'No open pull requests.')),
+      detailSection('Waiting on a maintainer',
+        f.oldestOnMaintainer ? el('div', {}, el('div', { class: 'muted small' }, 'Oldest'), line(f.oldestOnMaintainer, ago(f.oldestOnMaintainer.work.since ?? f.oldestOnMaintainer.created_at, now))) : p('Nothing waits on a maintainer.'),
+        p(f.firstQueue ? `${num(f.firstQueue)} await a first response, median ${durationText(f.firstQueueMedianSecs)}.` : 'Nothing awaits a first response.')),
+      detailSection('Owner decisions',
+        p(`${num(f.holds.length)} held for the owner${conflicting}.`),
+        ...f.holds.map((i) => line(i, [`held ${ago(i.work.hold!.since, now)}`, i.work.hold!.by && `by ${i.work.hold!.by}`, i.work.hold!.category].filter(Boolean).join(', '))),
+        f.parked.length ? el('div', {}, el('div', { class: 'muted small' }, 'Holds the authors placed themselves'), f.parked.map((i) => line(i))) : null),
+      detailSection('Maintainer queues', p(`Workflow approvals ${num(f.approvals)} (one click each), authors who answered ${num(f.answered)}, community approved ${num(f.communityApproved)}, ready to merge ${num(f.ready)}.`)),
+      detailSection('Author queues',
+        p(Object.keys(f.requests).length ? `Maintainer requests: ${repoParts(f.requests)}.` : 'No maintainer requests wait on an author.'),
+        p(`Community requests ${num(f.communityRequests)}, conflicts the author owes ${num(f.conflicts)}, CI failing from the pull request ${num(f.ciFromPr)}, authors who stepped back ${num(f.steppedBack)}.`)),
+      detailSection('main',
+        p(mainChecksLine(f.main)),
+        p(`${num(f.inherited)} open pull requests fail because of main.`)),
+      detailSection(`Flow, ${windowLabel}`, ...smallLinesOr(f.flow ? repoFlowLines(f.flow) : [], 'Nothing merged or closed in this window.')),
+      detailSection('Staleness', ...smallLinesOr(f.staleness.map((s) => `${roleHeading(s.role)}: ${num(s.aging)} aging, ${num(s.stale)} stale.`), 'Nothing is aging or stale.')),
+      detailSection('Dependencies and collisions',
+        ...(f.blocked.length ? f.blocked.map((i) => line(i, `waits for ${prRefs(i.work.blocked_by)}`)) : [p('No pull request waits for another.')]),
+        f.competing.length ? p(`Competing: ${competing}.`) : null));
+  }
+
+  /** The people table of a repo's detail: one row per person in the Repos table's window, or a line while it loads or when it is empty. */
+  function repoPeopleTable(repo: string): HTMLElement {
+    const rp = repoDetailOf(repo, state.window);
+    if (rp === undefined) return smallLine('Loading its people…');
+    if (!rp?.people.length) return smallLine('Nobody merged, landed, reviewed or committed here in this window.');
+    const peopleCols: RankColumn[] = [
+      ...RANK_COLUMNS.merged.filter((c) => ['person', 'merged', 'landed', 'lines', 'commits'].includes(c.key)),
+      ...RANK_COLUMNS.maintainer.filter((c) => ['merges', 'reviews', 'review_commits'].includes(c.key)),
+      RANK_COLUMNS.type.find((c) => c.key === PRODUCT)!,
+    ];
+    return el('table', { class: 'figures' },
+      el('thead', {}, el('tr', {}, peopleCols.map((c) => el('th', { title: c.title }, c.label)))),
+      el('tbody', {}, rp.people.map((row) => el('tr', {}, peopleCols.map((c) => el('td', {}, rankCell(c, row, row.windows[rp.window]!, false, '')))))));
+  }
+
+  /** An item in a repo's detail: its link, title, author and `extra`, and its state. */
+  function repoItemLine(i: Item, extra = ''): HTMLElement {
+    return el('div', {}, link(`#${i.number}`, i.url), ' ', i.title, ' ',
+      el('span', { class: 'muted' }, [i.author, extra].filter(Boolean).join(', ')), ' ', stateChip(i.work));
   }
 
   function renderStatus(snap: Snapshot): void {
@@ -401,7 +1295,15 @@ export function start(api: Api, prRoute?: Route): () => void {
     const snap = state.snap;
     if (!snap || drag?.moved) return;
     renderStatus(snap);
-    if (state.view === 'repos') renderTable(snap);
+    renderMineBadge();
+    if (state.view === 'repos') {
+      // Redrawing the table removes the focused caret, so its focus key is read first.
+      const focused = (document.activeElement as HTMLElement | null)?.dataset?.focus;
+      renderTable(snap);
+      renderRepoCarets(focused);
+    }
+    else if (state.view === 'people') renderPeopleView(snap);
+    else if (state.view === 'mine') renderMineView(snap);
     else if (state.view === 'urgent') renderUrgent(snap);
   }
 
@@ -411,6 +1313,8 @@ export function start(api: Api, prRoute?: Route): () => void {
     document.querySelectorAll<HTMLElement>('[data-view]').forEach((b) => b.setAttribute('aria-selected', String(b.dataset.view === state.view)));
     $('repos-view').hidden = state.view !== 'repos';
     $('urgent-view').hidden = state.view !== 'urgent';
+    if (state.view !== 'people') $('people-view').hidden = true;
+    if (state.view !== 'mine') $('mine-view').hidden = true;
     $('prs-view').hidden = !onPrs;
     for (const id of ['pr-nav', 'crumbs', 'pr-pill', 'pr-foot']) $(id).hidden = !onPrs;
     for (const id of ['fresh-pill', 'refreshed', 'status-foot']) $(id).hidden = onPrs;
@@ -463,7 +1367,7 @@ export function start(api: Api, prRoute?: Route): () => void {
   renderKinds();
 
   document.querySelectorAll<HTMLElement>('[data-view]').forEach((b) => b.addEventListener('click', () => {
-    const view = asView(b.dataset.view ?? null);
+    const view = viewOf(b.dataset.view);
     if (view === 'urgent' && state.view !== 'urgent') state.urgentRepo = '';
     setView(view);
   }));
@@ -482,6 +1386,51 @@ export function start(api: Api, prRoute?: Route): () => void {
   $('hide').addEventListener('click', () => api.invoke('hide_window'));
   $('edit-config').addEventListener('click', () => api.invoke('open_config'));
   $('resize').addEventListener('mousedown', (e) => { e.preventDefault(); api.startResize(); });
+  $('people-window').addEventListener('change', (e) => {
+    state.peopleWindow = (e.target as HTMLSelectElement).value;
+    save('peopleWindow', state.peopleWindow);
+    redrawPeople();
+  });
+  $('people-repo').addEventListener('change', (e) => { state.peopleRepo = (e.target as HTMLSelectElement).value; redrawPeople(); });
+  document.querySelectorAll<HTMLElement>('#people-view .seg').forEach((b) => b.addEventListener('click', () => {
+    state.peopleMode = b.dataset.pmode === 'rankings' ? 'rankings' : 'work';
+    save('peopleMode', state.peopleMode);
+    redrawPeople();
+  }));
+  $('people-rank').addEventListener('change', (e) => {
+    const id = (e.target as HTMLSelectElement).value;
+    state.rankMode = RANK_MODES.find((m) => m.id === id)?.id ?? 'merged';
+    save('rankMode', state.rankMode);
+    redrawPeople();
+  });
+  $('people-type').addEventListener('change', (e) => {
+    const key = (e.target as HTMLSelectElement).value;
+    state.rankSort = { key, dir: key === 'person' ? 'asc' : 'desc' };
+    save('rankSort', state.rankSort);
+    redrawPeople();
+  });
+  $('mine-needs').addEventListener('change', (e) => {
+    state.mineNeedsOnly = (e.target as HTMLInputElement).checked;
+    save('mineNeedsOnly', state.mineNeedsOnly);
+    mineRedraw = true;
+    render();
+  });
+  api.listen<PeopleView>('craft:people', (v) => {
+    state.people = v;
+    // The carets' tables come from the same records: open ones ask again.
+    newPeopleView();
+    renderPeopleBadge();
+    mineRedraw = true;
+    redrawPeople();
+  });
+  api.invoke<PeopleView | null>('get_people').then((v) => {
+    // A view the event sent first is as new; the browser build answers null.
+    if (!v || state.people) return;
+    state.people = v;
+    renderPeopleBadge();
+    mineRedraw = true;
+    redrawPeople();
+  }).catch((e: unknown) => console.warn(e));
   document.addEventListener('keydown', (e) => {
     const mod = e.metaKey || e.ctrlKey;
     if (state.view === 'prs' && prs.key(e)) e.preventDefault();
@@ -490,6 +1439,8 @@ export function start(api: Api, prRoute?: Route): () => void {
     else if (mod && e.key === '1') { e.preventDefault(); setView('repos'); }
     else if (mod && e.key === '2') { e.preventDefault(); setView('prs'); }
     else if (mod && e.key === '3') { e.preventDefault(); setView('urgent'); }
+    else if (mod && e.key === '4') { e.preventDefault(); setView('people'); }
+    else if (mod && e.key === '5') { e.preventDefault(); setView('mine'); }
   });
 
   api.listen<Snapshot>('craft:snapshot', (s) => { state.snap = s; render(); });
