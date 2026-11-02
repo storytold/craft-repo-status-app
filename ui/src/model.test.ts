@@ -2,7 +2,8 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   sortEntries, manualOrder, orderedEntries, nextSort, dropIndex, MANUAL, versionKey, freshness, isStale, ago, compact, formatRate, buildRate, tokenStatus,
-  totals, urgentAcross, isRefreshing, isThirdParty, defaultDir, value, windowById, WINDOWS, COLUMNS, COLUMN, displayValue, changedCells,
+  totals, urgentAcross, isRefreshing, isThirdParty, isRepoHidden, toggleKind, reorderVisible, defaultDir, value, windowById, WINDOWS, COLUMNS, COLUMN,
+  displayValue, changedCells,
 } from './model.ts';
 import type { Activity, RepoEntry, RepoStats, UrgentIssue } from './model.ts';
 
@@ -346,4 +347,25 @@ test('repos outside our org are third party', () => {
   assert.equal(isThirdParty('storytold/photocraft'), false);
   assert.equal(isThirdParty('Storytold/photocraft'), false, 'owners ignore case');
   assert.equal(isThirdParty('tangency-labs/solidcraft'), true);
+});
+
+test('the toggles hide a repo by any kind it is', () => {
+  assert.equal(isRepoHidden('storytold/fonts', 'assets', []), false);
+  assert.equal(isRepoHidden('storytold/fonts', 'assets', ['assets']), true);
+  assert.equal(isRepoHidden('storytold/fonts', 'assets', ['ci']), false);
+  assert.equal(isRepoHidden('tangency-labs/solidcraft', 'app', ['third_party']), true, 'third party');
+  assert.equal(isRepoHidden('tangency-labs/solidcraft', 'app', ['app']), true, 'and an app');
+  assert.equal(isRepoHidden('someone/mine', 'other', ['third_party']), true, 'not ours, so third party');
+  assert.equal(isRepoHidden('someone/mine', 'other', ['app', 'library', 'assets', 'ci', 'tooling']), false);
+  assert.equal(isRepoHidden('storytold/mine', 'other', ['app', 'library', 'assets', 'ci', 'tooling', 'third_party']), false, 'no toggle covers it');
+});
+
+test('toggling a kind flips it', () => {
+  assert.deepEqual(toggleKind([], 'ci'), ['ci']);
+  assert.deepEqual(toggleKind(['ci', 'app'], 'ci'), ['app']);
+});
+
+test('dragging among visible rows leaves hidden repos in their places', () => {
+  assert.deepEqual(reorderVisible(['a', 'H1', 'b', 'c', 'H2'], ['c', 'a', 'b']), ['c', 'H1', 'a', 'b', 'H2']);
+  assert.deepEqual(reorderVisible(['a', 'b'], ['b', 'a']), ['b', 'a']);
 });

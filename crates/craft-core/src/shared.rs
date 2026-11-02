@@ -1,15 +1,16 @@
-//! The cache this app shares with Craft PR Review, in
+//! The cache the status and PR pollers share, in
 //! `~/Library/Caches/craft-github-cache/`, so the two can run side by side on one
 //! GitHub account without fetching the same things or overwriting each other:
 //!
-//! - `prs/<owner>@<name>.json` ([`PrLedger`]): every PR either app has seen, kept
-//!   up to date by one walk that serves both. Whichever app walks saves the other
-//!   the quota.
+//! - `prs/<owner>@<name>.json` ([`PrLedger`]): every PR either poller has seen, kept
+//!   up to date by one walk that serves both. Whichever walks saves the other the
+//!   quota.
 //! - `lease.lock` ([`Lease`]): an OS file lock, held while talking to GitHub. It
-//!   keeps the two from bursting at once and makes updating a ledger safe. The OS
-//!   releases it if an app dies.
+//!   keeps the two from bursting at once and makes updating a ledger safe. The lock
+//!   belongs to the open file, so it excludes threads of one process too. The OS
+//!   releases it if the app dies.
 //! - `budget.json` ([`SharedBudget`]): the last rate-limit reading, and how long
-//!   to back off once GitHub has limited either app.
+//!   to back off once GitHub has limited either poller.
 //!
 //! All of it can be deleted: the next fetch rebuilds it. A missing or corrupt
 //! file reads as empty.
@@ -302,7 +303,7 @@ impl SharedCache {
             .ok()
     }
 
-    /// The lease, if it's free right now. `Ok(None)` means the other app has it.
+    /// The lease, if it's free right now. `Ok(None)` means the other poller has it.
     pub fn try_lease(&self) -> Option<Lease> {
         let file = self.lock_file()?;
         match file.try_lock() {
@@ -311,7 +312,7 @@ impl SharedCache {
         }
     }
 
-    /// The lease, waiting up to `patience` for the other app to finish.
+    /// The lease, waiting up to `patience` for the other poller to finish.
     pub fn lease(&self, patience: Duration) -> Option<Lease> {
         let started = Instant::now();
         loop {
