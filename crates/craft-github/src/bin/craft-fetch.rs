@@ -21,6 +21,9 @@ use craft_core::{Cache, Config, LagBasis, RepoEntry, SharedCache, Snapshot, ALL_
 use craft_github::prs::{download_roster, PrInput, Seen, RUN_REQUESTS};
 use craft_github::{resolve_token, Error, GitHub, RawActivity};
 
+/// How long to wait for the PR poller to finish talking to GitHub.
+const LEASE_PATIENCE: std::time::Duration = std::time::Duration::from_secs(180);
+
 /// The app's cache directory, or the end of the program.
 fn cache_dir() -> PathBuf {
     match Cache::default_location() {
@@ -156,9 +159,6 @@ fn people(gh: &GitHub, repos: &[String], cfg: &Config, roster_source: &str) {
         week.len()
     );
 }
-
-/// How long to wait for the PR poller to finish talking to GitHub.
-const LEASE_PATIENCE: std::time::Duration = std::time::Duration::from_secs(180);
 
 fn main() {
     let mut args: Vec<String> = std::env::args().skip(1).collect();

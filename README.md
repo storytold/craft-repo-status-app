@@ -33,7 +33,7 @@ CodeRabbit's findings and Claude's summaries. Everything runs locally: no server
 | **Downloads** | `⌘1` | Download counts and rates, builds, issues and activity for every repo | shown, tagged `3P` |
 | **PRs** | `⌘2` | Reviewing open PRs: grades, CodeRabbit findings, Claude's summaries | left out |
 | **Fix first** | `⌘3` | Open issues most worth fixing | shown, tagged `3P` |
-| **People** | `⌘4` | Open pull requests by work state, and rankings of who merged, reviewed and shipped what | shown |
+| **People** | `⌘4` | Open pull requests by work state, and rankings of the people behind them | shown |
 
 The chips beside the tabs show or hide kinds of repo on every tab: **3rd party**, **Apps**,
 **Libraries**, **Assets**, **CI** and **Tooling**. A repo hides if any kind it is has been
@@ -444,7 +444,7 @@ The app behaves like the Todo app:
 - The window is chrome-less and semi-transparent, and it appears on every
   Space. It remembers its position and size in `~/.craft_status_state.toml`.
 - `Esc` hides the window (on the PRs tab, once it's back at the top).
-- `⌘4` switches to the People tab.
+- `⌘1` to `⌘4` switch to Downloads, PRs, Fix first and People.
 - In the People tab, `⌘F` moves to the search box. There `Esc` clears the
   search when there is one, then leaves the search box, and then hides the
   window.
