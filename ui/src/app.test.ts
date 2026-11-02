@@ -108,7 +108,7 @@ async function setup({ snap = snapshot(), storage = {} as Record<string, unknown
     emit: (event, payload) => listeners.get(event)?.(payload),
     rows: () => [...tbody().querySelectorAll('tr')].map((r) => r.dataset.repo?.slice(2) ?? ''),
     row: (name) => tbody().querySelector<HTMLTableRowElement>(`tr[data-repo="o/${name}"]`)!,
-    view: () => (['repos', 'prs', 'urgent'].find((v) => !doc.getElementById(`${v}-view`)!.hidden) ?? ''),
+    view: () => (['repos', 'prs', 'urgent', 'people', 'mine'].find((v) => !doc.getElementById(`${v}-view`)!.hidden) ?? ''),
   };
 }
 
@@ -407,7 +407,7 @@ test('keyboard shortcuts and buttons call the host', async () => {
   h.doc.getElementById('pin')!.click();
   h.doc.getElementById('edit-config')!.click();
   h.doc.getElementById('resize')!.dispatchEvent(new h.win.MouseEvent('mousedown') as unknown as Event);
-  const cmds = h.calls.map((c) => c.cmd).filter((c) => !['get_meta', 'get_snapshot', 'get_pr_overview', 'get_people', 'window_ready'].includes(c));
+  const cmds = h.calls.map((c) => c.cmd).filter((c) => !['get_meta', 'get_snapshot', 'get_people', 'get_pr_overview', 'window_ready'].includes(c));
   assert.deepEqual(cmds, ['refresh_now', 'hide_window', 'set_always_on_top', 'open_config', 'startResize']);
   assert.deepEqual(h.calls.find((c) => c.cmd === 'set_always_on_top')?.args, { on: false });
   assert.equal(h.doc.getElementById('pin')!.getAttribute('aria-pressed'), 'true');

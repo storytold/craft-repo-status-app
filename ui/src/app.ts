@@ -27,10 +27,6 @@ export type { Api } from './dom.ts';
 
 type View = 'repos' | 'prs' | 'urgent' | 'people' | 'mine';
 
-/** The view a tab button, a shortcut or the saved view names; the Downloads table for anything else. */
-const asView = (v: string | null | undefined): View =>
-  v === 'urgent' || v === 'prs' || v === 'people' || v === 'mine' ? v : 'repos';
-
 interface State {
   snap: Snapshot | null;
   meta: Meta;
@@ -64,6 +60,10 @@ interface State {
   /** My PRs shows only those whose blocker is on you or that wait for your reply. */
   mineNeedsOnly: boolean;
 }
+
+/** The view a tab button, a shortcut or the saved view names; the Repos table for anything else. */
+const viewOf = (v: string | null | undefined): View =>
+  (v === 'urgent' || v === 'prs' || v === 'people' || v === 'mine' ? v : 'repos');
 
 // ───────────────────────────── formatting ─────────────────────────────
 
@@ -222,7 +222,7 @@ export function start(api: Api, prRoute?: Route): () => void {
   const state: State = {
     snap: null,
     meta: {},
-    view: prRoute ? 'prs' : asView(new URLSearchParams(location.search).get('view') ?? load<string>('view', 'repos')),
+    view: prRoute ? 'prs' : viewOf(new URLSearchParams(location.search).get('view') ?? load<string>('view', 'repos')),
     sort: load<Sort>('sort', { key: 'urgency', dir: 'desc' }),
     order: load<string[]>('order', []),
     window: windowById(load('window', '')).id,
@@ -1367,7 +1367,7 @@ export function start(api: Api, prRoute?: Route): () => void {
   renderKinds();
 
   document.querySelectorAll<HTMLElement>('[data-view]').forEach((b) => b.addEventListener('click', () => {
-    const view = asView(b.dataset.view ?? null);
+    const view = viewOf(b.dataset.view);
     if (view === 'urgent' && state.view !== 'urgent') state.urgentRepo = '';
     setView(view);
   }));
