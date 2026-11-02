@@ -363,6 +363,14 @@ fn newest_at(w: &MainWorkflow) -> Option<DateTime<Utc>> {
     w.runs.iter().filter_map(|r| r.at).max()
 }
 
+/// Drops the results in `ci` whose newest run is more than [`KEEP_DAYS`]
+/// days older than `now`, as [`GitHub::main_ci`] does on a read.
+pub fn drop_expired(ci: &mut MainCi, now: DateTime<Utc>) {
+    let cutoff = now - chrono::Duration::days(KEEP_DAYS);
+    ci.workflows
+        .retain(|w| newest_at(w).is_none_or(|at| at >= cutoff));
+}
+
 /// `s` for a URL query value: letters, digits and `-._~/` as they are, every
 /// other byte percent-encoded.
 fn encode(s: &str) -> String {

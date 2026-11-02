@@ -84,13 +84,15 @@ sort by a column again.
   people.
 - **Main CI** reads `✓ 4` when the latest result of each of the repo's four
   GitHub Actions workflows with a result in the last 30 days passed, and
-  `✗ 1 of 4` when one failed. A workflow's latest result is its newest
+  `✗ 1 of 4` when one failed. A run that ended as `action_required` or
+  `stale` counts as failed. A workflow's latest result is its newest
   completed run on the default branch that was not canceled or skipped,
   together with its other runs on the same commit and event that were created
   within a minute of it, for example Dependabot's runs for each package
   ecosystem. Scheduled runs count; pull request runs and disabled workflows
   are left out. Hover the cell for each workflow's result, and click it to
-  open the failed run.
+  open the failed run. When a read of the runs fails, the cell keeps the last
+  result for the default branch and its tooltip shows the error.
 - **Fix first** (`⌘2`) ranks open issues across every repo. Each issue shows
   the reasons behind its score. Click a row in the Repos table to filter the
   list to that repo. Click an issue to open it on GitHub.

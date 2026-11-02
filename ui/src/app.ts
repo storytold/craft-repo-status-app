@@ -107,7 +107,7 @@ export function start(api: Api, prRoute?: Route): () => void {
     if (col.key === 'main_ci' && !entry.inaccessible) {
       const ci = entry.main_ci;
       const failing = mainCiFailing(ci);
-      const title = mainCiTip(ci, localTime);
+      const title = mainCiTip(ci, localTime, entry.main_ci_error);
       if (failing === null) return el('span', { class: 'muted', title }, mainCiText(ci));
       return el('span', { class: failing ? 'ci-fail' : 'ci-ok', title }, link(mainCiText(ci), mainCiUrl(entry.repo, ci)));
     }

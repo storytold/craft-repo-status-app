@@ -80,6 +80,8 @@ export interface RepoEntry {
   icon_oid?: string | null;
   /** The latest result of each workflow on the default branch; null (or absent, from an older build) until read. */
   main_ci?: MainCi | null;
+  /** Error from the most recent read of `main_ci`, cleared when a read succeeds. */
+  main_ci_error?: string | null;
 }
 
 /** The latest result of each GitHub Actions workflow on a repo's default branch: `MainCi` in model.rs. */
@@ -372,9 +374,11 @@ export function isThirdParty(repo: string): boolean {
 
 // ───────────────────────────── main CI ─────────────────────────────
 
-/** Whether a run failed: `failure`, `timed_out` or `startup_failure`. */
-export const runFailed = (r: MainRun): boolean =>
-  r.conclusion === 'failure' || r.conclusion === 'timed_out' || r.conclusion === 'startup_failure';
+/** Conclusions that count as a failed run; `action_required` and `stale` runs did not pass. */
+const FAILED: readonly string[] = ['failure', 'timed_out', 'startup_failure', 'action_required', 'stale'];
+
+/** Whether a run failed: `failure`, `timed_out`, `startup_failure`, `action_required` or `stale`. */
+export const runFailed = (r: MainRun): boolean => FAILED.includes(r.conclusion);
 
 /** Whether a workflow's latest result failed: any of its runs did. */
 export const workflowFailed = (w: MainWorkflow): boolean => w.runs.some(runFailed);
@@ -397,12 +401,16 @@ const conclusionText = (r: MainRun): string => r.conclusion.replaceAll('_', ' ')
 /**
  * The Main CI hover: one line per workflow, failures first, with what started
  * its run, when it finished and its commit; a workflow with several runs on
- * that commit lists each. `time` writes each time as a date.
+ * that commit lists each. `time` writes each time as a date. `error`, from
+ * the last read of the runs, is added as the last line.
  */
-export function mainCiTip(ci: MainCi | null | undefined, time: (iso: Time) => string): string {
-  if (!ci) return 'The workflow runs on the default branch have not been read yet.';
+export function mainCiTip(ci: MainCi | null | undefined, time: (iso: Time) => string, error?: string | null): string {
+  const failed = error ? `The last read of the workflow runs failed: ${error}` : '';
+  if (!ci) return failed || 'The workflow runs on the default branch have not been read yet.';
   const branch = ci.branch || 'main';
-  if (!ci.workflows.length) return `No completed workflow run on ${branch} in the last 30 days, canceled and skipped runs left out.`;
+  if (!ci.workflows.length) {
+    return [`No completed workflow run on ${branch} in the last 30 days, canceled and skipped runs left out.`, failed].filter(Boolean).join('\n');
+  }
   const when = (r: MainRun) => (r.at ? time(r.at) : 'time unknown');
   const mark = (failed: boolean) => (failed ? '✗' : '✓');
   const workflows = [...ci.workflows].sort((a, b) => Number(workflowFailed(b)) - Number(workflowFailed(a)));
@@ -418,7 +426,7 @@ export function mainCiTip(ci: MainCi | null | undefined, time: (iso: Time) => st
       ...w.runs.map((r) => `    ${mark(runFailed(r))} ${conclusionText(r)}: ${r.title} (${when(r)})`)];
   });
   return [`Latest result of each workflow on ${branch}; canceled and skipped runs are left out.`, ...lines,
-    ci.checked_at ? `Checked ${time(ci.checked_at)}.` : ''].filter(Boolean).join('\n');
+    ci.checked_at ? `Checked ${time(ci.checked_at)}.` : '', failed].filter(Boolean).join('\n');
 }
 
 /** Where the Main CI cell links: the first failed run, otherwise the repo's runs on the default branch. */

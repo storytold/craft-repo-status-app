@@ -127,6 +127,9 @@ pub struct RepoEntry {
     /// The latest result of each workflow on the default branch; `None`
     /// until read.
     pub main_ci: Option<MainCi>,
+    /// Error from the most recent read of `main_ci`, cleared when a read
+    /// succeeds.
+    pub main_ci_error: Option<String>,
 }
 
 /// The latest result of each GitHub Actions workflow on a repository's

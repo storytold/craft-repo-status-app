@@ -258,6 +258,7 @@ test('the Main CI column counts the workflows whose latest result failed, sorts 
   assert.equal(mainCiText(ci([wf(1, mrun(1, 'success')), wf(2, mrun(2, 'neutral'))])), '✓ 2');
   const red = ci([wf(1, mrun(1, 'success')), wf(2, mrun(2, 'timed_out')), wf(3, mrun(3, 'startup_failure', { event: 'schedule' }))]);
   assert.equal(mainCiText(red), '✗ 2 of 3');
+  assert.equal(mainCiText(ci([wf(1, mrun(1, 'action_required')), wf(2, mrun(2, 'stale'))])), '✗ 2 of 2', 'runs that did not pass');
   assert.equal(mainCiUrl('o/a', red), 'https://github.com/o/a/actions/runs/102');
   assert.equal(mainCiUrl('o/a', { ...ci([wf(1, mrun(1, 'success'))]), branch: 'trunk' }), 'https://github.com/o/a/actions?query=branch%3Atrunk');
   const withCi = (name: string, c: MainCi | null): RepoEntry => ({ ...entry(name, { urgency: 1 }), main_ci: c });
@@ -292,6 +293,10 @@ test('the Main CI hover lists each workflow, failures first, and each run of one
   assert.equal(mainCiTip(ci([wf(2, mrun(2, 'timed_out', { at: null }))]), at).split('\n')[1], '✗ W2: timed out (push; time unknown; abcdef2)');
   assert.match(mainCiTip(ci([]), at), /No completed workflow run on main in the last 30 days/);
   assert.match(mainCiTip(null, at), /not been read yet/);
+  const error = 'GitHub HTTP 403: forbidden';
+  assert.equal(mainCiTip(null, at, error), `The last read of the workflow runs failed: ${error}`);
+  assert.match(mainCiTip(ci([]), at, error), /last 30 days.*\nThe last read of the workflow runs failed: GitHub HTTP 403/s);
+  assert.equal(mainCiTip(both, at, error).split('\n').at(-1), `The last read of the workflow runs failed: ${error}`, 'after the held result');
 });
 
 test('a row is refreshing while its repo is being fetched or queued', () => {

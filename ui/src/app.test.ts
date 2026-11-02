@@ -356,6 +356,23 @@ test('the Main CI column shows failing workflows, links the failed run, explains
   assert.equal(h.doc.querySelector('tfoot tr')!.children[i]!.textContent, '1');
 });
 
+test('the Main CI hover shows a failed read, with or without a held result', async () => {
+  const error = 'GitHub HTTP 403: forbidden';
+  const h = await setup({
+    snap: snapshot([
+      repo('alpha', { urgency: 100 }, { main_ci: { branch: 'main', workflows: [ciWorkflow(1, ciRun(1, 'success'))], checked_at: NOW }, main_ci_error: error }),
+      repo('beta', { urgency: 200 }, { main_ci_error: error }),
+    ]),
+  });
+  const i = COLUMNS.findIndex((c) => c.key === 'main_ci');
+  const alpha = h.row('alpha').cells[i]!;
+  assert.equal(alpha.textContent, '✓ 1', 'the held result stays');
+  assert.match(alpha.querySelector<HTMLElement>('.ci-ok')!.title, /\nThe last read of the workflow runs failed: GitHub HTTP 403: forbidden$/);
+  const beta = h.row('beta').cells[i]!;
+  assert.equal(beta.textContent, '—');
+  assert.equal(beta.querySelector<HTMLElement>('.muted')!.title, `The last read of the workflow runs failed: ${error}`);
+});
+
 test('the Main CI hover gives times rather than ages and does not change as the clock ticks', async (t) => {
   // setup()'s tick() needs the real setTimeout; the 15 s clock runs on the mocked setInterval.
   t.mock.timers.enable({ apis: ['setInterval', 'Date'], now: Date.parse(NOW) + 25_000 });
