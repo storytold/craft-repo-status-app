@@ -24,3 +24,10 @@ test('index.html runs no inline script, only the compiled TypeScript', () => {
   assert.doesNotMatch(html, /\son[a-z]+=/i, 'no inline event handlers');
   assert.doesNotMatch(html, /javascript:/i, 'no javascript: URLs');
 });
+
+test('PR text can only reach the DOM as text', () => {
+  for (const file of ['ui/src/pr-app.ts', 'ui/src/app.ts', 'ui/src/dom.ts']) {
+    const code = readFileSync(new URL(file, root), 'utf8');
+    assert.doesNotMatch(code, /innerHTML|outerHTML|insertAdjacentHTML|document\.write/, file);
+  }
+});
