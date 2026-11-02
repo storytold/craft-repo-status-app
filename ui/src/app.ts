@@ -76,6 +76,25 @@ export function start(api: Api, prRoute?: Route): () => void {
   const link = (text: string, url: string, cls = ''): HTMLElement =>
     el('span', { class: `link ${cls}`, onclick: (e: Event) => openUrl(url, e) }, text);
 
+  /** The marker of a row the poller added, with Keep and Hide, which write the config file. */
+  function addedControls(entry: RepoEntry): HTMLElement {
+    const action = (label: string, cmd: string, title: string) => el('button', {
+      class: 'added-action',
+      title,
+      // Stop the press from starting a row drag or opening the urgent view.
+      onpointerdown: (e: Event) => e.stopPropagation(),
+      onclick: (e: Event) => {
+        e.stopPropagation();
+        (e.currentTarget as HTMLButtonElement).disabled = true;
+        api.invoke(cmd, { repo: entry.repo }).catch((err: unknown) => console.warn(err));
+      },
+    }, label);
+    return el('span', { class: 'added' },
+      el('span', { class: 'added-mark', title: 'Added because you have an open pull request here' }, 'added'),
+      action('Keep', 'keep_repo', `Keep ${shortName(entry.repo)}: add it to repos in the config file`),
+      action('Hide', 'hide_repo', `Hide ${shortName(entry.repo)}: add it to hidden_auto_repos in the config file, so it isn’t added again`));
+  }
+
   /** The repo's app icon; repos without one (libraries) get a lettered tile, unfetched ones a blank. */
   function appIcon(entry: Pick<RepoEntry, 'repo'> & Partial<RepoEntry>): HTMLElement {
     if (entry.icon) return el('img', { class: 'app-icon', src: entry.icon, alt: '' });
@@ -96,7 +115,8 @@ export function start(api: Api, prRoute?: Route): () => void {
         ? `Last attempt failed: ${entry.error}`
         : entry.inaccessible ? 'Not accessible (private, or not found)'
         : entry.fetched_at ? `Fetched ${localTime(entry.fetched_at)}` : 'Not fetched yet';
-      return el('span', { class: 'repo', title: tip }, el('span', { class: 'dot' }), appIcon(entry), link(String(v), gh(entry.repo)), thirdPartyTag(entry.repo));
+      return el('span', { class: 'repo', title: tip }, el('span', { class: 'dot' }), appIcon(entry), link(String(v), gh(entry.repo)), thirdPartyTag(entry.repo),
+        entry.auto ? addedControls(entry) : null);
     }
     if (col.key === 'fetched') {
       const age = v ? el('span', { title: `Fetched ${localTime(String(v))}` }, ago(String(v))) : el('span', { class: 'muted', title: 'Not fetched yet' }, '—');

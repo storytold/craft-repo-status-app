@@ -332,6 +332,31 @@ test('the window picker switches the activity columns and remembers', async () =
   assert.equal(stored(h, 'window'), '7d');
 });
 
+test('a row the poller added is marked, and its Keep and Hide call the host', async () => {
+  const h = await setup({ snap: snapshot([repo('alpha', { urgency: 100 }), repo('extra', { urgency: 50 }, { auto: true })]) });
+  assert.equal(h.row('alpha').querySelector('.added'), null, 'a configured row has no marker');
+  const mark = h.row('extra').querySelector<HTMLElement>('.added-mark')!;
+  assert.equal(mark.title, 'Added because you have an open pull request here');
+  const actions = () => [...h.row('extra').querySelectorAll<HTMLButtonElement>('.added-action')];
+  assert.deepEqual(actions().map((b) => b.textContent), ['Keep', 'Hide']);
+
+  const [keep, hide] = actions();
+  pointer(h, keep!, 'pointerdown', 25);
+  pointer(h, h.win as unknown as EventTarget, 'pointermove', 60);
+  pointer(h, h.win as unknown as EventTarget, 'pointerup', 60);
+  keep!.click();
+  assert.deepEqual(h.rows(), ['alpha', 'extra'], 'not a drag');
+  assert.equal(h.view(), 'repos', 'not a click on the row');
+  assert.ok(keep!.disabled, 'once');
+  hide!.click();
+  const sent = h.calls.filter((c) => c.cmd.endsWith('_repo'));
+  assert.deepEqual(sent, [{ cmd: 'keep_repo', args: { repo: 'o/extra' } }, { cmd: 'hide_repo', args: { repo: 'o/extra' } }]);
+  assert.equal(stored(h, 'order'), null);
+
+  h.emit('craft:snapshot', snapshot([repo('alpha', { urgency: 100 }), repo('extra', { urgency: 50 })]));
+  assert.equal(h.row('extra').querySelector('.added'), null, 'kept: now a configured row');
+});
+
 test('an empty config says so', async () => {
   const h = await setup({ snap: snapshot([]) });
   assert.match(h.doc.getElementById('tbody')!.textContent ?? '', /No repositories configured/);

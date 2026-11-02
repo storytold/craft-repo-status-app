@@ -117,6 +117,9 @@ pub struct RepoEntry {
     pub last_attempt_at: Option<Time>,
     /// Error from the most recent attempt, cleared on success.
     pub error: Option<String>,
+    /// The poller added this row on its own: the config doesn't list the
+    /// repo, but the token's user has an open pull request in it.
+    pub auto: bool,
     /// GitHub reported the repo missing (e.g. private and not visible to the
     /// token); shown as an empty row rather than an error.
     pub inaccessible: bool,
@@ -286,6 +289,8 @@ impl Snapshot {
     /// Make `repos` match the configured list, keeping data for repos that remain.
     pub fn sync_repos(&mut self, wanted: &[String]) {
         let mut old = std::mem::take(&mut self.repos);
+        let added = old.iter().filter(|e| e.auto).map(|e| e.repo.clone());
+        let added: Vec<String> = added.collect();
         self.repos = wanted
             .iter()
             .map(|w| {
@@ -299,6 +304,41 @@ impl Snapshot {
                     .unwrap_or_else(|| RepoEntry::new(w))
             })
             .collect();
+        // Rows the poller added stay, after the configured ones, until
+        // `set_added` drops them; a repo the config now lists is no longer one.
+        for e in &mut self.repos {
+            e.auto = false;
+        }
+        for repo in added {
+            if let Some(i) = old.iter().position(|e| e.repo == repo) {
+                self.repos.push(old.swap_remove(i));
+            }
+        }
+    }
+
+    /// Make the rows the poller added ([`RepoEntry::auto`]) match `added`:
+    /// rows it no longer lists go, keeping the others' data, and new repos
+    /// are appended in its order. A repo already in the table isn't added.
+    pub fn set_added(&mut self, added: &[String]) {
+        self.repos
+            .retain(|e| !e.auto || added.iter().any(|a| a.eq_ignore_ascii_case(&e.repo)));
+        for repo in added {
+            if !self.repos.iter().any(|e| e.repo.eq_ignore_ascii_case(repo)) {
+                self.repos.push(RepoEntry {
+                    auto: true,
+                    ..RepoEntry::new(repo)
+                });
+            }
+        }
+    }
+
+    /// The repos of the rows the poller added, in table order.
+    pub fn added(&self) -> Vec<String> {
+        self.repos
+            .iter()
+            .filter(|e| e.auto)
+            .map(|e| e.repo.clone())
+            .collect()
     }
 }
 
@@ -428,6 +468,47 @@ mod tests {
             "o/c left the config"
         );
         assert_eq!(s.take_requested(), None);
+    }
+
+    #[test]
+    fn added_rows_follow_the_configured_ones_and_keep_their_data() {
+        let mut s = Snapshot::default();
+        s.sync_repos(&["o/a".into(), "o/b".into()]);
+        s.set_added(&["o/x".into(), "O/A".into(), "o/y".into()]);
+        let rows = |s: &Snapshot| {
+            s.repos
+                .iter()
+                .map(|e| format!("{}{}", e.repo, if e.auto { "+" } else { "" }))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            rows(&s),
+            ["o/a", "o/b", "o/x+", "o/y+"],
+            "o/a is configured"
+        );
+        assert_eq!(s.added(), ["o/x", "o/y"]);
+        s.repos[2].fetched_at = Some(Utc::now());
+        assert!(s.request("o/y"), "an added row refreshes like any other");
+
+        s.sync_repos(&["o/b".into()]);
+        assert_eq!(
+            rows(&s),
+            ["o/b", "o/x+", "o/y+"],
+            "a config reload keeps them"
+        );
+        assert!(s.repos[1].fetched_at.is_some());
+
+        s.sync_repos(&["o/b".into(), "o/x".into()]);
+        assert_eq!(rows(&s), ["o/b", "o/x", "o/y+"], "kept: now configured");
+        assert!(s.repos[1].fetched_at.is_some(), "with its data");
+
+        s.set_added(&[]);
+        assert_eq!(rows(&s), ["o/b", "o/x"]);
+        assert_eq!(s.take_requested(), None, "its refresh went with it");
+
+        let back: Snapshot =
+            serde_json::from_str(r#"{"repos": [{"repo": "o/z", "auto": true}]}"#).unwrap();
+        assert!(back.repos[0].auto, "restored from the cache");
     }
 
     #[test]

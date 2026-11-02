@@ -233,7 +233,7 @@ above the 150 where the Downloads tab's polling pauses itself.
   repo it pauses after each GraphQL request as long as it took: GitHub allows
   only 60 s of GraphQL server time per minute, and its secondary rate limits
   punish bursts. Each repo costs about six GraphQL requests and one REST
-  request. It never uses search, which GitHub limits far more tightly (to
+  request. Fetches never use search, which GitHub limits far more tightly (to
   about 30 a minute); PR and issue counts per window come from walking the
   recent PRs and issues.
 - Each repo's icon is `assets/app-icon/hicolor/64x64/apps/*.png` on its default
@@ -274,6 +274,17 @@ above the 150 where the Downloads tab's polling pauses itself.
   config, then from `gh auth token`. The app is started by launchd, not a
   shell, so it sees variables set with `launchctl setenv` (then relaunch it),
   not those exported in your shell profile.
+- The app also adds a row for each repo where you (the token's user) have an
+  open pull request, when `repos` lists another repo of the same owner. Every
+  `poll_minutes` it searches each such owner once, and it sends each search
+  like a repo fetch: 20 s after the request before it, after any row
+  refreshed by hand, never during a pause, and not while fewer than 1,500
+  points remain. An added row is marked `added`. The app removes it once two
+  rounds of searches in a row find none of your open pull requests there;
+  its cached activity stays on disk. **Keep** writes the repo into `repos` in
+  the config file. **Hide** writes it into `hidden_auto_repos`, and the app
+  does not add it again. The app writes the config file only for these two
+  buttons. `auto_repos = false` turns this off.
 
 ## Tray and window
 

@@ -51,6 +51,15 @@ stale_minutes = 60.0
 # this file lives in your home directory, not in the repository.
 github_token = ""
 
+# Add a row for each repo where the token's user has an open pull request,
+# when `repos` lists another repo of the same owner. Every `poll_minutes` the
+# app searches each such owner once, 20 s after the request before it. An
+# added row has Keep, which writes it into `repos`, and Hide, which writes it
+# into `hidden_auto_repos` so that it is not added again. The app does not
+# edit this file except for these two buttons.
+auto_repos = true
+hidden_auto_repos = []
+
 [window]
 width = 1340.0
 height = 560.0
