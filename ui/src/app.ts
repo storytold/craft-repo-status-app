@@ -69,12 +69,18 @@ export function start(api: Api, prRoute?: Route): () => void {
   };
 
   function openUrl(url: string, ev?: Event): void {
+    ev?.preventDefault();
     ev?.stopPropagation();
     api.invoke('open_url', { url }).catch((e: unknown) => console.warn(e));
   }
 
+  // A real anchor, so Tab reaches it and Enter opens it; the host opens the URL and the webview stays put.
   const link = (text: string, url: string, cls = ''): HTMLElement =>
-    el('span', { class: `link ${cls}`, onclick: (e: Event) => openUrl(url, e) }, text);
+    el('a', {
+      class: `link ${cls}`, href: url, draggable: 'false',
+      onclick: (e: Event) => openUrl(url, e),
+      onauxclick: (e: Event) => e.preventDefault(),
+    }, text);
 
   /** The repo's app icon; repos without one (libraries) get a lettered tile, unfetched ones a blank. */
   function appIcon(entry: Pick<RepoEntry, 'repo'> & Partial<RepoEntry>): HTMLElement {
@@ -229,6 +235,7 @@ export function start(api: Api, prRoute?: Route): () => void {
 
   function renderTable(snap: Snapshot): void {
     renderHead();
+    const restoreFocus = holdFocus($('tbody'));
     const shown = shownRepos(snap);
     const rows = orderedEntries(shown, state.sort, state.order, state.window);
     const now = Date.now();
@@ -250,11 +257,34 @@ export function start(api: Api, prRoute?: Route): () => void {
       const why = snap.repos.length ? 'Every repo is hidden by the toggles beside the tabs.' : 'No repositories configured — Edit config.';
       $('tbody').replaceChildren(el('tr', {}, el('td', { colspan: COLUMNS.length, class: 'empty' }, why)));
     }
+    restoreFocus();
     const t = totals(shown, state.window);
     const noTotal = (c: Column): boolean => c.kind !== 'num' || (c.allTimeOnly === true && state.window !== ALL_TIME);
     const total = (c: Column): string => (noTotal(c) ? '' : num(Math.round(t[c.key] ?? 0)));
     $('tfoot').replaceChildren(el('tr', {}, COLUMNS.map((c, i) =>
       el('td', { class: groupStart(i) }, i === 0 ? `${shown.length} repos` : total(c)))));
+  }
+
+  const FOCUSABLE = 'a[href], button, [tabindex="0"]';
+
+  /** Names a focusable element across rebuilds: its row and its place in the row, or the urgent item's URL. */
+  function focusKey(n: Element): string {
+    const row = n.closest('tr');
+    if (row) return `${row.dataset.repo} ${[...row.querySelectorAll(FOCUSABLE)].indexOf(n)}`;
+    return n.getAttribute('title') ?? '';
+  }
+
+  /** Notes the focused element in `list`. The returned function, called after `list` is rebuilt,
+   * focuses the same element again, or the one now at its position, or the last one. */
+  function holdFocus(list: HTMLElement): () => void {
+    const active = document.activeElement;
+    if (!active || !list.contains(active)) return () => {};
+    const index = [...list.querySelectorAll(FOCUSABLE)].indexOf(active);
+    const key = focusKey(active);
+    return () => {
+      const after = [...list.querySelectorAll<HTMLElement>(FOCUSABLE)];
+      (after.find((n) => focusKey(n) === key) ?? after[Math.min(index, after.length - 1)])?.focus({ preventScroll: true });
+    };
   }
 
   // ───────────────────────────── row dragging ─────────────────────────────
@@ -331,11 +361,16 @@ export function start(api: Api, prRoute?: Route): () => void {
       ...shown.map((r) => el('option', { value: r.repo }, shortName(r.repo))));
     sel.value = state.urgentRepo;
     $<HTMLInputElement>('critical-only').checked = state.criticalOnly;
+    const restoreFocus = holdFocus($('urgent-list'));
     const items = urgentAcross(shown, { repo: state.urgentRepo, criticalOnly: state.criticalOnly });
     const SEVERE = /crash|panic|freeze|hang|data loss|corruption|won't|blank|security/;
     $('urgent-list').replaceChildren(...items.map((u) => {
       const a = Math.min(1, u.score / 90) * 0.5;
-      return el('li', { class: `urgent-item${u.critical ? ' critical' : ''}`, onclick: () => openUrl(u.url), title: u.url },
+      return el('li', {
+        class: `urgent-item${u.critical ? ' critical' : ''}`, title: u.url, tabindex: '0', role: 'link',
+        onclick: () => openUrl(u.url),
+        onkeydown: (e: KeyboardEvent) => { if (e.key === 'Enter') openUrl(u.url, e); },
+      },
         el('span', { class: 'score', style: `background: rgb(var(--hot-rgb) / ${a.toFixed(2)})` }, String(u.score)),
         el('span', { class: 'u-repo' }, appIcon(snap.repos.find((r) => r.repo === u.repo) ?? { repo: u.repo }), shortName(u.repo), thirdPartyTag(u.repo)),
         el('div', { class: 'u-title' },
@@ -344,6 +379,7 @@ export function start(api: Api, prRoute?: Route): () => void {
             u.labels.filter((l) => !u.reasons.includes(`${l} label`)).map((l) => el('span', { class: 'reason' }, l)))),
         el('span', { class: 'u-age', title: `Opened ${localTime(u.created_at)}` }, ago(u.created_at)));
     }));
+    restoreFocus();
     if (!items.length) {
       $('urgent-list').replaceChildren(el('li', { class: 'empty' }, snap.repos.some((r) => r.stats) ? 'Nothing urgent. 🎉' : 'Waiting for the first poll…'));
     }
