@@ -36,8 +36,8 @@ use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 use craft_core::{
-    rank_issues, summarize_releases, Activity, Asset, BuildLag, IssueInput, LagBasis, LedgerPr,
-    PrLedger, Release, RepoStats, SharedCache, ALL_TIME, SINCE_RELEASE, WINDOWS,
+    rank_issues, summarize_releases, Activity, Asset, BuildLag, IssueInput, LagBasis, Lease,
+    LedgerPr, PrLedger, Release, RepoStats, SharedCache, ALL_TIME, SINCE_RELEASE, WINDOWS,
 };
 use reqwest::blocking::Client;
 use reqwest::header::{HeaderMap, ACCEPT, AUTHORIZATION, USER_AGENT};
@@ -167,6 +167,9 @@ pub struct GitHub {
     api: String,
     /// For a background client, the gate its requests wait at.
     gate: Option<Arc<Gate>>,
+    /// For a background client, the shared cache whose lease each of its
+    /// requests holds, and how long a request waits for it.
+    lease: Option<(SharedCache, Duration)>,
     /// GraphQL requests sent, for the tests.
     #[cfg(test)]
     graphql_sent: std::sync::atomic::AtomicU64,
@@ -204,6 +207,7 @@ impl GitHub {
             token: token.into(),
             api: api.into(),
             gate: None,
+            lease: None,
             #[cfg(test)]
             graphql_sent: Default::default(),
             pacing: GRAPHQL_PACING,
@@ -231,10 +235,34 @@ impl GitHub {
         self
     }
 
+    /// This background client with each request holding `shared`'s lease,
+    /// taken after the gate's permit. While another poller holds the lease, a
+    /// request lets the permit go and tries again every half second for up to
+    /// `patience`, then fails with [`Error::Halted`] without being sent.
+    pub fn with_lease(mut self, shared: SharedCache, patience: Duration) -> GitHub {
+        self.lease = Some((shared, patience));
+        self
+    }
+
     /// Leave to send one request: none for a poll client, a
-    /// [`gate::Permit`] for a background one.
-    fn permit(&self) -> Result<Option<gate::Permit<'_>>> {
-        self.gate.as_deref().map(Gate::background).transpose()
+    /// [`gate::Permit`] for a background one, with the lease when the client
+    /// has one ([`GitHub::with_lease`]).
+    fn permit(&self) -> Result<(Option<gate::Permit<'_>>, Option<Lease>)> {
+        let started = std::time::Instant::now();
+        loop {
+            let permit = self.gate.as_deref().map(Gate::background).transpose()?;
+            let Some((shared, patience)) = self.lease.as_ref().filter(|_| permit.is_some()) else {
+                return Ok((permit, None));
+            };
+            if let Some(lease) = shared.try_lease() {
+                return Ok((permit, Some(lease)));
+            }
+            drop(permit);
+            if started.elapsed() >= *patience {
+                return Err(Error::Halted("the GitHub lease is held".into()));
+            }
+            std::thread::sleep(Duration::from_millis(500));
+        }
     }
 
     /// `err`, after a background client has stopped later background
@@ -334,6 +362,9 @@ impl GitHub {
             })
             // Kept before the permit goes, so no poll starts in between.
             .map_err(|e| self.note_limit(e));
+        if let (Some(_), Some((shared, _)), Ok(v)) = (&permit.1, &self.lease, &answer) {
+            note_shared_budget(shared, &v["data"]["rateLimit"]);
+        }
         // A background client keeps its permit until the wait ends.
         std::thread::sleep(took.mul_f64(self.pacing));
         drop(permit);
@@ -679,6 +710,21 @@ fn note_rate_limit(data: &Value, out: &mut LedgerSync) {
     if let Some(left) = r["remaining"].as_u64() {
         out.remaining = Some(left);
         out.reset_at = time(&r["resetAt"]);
+    }
+}
+
+/// Saves the points left that an answer's `rateLimit` reports to `shared`'s
+/// budget, which the PR poller reads. Call holding the lease. An answer
+/// without `resetAt` keeps the reset time already saved while it is ahead.
+fn note_shared_budget(shared: &SharedCache, rate: &Value) {
+    let Some(left) = rate["remaining"].as_u64() else {
+        return;
+    };
+    let now = Utc::now();
+    let kept = shared.budget().reset_at.filter(|t| *t > now);
+    let reset_at = time(&rate["resetAt"]).or(kept);
+    if let Err(e) = shared.note_budget(Some(left), reset_at, now) {
+        eprintln!("could not save the shared budget: {e}");
     }
 }
 
@@ -1608,7 +1654,7 @@ mod tests {
         let mut raw = RawActivity::default();
         let now = "2026-10-18T10:00:00Z".parse().unwrap();
         let shared_dir =
-            std::env::temp_dir().join(format!("craft-raw-pr-shared-{}", std::process::id()));
+            std::env::temp_dir().join(format!("craft-shared-pr-{}", std::process::id()));
         let shared = SharedCache::at(shared_dir.clone());
         gh.fetch_repo("o/r", now, &mut raw, &shared).unwrap();
         std::fs::remove_dir_all(&shared_dir).ok();
@@ -1742,6 +1788,74 @@ mod tests {
         );
         drop(session);
         people.join().unwrap();
+    }
+
+    #[test]
+    fn a_background_request_is_not_sent_while_another_poller_holds_the_lease() {
+        let dir = std::env::temp_dir().join(format!("craft-lease-bg-{}", std::process::id()));
+        let shared = SharedCache::at(dir.clone());
+        let (api, requests) = stub(vec![ok_json(
+            r#"{"data":{"rateLimit":{"cost":1,"remaining":1234}}}"#,
+        )]);
+        let background = GitHub::with_api("t", api)
+            .unwrap()
+            .with_pacing(0.0)
+            .in_background(Arc::new(Gate::new()))
+            .with_lease(shared.clone(), Duration::ZERO);
+        let other = shared.try_lease().expect("the lease is free");
+        assert!(matches!(
+            background.graphql_body("query { viewer { login } }", json!({})),
+            Err(Error::Halted(_))
+        ));
+        assert!(
+            requests.recv_timeout(Duration::from_millis(200)).is_err(),
+            "nothing was sent while the lease was held"
+        );
+        drop(other);
+        background
+            .graphql_body("query { viewer { login } }", json!({}))
+            .unwrap();
+        requests.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert!(shared.try_lease().is_some(), "the request let the lease go");
+        assert_eq!(shared.budget().remaining, Some(1234), "for the PR poller");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_background_request_waits_for_the_lease_to_come_free() {
+        let dir = std::env::temp_dir().join(format!("craft-lease-wait-{}", std::process::id()));
+        let shared = SharedCache::at(dir.clone());
+        let (api, requests) = stub(vec![ok_json(r#"{"data":{}}"#)]);
+        let gate = Arc::new(Gate::new());
+        let background = GitHub::with_api("t", api)
+            .unwrap()
+            .with_pacing(0.0)
+            .in_background(gate.clone())
+            .with_lease(shared.clone(), Duration::from_secs(5));
+        let other = shared.try_lease().expect("the lease is free");
+        let started = std::time::Instant::now();
+        let people = std::thread::spawn(move || {
+            background
+                .graphql_body("query { viewer { login } }", json!({}))
+                .unwrap();
+        });
+        std::thread::sleep(Duration::from_millis(100));
+        let asked = std::time::Instant::now();
+        let session = gate.poll_session();
+        assert!(
+            asked.elapsed() < Duration::from_millis(200),
+            "a poll does not wait for a request waiting for the lease"
+        );
+        drop(session);
+        std::thread::sleep(Duration::from_millis(200));
+        drop(other);
+        people.join().unwrap();
+        assert!(
+            started.elapsed() >= Duration::from_millis(250),
+            "sent after the lease came free"
+        );
+        requests.recv_timeout(Duration::from_secs(5)).unwrap();
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

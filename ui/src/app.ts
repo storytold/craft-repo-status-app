@@ -487,7 +487,7 @@ export function start(api: Api, prRoute?: Route): () => void {
     // The click that follows this pointerup must not open the urgent view.
     justDragged = true;
     setTimeout(() => { justDragged = false; });
-    const dragged = [...$('tbody').children].map((r) => (r as HTMLElement).dataset.repo ?? '');
+    const dragged = [...$('tbody').children].map((r) => (r as HTMLElement).dataset.repo ?? '').filter(Boolean);
     state.order = reorderVisible(manualOrder(state.snap?.repos ?? [], state.order).map((r) => r.repo), dragged);
     state.sort = { key: MANUAL };
     save('order', state.order);

@@ -33,7 +33,7 @@ CodeRabbit's findings and Claude's summaries. Everything runs locally: no server
 | **Downloads** | `⌘1` | Download counts and rates, builds, issues and activity for every repo | shown, tagged `3P` |
 | **PRs** | `⌘2` | Reviewing open PRs: grades, CodeRabbit findings, Claude's summaries | left out |
 | **Fix first** | `⌘3` | Open issues most worth fixing | shown, tagged `3P` |
-| **People** | `⌘4` | Open pull requests by work state, and rankings | the watched repos |
+| **People** | `⌘4` | Open pull requests by work state, and rankings of the people behind them | shown |
 | **My PRs** | `⌘5` | Your open pull requests and what blocks each | the watched repos |
 
 The chips beside the tabs show or hide kinds of repo on every tab: **3rd party**, **Apps**,
@@ -122,7 +122,7 @@ Issues labelled `wontfix`, `duplicate` or `invalid` are dropped. For each
 repo, the 100 newest open issues and the 30 most-commented open issues are
 scored.
 
-### The People tab
+## The People tab
 
 Every open pull request has one work state, decided by the rules in
 `crates/craft-core/src/people/states.rs` in order: the author stepped back,
@@ -233,7 +233,7 @@ the maintainer and author queues, the checks on `main`, the flow in the window
 and to the first maintainer response, merge methods and mergers), aging and
 stale counts, and pull requests that wait on or compete with another.
 
-### The My PRs tab
+## The My PRs tab
 
 The My PRs tab lists the open pull requests whose author is
 `people.my_login`, or the user the GitHub token belongs to when that is empty,
@@ -463,7 +463,7 @@ The app behaves like the Todo app:
 - The window is chrome-less and semi-transparent, and it appears on every
   Space. It remembers its position and size in `~/.craft_status_state.toml`.
 - `Esc` hides the window (on the PRs tab, once it's back at the top).
-- `⌘4` and `⌘5` switch to People and My PRs.
+- `⌘1` to `⌘5` switch to Downloads, PRs, Fix first, People and My PRs.
 
 ## Configuration: `~/.craft_status_config.toml`
 
