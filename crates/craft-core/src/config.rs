@@ -1,10 +1,12 @@
 //! `~/.craft_status_config.toml` (created from a commented template on first
 //! launch) and `~/.craft_status_state.toml` (remembered window geometry).
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+use crate::people::valid_login;
 use crate::{atomic_write, Error, Result};
 
 const CONFIG_FILE_NAME: &str = ".craft_status_config.toml";
@@ -76,6 +78,121 @@ pub struct Config {
     pub window: WindowConfig,
     pub tray: TrayConfig,
     pub shortcuts: Shortcuts,
+    pub people: PeopleConfig,
+}
+
+/// The `[people]` table: where the team roster comes from, and who owns and
+/// maintains each repo.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PeopleConfig {
+    /// An `https://` URL of the roster sheet's CSV export, or a CSV file
+    /// path; empty for none. The app reads it at runtime.
+    pub roster: String,
+    /// The owners of every repo that `repo_owners` does not list.
+    pub owner_logins: Vec<String>,
+    /// Owners by repo (`owner/name`), in place of `owner_logins`.
+    pub repo_owners: BTreeMap<String, Vec<String>>,
+    /// Logins counted as maintainers of every repo, besides the ones found
+    /// from membership, merges and closes.
+    pub maintainers: Vec<String>,
+    /// Repos (`owner/name`) whose maintainers rebase contributors' branches
+    /// themselves: there a conflict on a contributor's pull request that
+    /// maintainers can push to is only a flag.
+    pub rebase_repos: Vec<String>,
+    /// Repos (`owner/name`) whose maintainers land contributors' work
+    /// through a batch branch, so a landed pull request may close without
+    /// merging. The rankings mark their merge and landed counts unverified.
+    pub batch_repos: Vec<String>,
+}
+
+/// The repos whose maintainers rebase contributors' branches, by default.
+pub const DEFAULT_REBASE_REPOS: &[&str] = &["storytold/vectorcraft", "storytold/figcraft"];
+/// The repos that land work through a batch branch, by default.
+pub const DEFAULT_BATCH_REPOS: &[&str] = &["storytold/designcraft", "storytold/deckcraft"];
+
+impl Default for PeopleConfig {
+    fn default() -> Self {
+        PeopleConfig {
+            roster: String::new(),
+            owner_logins: Vec::new(),
+            repo_owners: BTreeMap::new(),
+            maintainers: Vec::new(),
+            rebase_repos: DEFAULT_REBASE_REPOS.iter().map(|s| s.to_string()).collect(),
+            batch_repos: DEFAULT_BATCH_REPOS.iter().map(|s| s.to_string()).collect(),
+        }
+    }
+}
+
+impl PeopleConfig {
+    /// The owners of `repo`: its `repo_owners` entry, in any letter case,
+    /// otherwise `owner_logins`.
+    pub fn owners_for(&self, repo: &str) -> &[String] {
+        self.repo_owners
+            .iter()
+            .find(|(r, _)| r.eq_ignore_ascii_case(repo))
+            .map_or(&self.owner_logins, |(_, o)| o)
+    }
+
+    /// Whether `repo`'s maintainers rebase contributors' branches, in any
+    /// letter case.
+    pub fn rebases(&self, repo: &str) -> bool {
+        self.rebase_repos
+            .iter()
+            .any(|r| r.eq_ignore_ascii_case(repo))
+    }
+
+    /// Whether `repo` lands work through a batch branch, in any letter case.
+    pub fn batches(&self, repo: &str) -> bool {
+        self.batch_repos
+            .iter()
+            .any(|r| r.eq_ignore_ascii_case(repo))
+    }
+
+    /// This table as [`Config::parse`] reads it: the roster trimmed, logins
+    /// trimmed with invalid ones and repeats dropped, and `repo_owners`
+    /// keyed by `owner/name`, a repo listed twice keeping its first entry.
+    fn normalized(&self) -> PeopleConfig {
+        let mut repo_owners: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        for (repo, list) in &self.repo_owners {
+            if let Some(n) = normalize_repo(repo) {
+                if !repo_owners.keys().any(|k| k.eq_ignore_ascii_case(&n)) {
+                    repo_owners.insert(n, logins(list));
+                }
+            }
+        }
+        PeopleConfig {
+            roster: self.roster.trim().to_string(),
+            owner_logins: logins(&self.owner_logins),
+            repo_owners,
+            maintainers: logins(&self.maintainers),
+            rebase_repos: repo_list(&self.rebase_repos),
+            batch_repos: repo_list(&self.batch_repos),
+        }
+    }
+}
+
+/// `list` as `owner/name`, without entries that are not repos and without
+/// repeats in any letter case.
+fn repo_list(list: &[String]) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for r in list.iter().filter_map(|r| normalize_repo(r)) {
+        if !out.iter().any(|x| x.eq_ignore_ascii_case(&r)) {
+            out.push(r);
+        }
+    }
+    out
+}
+
+/// `list` trimmed, without invalid logins and without repeats in any letter case.
+fn logins(list: &[String]) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for l in list.iter().map(|l| l.trim()) {
+        if valid_login(l) && !out.iter().any(|o| o.eq_ignore_ascii_case(l)) {
+            out.push(l.to_string());
+        }
+    }
+    out
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -112,6 +229,7 @@ impl Default for Config {
             window: WindowConfig::default(),
             tray: TrayConfig::default(),
             shortcuts: Shortcuts::default(),
+            people: PeopleConfig::default(),
         }
     }
 }
@@ -184,6 +302,7 @@ impl Config {
             }
         }
         c.repos = repos;
+        c.people = c.people.normalized();
         Ok(c)
     }
 
@@ -310,6 +429,45 @@ mod tests {
             "never stale before the next poll is due"
         );
         assert_eq!(c.poll_secs(), 60);
+    }
+
+    #[test]
+    fn people_has_no_owners_by_default_and_normalizes_logins_and_repos() {
+        let c = Config::parse("").unwrap();
+        assert!(c.people.owner_logins.is_empty());
+        assert!(c.people.owners_for("storytold/vectorcraft").is_empty());
+        let c = Config::parse(
+            "[people]\nroster = \" ~/team.csv \"\nowner_logins = [\" Ann \", \"ann\", \"bad login\", \"bo\"]\n\
+             [people.repo_owners]\n\"https://github.com/o/One\" = [\"cy\"]\n\"o/two\" = []\n\"nonsense\" = [\"x\"]\n",
+        )
+        .unwrap();
+        assert_eq!(c.people.roster, "~/team.csv");
+        assert_eq!(c.people.owner_logins, ["Ann", "bo"]);
+        assert_eq!(
+            c.people.repo_owners.keys().collect::<Vec<_>>(),
+            ["o/One", "o/two"]
+        );
+        assert_eq!(c.people.owners_for("O/one"), ["cy"]);
+        assert!(
+            c.people.owners_for("o/two").is_empty(),
+            "an empty entry means no owners"
+        );
+        assert_eq!(c.people.owners_for("o/three"), ["Ann", "bo"]);
+        assert!(
+            c.people.rebases("Storytold/VectorCraft"),
+            "the default list"
+        );
+        assert!(!c.people.rebases("storytold/photocraft"));
+        let c = Config::parse(
+            "[people]\nrebase_repos = [\"https://github.com/o/One\", \"o/one\", \"nonsense\"]\n",
+        )
+        .unwrap();
+        assert_eq!(c.people.rebase_repos, ["o/One"]);
+        assert!(!c.people.rebases("storytold/vectorcraft"));
+        assert!(
+            c.people.batches("Storytold/DesignCraft"),
+            "the default list"
+        );
     }
 
     #[test]
