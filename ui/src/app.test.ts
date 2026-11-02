@@ -109,7 +109,7 @@ async function setup({ snap = snapshot(), storage = {} as Record<string, unknown
     emit: (event, payload) => listeners.get(event)?.(payload),
     rows: () => [...tbody().querySelectorAll('tr')].map((r) => r.dataset.repo?.slice(2) ?? ''),
     row: (name) => tbody().querySelector<HTMLTableRowElement>(`tr[data-repo="o/${name}"]`)!,
-    view: () => (['repos', 'prs', 'urgent'].find((v) => !doc.getElementById(`${v}-view`)!.hidden) ?? ''),
+    view: () => (['repos', 'prs', 'urgent', 'people', 'mine'].find((v) => !doc.getElementById(`${v}-view`)!.hidden) ?? ''),
   };
 }
 

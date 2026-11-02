@@ -506,14 +506,19 @@ fn fetch_in_session(
 
 /// Pauses the fetches and the background requests for the rate limit the
 /// People thread hit since the last step, if any, as for a rate limit on a
-/// fetch. Returns the message for the window.
-fn people_rate_limit(gate: &Gate, pacing: &mut Pacing, now: DateTime<Utc>) -> Option<String> {
+/// fetch. Returns the message for the window and when this rate limit's
+/// pause ends.
+fn people_rate_limit(
+    gate: &Gate,
+    pacing: &mut Pacing,
+    now: DateTime<Utc>,
+) -> Option<(String, DateTime<Utc>)> {
     let until = gate.halted()?;
     let (pause, msg) = rate_limited(pacing, &until, now);
     let resume = now + pause;
     pacing.not_before = Some(pacing.not_before.map_or(resume, |t| t.max(resume)));
     gate.pause_until(instant_at(resume), msg.clone());
-    Some(msg)
+    Some((msg, resume))
 }
 
 /// Holds the People thread's requests back after a fetch for as long as the
@@ -541,10 +546,13 @@ fn step(app: &AppHandle, pacing: &mut Pacing) {
     };
     let now = Utc::now();
     let people_limit = people_rate_limit(&state.gate, pacing, now);
-    if let (Some(_), Some(until), Some(shared)) = (&people_limit, pacing.not_before, &state.shared)
-    {
-        // The PR poller shares the account: it should stop too.
-        if let Err(e) = shared.note_backoff(until) {
+    // The PR poller shares the account: it should stop too.
+    if let Some((_, resume)) = &people_limit {
+        if let Err(e) = state
+            .shared
+            .as_ref()
+            .map_or(Ok(()), |s| s.note_backoff(*resume))
+        {
             eprintln!("could not share the backoff: {e}");
         }
     }
@@ -557,7 +565,7 @@ fn step(app: &AppHandle, pacing: &mut Pacing) {
             .error
             .as_deref()
             .is_some_and(|e| e.starts_with("Config"));
-        if let (Some(msg), false) = (&people_limit, config_error) {
+        if let (Some((msg, _)), false) = (&people_limit, config_error) {
             snap.error = Some(msg.clone());
         }
         // The PR poller was rate-limited on this account: hold off too.
@@ -851,7 +859,11 @@ fn run_people(app: &AppHandle, job: &PeopleJob, runs: &mut PeopleRuns) {
         .and_then(|t| Ok((GitHub::new(t.value.clone())?, t.value)));
     match client {
         Ok((gh, token)) => {
-            let gh = gh.in_background(state.gate.clone());
+            let mut gh = gh.in_background(state.gate.clone());
+            // Each People request holds the lease, as the PR poller's do.
+            if let Some(shared) = &state.shared {
+                gh = gh.with_lease(shared.clone(), LEASE_PATIENCE);
+            }
             runs.viewer.for_token(&token, || gh.viewer_login());
             update_people(
                 app,
@@ -1609,11 +1621,12 @@ mod tests {
         assert_eq!(pacing.not_before, None, "nothing happened");
         let end = now + CDuration::minutes(40);
         gate.halt(end.to_rfc3339());
-        let msg = people_rate_limit(&gate, &mut pacing, now).unwrap();
+        let (msg, resume) = people_rate_limit(&gate, &mut pacing, now).unwrap();
         assert!(
             msg.starts_with("Rate limited by GitHub; pausing until"),
             "{msg}"
         );
+        assert_eq!(resume, end, "this rate limit's own end, for the PR poller");
         assert_eq!(pacing.strikes, 1);
         assert_eq!(
             pacing.not_before,
@@ -1632,9 +1645,14 @@ mod tests {
         );
         // A second limit doubles the backoff, as on a fetch.
         gate.halt("later");
-        people_rate_limit(&gate, &mut pacing, now).unwrap();
+        let (_, second) = people_rate_limit(&gate, &mut pacing, now).unwrap();
         assert_eq!(pacing.strikes, 2);
         assert_eq!(pacing.not_before, Some(end), "a longer pause stays");
+        assert_eq!(
+            second,
+            now + CDuration::seconds(2 * BACKOFF_MIN),
+            "its own end"
+        );
     }
 
     #[test]

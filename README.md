@@ -33,6 +33,8 @@ CodeRabbit's findings and Claude's summaries. Everything runs locally: no server
 | **Downloads** | `⌘1` | Download counts and rates, builds, issues and activity for every repo | shown, tagged `3P` |
 | **PRs** | `⌘2` | Reviewing open PRs: grades, CodeRabbit findings, Claude's summaries | left out |
 | **Fix first** | `⌘3` | Open issues most worth fixing | shown, tagged `3P` |
+| **People** | `⌘4` | Open pull requests by work state, and rankings of the people behind them | shown |
+| **My PRs** | `⌘5` | Your open pull requests and what blocks each | the watched repos |
 
 The chips beside the tabs show or hide kinds of repo on every tab: **3rd party**, **Apps**,
 **Libraries**, **Assets**, **CI** and **Tooling**. A repo hides if any kind it is has been
@@ -81,7 +83,7 @@ sort by a column again.
   rpm, flatpak, zips and tarballs. Checksum lists, signatures, `.zsync` delta
   files and updater manifests are left out, because machines fetch them, not
   people.
-- **Fix first** (`⌘2`) ranks open issues across every repo. Each issue shows
+- **Fix first** (`⌘3`) ranks open issues across every repo. Each issue shows
   the reasons behind its score. Click a row in the Repos table to filter the
   list to that repo. Click an issue to open it on GitHub. The caret on a
   Repos row shows the repo's people and open work under the row instead (see
@@ -121,7 +123,7 @@ Issues labelled `wontfix`, `duplicate` or `invalid` are dropped. For each
 repo, the 100 newest open issues and the 30 most-commented open issues are
 scored.
 
-### The People tab
+## The People tab
 
 Every open pull request has one work state, decided by the rules in
 `crates/craft-core/src/people/states.rs` in order: the author stepped back,
@@ -313,7 +315,7 @@ the maintainer and author queues, the checks on `main`, the flow in the window
 and to the first maintainer response, merge methods and mergers), aging and
 stale counts, and pull requests that wait on or compete with another.
 
-### The My PRs tab
+## The My PRs tab
 
 The My PRs tab lists the open pull requests whose author is
 `people.my_login`, or the user the GitHub token belongs to when that is empty,

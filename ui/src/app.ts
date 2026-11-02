@@ -28,10 +28,6 @@ export type { Api } from './dom.ts';
 
 type View = 'repos' | 'prs' | 'urgent' | 'people' | 'mine';
 
-/** The view a tab button, a shortcut or the saved view names; the Downloads table for anything else. */
-const asView = (v: string | null | undefined): View =>
-  (v === 'urgent' || v === 'prs' || v === 'people' || v === 'mine' ? v : 'repos');
-
 interface State {
   snap: Snapshot | null;
   meta: Meta;
@@ -41,6 +37,8 @@ interface State {
   window: string;
   urgentRepo: string;
   criticalOnly: boolean;
+  /** The ids of the REPO_KINDS toggled off. */
+  hiddenKinds: string[];
   /** The People tab's view from the host; null until the records are read. */
   people: PeopleView | null;
   peopleWindow: string;
@@ -64,9 +62,11 @@ interface State {
   mineSort: Sort;
   /** My PRs shows only those whose blocker is on you or that wait for your reply. */
   mineNeedsOnly: boolean;
-  /** The ids of the REPO_KINDS toggled off. */
-  hiddenKinds: string[];
 }
+
+/** The view a tab button, a shortcut or the saved view names; the Repos table for anything else. */
+const viewOf = (v: string | null | undefined): View =>
+  (v === 'urgent' || v === 'prs' || v === 'people' || v === 'mine' ? v : 'repos');
 
 // ───────────────────────────── formatting ─────────────────────────────
 
@@ -232,12 +232,13 @@ export function start(api: Api, prRoute?: Route): () => void {
   const state: State = {
     snap: null,
     meta: {},
-    view: prRoute ? 'prs' : asView(new URLSearchParams(location.search).get('view') ?? load<string>('view', 'repos')),
+    view: prRoute ? 'prs' : viewOf(new URLSearchParams(location.search).get('view') ?? load<string>('view', 'repos')),
     sort: load<Sort>('sort', { key: 'urgency', dir: 'desc' }),
     order: load<string[]>('order', []),
     window: windowById(load('window', '')).id,
     urgentRepo: '',
     criticalOnly: load('criticalOnly', false),
+    hiddenKinds: load<string[]>('hiddenKinds', []),
     people: null,
     peopleWindow: windowById(load('peopleWindow', '7d')).id,
     peopleRepo: '',
@@ -252,7 +253,6 @@ export function start(api: Api, prRoute?: Route): () => void {
     repoOpen: new Set(),
     mineSort: load<Sort>('mineSort', { key: 'blocker', dir: 'asc' }),
     mineNeedsOnly: load('mineNeedsOnly', false),
-    hiddenKinds: load<string[]>('hiddenKinds', []),
   };
 
   function openUrl(url: string, ev?: Event): void {
@@ -498,7 +498,7 @@ export function start(api: Api, prRoute?: Route): () => void {
     // The click that follows this pointerup must not open the urgent view.
     justDragged = true;
     setTimeout(() => { justDragged = false; });
-    const dragged = [...$('tbody').children].map((r) => (r as HTMLElement).dataset.repo ?? '');
+    const dragged = [...$('tbody').children].map((r) => (r as HTMLElement).dataset.repo ?? '').filter(Boolean);
     state.order = reorderVisible(manualOrder(state.snap?.repos ?? [], state.order).map((r) => r.repo), dragged);
     state.sort = { key: MANUAL };
     save('order', state.order);
@@ -1434,9 +1434,9 @@ export function start(api: Api, prRoute?: Route): () => void {
       renderTable(snap);
       renderRepoCarets(focused);
     }
-    else if (state.view === 'urgent') renderUrgent(snap);
     else if (state.view === 'people') renderPeopleView(snap);
     else if (state.view === 'mine') renderMineView(snap);
+    else if (state.view === 'urgent') renderUrgent(snap);
   }
 
   /** What's on screen for the current tab, whether or not there's data yet. */
@@ -1499,7 +1499,7 @@ export function start(api: Api, prRoute?: Route): () => void {
   renderKinds();
 
   document.querySelectorAll<HTMLElement>('[data-view]').forEach((b) => b.addEventListener('click', () => {
-    const view = asView(b.dataset.view ?? null);
+    const view = viewOf(b.dataset.view);
     if (view === 'urgent' && state.view !== 'urgent') state.urgentRepo = '';
     setView(view);
   }));
