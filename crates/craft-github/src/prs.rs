@@ -1281,6 +1281,7 @@ pub fn parse_light(v: &Value) -> Option<Light> {
     Some(Light {
         id: v["id"].as_str()?.to_string(),
         number: v["number"].as_u64()?,
+        url: string(&v["url"]),
         title: string(&v["title"]),
         author: login(&v["author"]),
         author_bot: bot(&v["author"]),
@@ -1544,7 +1545,7 @@ query($owner: String!, $name: String!, $after: String) {
     defaultBranchRef { target { ... on Commit { id oid statusCheckRollup { state contexts(first: 100) { pageInfo { hasNextPage endCursor } nodes { __typename ... on CheckRun { name conclusion } ... on StatusContext { context state } } } } } } }
     pullRequests(states: OPEN, first: 100, after: $after, orderBy: {field: CREATED_AT, direction: ASC}) {
       totalCount pageInfo { hasNextPage endCursor }
-      nodes { id number title author { __typename login } updatedAt isDraft headRefOid mergeable mergeStateStatus maintainerCanModify
+      nodes { id number url title author { __typename login } updatedAt isDraft headRefOid mergeable mergeStateStatus maintainerCanModify
         comments { totalCount } reviews { totalCount }
         commits(last: 1) { nodes { commit { statusCheckRollup { state } checkSuites(first: 8) { nodes { status conclusion createdAt app { slug } } } } } } }
     }
@@ -1687,6 +1688,21 @@ mod tests {
             pr_updated_at: Some(t(updated)),
             read_at: t("2026-10-17T11:55:00Z"),
         }
+    }
+
+    #[test]
+    fn light_sweep_records_have_usable_links_before_deep_fetch() {
+        let now = t("2026-10-05T00:00:00Z");
+        let node = json!({"id": "PR_42", "number": 42, "url": "https://github.com/o/r/pull/42"});
+        let light = parse_light(&node).unwrap();
+        let stub = PrRecord::from_light(&light, now);
+        assert_eq!(stub.url, "https://github.com/o/r/pull/42");
+        let mut cached = PrRecord {
+            number: 42,
+            ..Default::default()
+        };
+        cached.apply_light(&light, now);
+        assert_eq!(cached.url, "https://github.com/o/r/pull/42");
     }
 
     #[test]
