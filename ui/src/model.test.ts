@@ -73,6 +73,12 @@ test('PR backlog is open PRs per unreleased commit, never NaN', () => {
   assert.equal(names(sortEntries(rows, 'pr_backlog', 'desc')), 'bac');
   assert.equal(totals(rows).pr_backlog, 7 / 8, 'the ratio of the known rows\' totals');
   assert.deepEqual([0.333, 2.54, 12.4, 0].map(formatRatio), ['0.33', '2.5', '12', '0']);
+  assert.deepEqual([1 / 300, 0.00001, 0.0099].map(formatRatio), ['<0.01', '<0.01', '<0.01']);
+});
+
+test('the backlog total stays unavailable without any comparable rows', () => {
+  assert.equal(totals([entry('a', { open_prs: 9, since_build: null })]).pr_backlog, undefined);
+  assert.equal(totals([]).pr_backlog, undefined);
 });
 
 test('the build download rate is downloads over the time out when they were counted', () => {

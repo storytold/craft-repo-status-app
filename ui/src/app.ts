@@ -257,7 +257,12 @@ export function start(api: Api, prRoute?: Route): () => void {
     }
     const t = totals(shown, state.window);
     const noTotal = (c: Column): boolean => (c.kind !== 'num' && c.kind !== 'ratio') || (c.allTimeOnly === true && state.window !== ALL_TIME);
-    const total = (c: Column): string => (noTotal(c) ? '' : c.kind === 'ratio' ? formatRatio(t[c.key] ?? 0) : num(Math.round(t[c.key] ?? 0)));
+    const total = (c: Column): string => {
+      if (noTotal(c)) return '';
+      const n = t[c.key];
+      if (c.kind === 'ratio') return n === undefined ? '' : formatRatio(n);
+      return num(Math.round(n ?? 0));
+    };
     $('tfoot').replaceChildren(el('tr', {}, COLUMNS.map((c, i) =>
       el('td', { class: groupStart(i) }, i === 0 ? `${shown.length} repos` : total(c)))));
   }
