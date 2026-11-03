@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  sortEntries, manualOrder, orderedEntries, nextSort, dropIndex, MANUAL, versionKey, freshness, isStale, ago, compact, formatRate, buildRate, tokenStatus,
+  sortEntries, manualOrder, orderedEntries, nextSort, dropIndex, MANUAL, versionKey, freshness, isStale, ago, compact, formatRate, buildRate, tokenStatus, prBacklog, formatRatio,
   totals, isRefreshing, isThirdParty, isRepoHidden, toggleKind, reorderVisible, defaultDir, value, windowById, WINDOWS, COLUMNS, COLUMN,
 } from './model.ts';
 import type { Activity, RepoEntry, RepoStats, UrgentIssue } from './model.ts';
@@ -59,6 +59,23 @@ test('commits since the build read through to since_build', () => {
   assert.equal(names(sortEntries(lagged, 'commits_since_build', 'desc')), 'bacd');
   assert.equal(value(lagged[2]!, 'commits_since_build'), null);
   assert.equal(totals(lagged).commits_since_build, 43);
+});
+
+test('PR backlog is open PRs per unreleased commit, never NaN', () => {
+  assert.equal(prBacklog(6, 3), 2);
+  assert.equal(prBacklog(4, 0), 4, 'nothing unreleased: the PR count');
+  assert.equal(prBacklog(0, 0), 0);
+  const rows = [
+    entry('a', { open_prs: 2, since_build: { commits: 8, basis: 'exact', from_sha: 'x' } }),
+    entry('b', { open_prs: 5, since_build: { commits: 0, basis: 'exact', from_sha: 'x' } }),
+    entry('c', { open_prs: 9, since_build: null }),
+  ];
+  assert.equal(value(rows[0]!, 'pr_backlog'), 0.25);
+  assert.equal(value(rows[1]!, 'pr_backlog'), 5);
+  assert.equal(value(rows[2]!, 'pr_backlog'), null, 'unknown without a release comparison');
+  assert.equal(names(sortEntries(rows, 'pr_backlog', 'desc')), 'bac');
+  assert.equal(totals(rows).pr_backlog, 7 / 8, 'the ratio of the known rows\' totals');
+  assert.deepEqual([0.333, 2.54, 12.4, 0].map(formatRatio), ['0.33', '2.5', '12', '0']);
 });
 
 test('the build download rate is downloads over the time out when they were counted', () => {
