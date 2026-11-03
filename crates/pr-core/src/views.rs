@@ -204,7 +204,11 @@ pub struct IssueRow {
 
 /// The issues `pr` names in its title or says it closes.
 fn issues_of(pr: &Pr, repo: &str) -> Vec<u64> {
-    let mut out = issues_in_title(&pr.title);
+    let mut out: Vec<u64> = issues_in_title(&pr.title, repo)
+        .into_iter()
+        .filter(|(r, _)| r.eq_ignore_ascii_case(repo))
+        .map(|(_, n)| n)
+        .collect();
     if let Some(d) = &pr.detail {
         out.extend(
             d.linked_issues
@@ -1013,7 +1017,7 @@ mod tests {
         let (mut s, repos) = store();
         let facts = with_issues(&mut s, &repos);
         let pr = s.repo_mut(&repos[0]).prs.get_mut(&1).unwrap();
-        pr.title = "Repair linked issues".into();
+        pr.title = "Repair other/repo#701".into();
         pr.detail.as_mut().unwrap().linked_issues = serde_json::from_value(serde_json::json!([
             { "number": 701, "title": "Elsewhere", "repository": "other/repo" },
             { "number": 700, "title": "Here", "repository": "O/R" },

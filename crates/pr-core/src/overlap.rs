@@ -70,13 +70,27 @@ impl Links {
     }
 }
 
-/// Issue numbers named as `#123` in a title.
-pub(crate) fn issues_in_title(title: &str) -> Vec<u64> {
+/// Issue references in a title, with unqualified numbers scoped to `repo`.
+pub(crate) fn issues_in_title(title: &str, repo: &str) -> Vec<(String, u64)> {
     let mut out = vec![];
-    for part in title.split('#').skip(1) {
+    for (hash, _) in title.match_indices('#') {
+        let prefix = title[..hash]
+            .rsplit(|c: char| !c.is_ascii_alphanumeric() && !matches!(c, '_' | '-' | '.' | '/'))
+            .next()
+            .unwrap_or("");
+        let issue_repo = if prefix.contains('/') {
+            let mut parts = prefix.split('/');
+            match (parts.next(), parts.next(), parts.next()) {
+                (Some(owner), Some(name), None) if !owner.is_empty() && !name.is_empty() => prefix,
+                _ => continue,
+            }
+        } else {
+            repo
+        };
+        let part = &title[hash + 1..];
         let digits: String = part.chars().take_while(char::is_ascii_digit).collect();
         if let Ok(n) = digits.parse::<u64>() {
-            out.push(n);
+            out.push((issue_repo.to_ascii_lowercase(), n));
         }
     }
     out
@@ -138,10 +152,7 @@ fn pairs_sharing<'a>(
 fn link_by_issue(repo: &str, prs: &[&Pr], links: &mut Links) -> HashMap<u64, String> {
     let mut by_issue: BTreeMap<(String, u64), Vec<u64>> = BTreeMap::new();
     for p in prs {
-        let mut issues: Vec<(String, u64)> = issues_in_title(&p.title)
-            .into_iter()
-            .map(|n| (repo.to_ascii_lowercase(), n))
-            .collect();
+        let mut issues = issues_in_title(&p.title, repo);
         if let Some(d) = &p.detail {
             issues.extend(
                 d.linked_issues
@@ -398,6 +409,28 @@ mod tests {
         assert_eq!(g.len(), 1);
         assert_eq!(g[0].numbers, [2, 3]);
         assert_eq!(g[0].title, "Same issue: other/repo#42");
+        assert!(groups(&[pr(1, "Local #42", &[]), pr(2, "Foreign other/repo#42", &[])]).is_empty());
+        let g = groups(&[pr(1, "Foreign other/repo#42", &[]), linked(2, "OTHER/REPO")]);
+        assert_eq!(g.len(), 1);
+        assert_eq!(g[0].numbers, [1, 2]);
+    }
+
+    #[test]
+    fn title_issue_references_keep_their_repository() {
+        assert_eq!(
+            issues_in_title("Fix (#42), OTHER/repo#42 and O/R#7; café (#8)", "o/r"),
+            [
+                ("o/r".into(), 42),
+                ("other/repo".into(), 42),
+                ("o/r".into(), 7),
+                ("o/r".into(), 8)
+            ]
+        );
+        assert!(issues_in_title(
+            "Malformed a/b/c#42, o/#7 and #999999999999999999999999",
+            "o/r"
+        )
+        .is_empty());
     }
 
     #[test]
