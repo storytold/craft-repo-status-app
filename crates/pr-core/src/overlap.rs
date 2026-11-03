@@ -78,7 +78,14 @@ pub(crate) fn issues_in_title(title: &str, repo: &str) -> Vec<(String, u64)> {
             .rsplit(|c: char| !c.is_ascii_alphanumeric() && !matches!(c, '_' | '-' | '.' | '/'))
             .next()
             .unwrap_or("");
-        let issue_repo = if prefix.contains('/') {
+        let compact = title[..hash].rsplit_once('#').is_some_and(|(_, previous)| {
+            previous
+                .strip_suffix('/')
+                .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
+        });
+        let issue_repo = if compact {
+            repo
+        } else if prefix.contains('/') {
             let mut parts = prefix.split('/');
             match (parts.next(), parts.next(), parts.next()) {
                 (Some(owner), Some(name), None) if !owner.is_empty() && !name.is_empty() => prefix,
@@ -416,6 +423,18 @@ mod tests {
         let mut stale = linked(3, "other/repo");
         stale.head_oid = "new".into();
         assert!(groups(&[linked(2, "other/repo"), stale]).is_empty());
+    }
+
+    #[test]
+    fn compact_title_lists_keep_adjacent_issue_references() {
+        assert_eq!(
+            issues_in_title("Fix #42/#43/#44", "o/r"),
+            [("o/r".into(), 42), ("o/r".into(), 43), ("o/r".into(), 44)]
+        );
+        assert_eq!(
+            issues_in_title("Fix OTHER/repo#42/#43", "o/r"),
+            [("other/repo".into(), 42), ("o/r".into(), 43)]
+        );
     }
 
     #[test]
