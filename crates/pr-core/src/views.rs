@@ -309,6 +309,9 @@ impl<'a> Ctx<'a> {
                 .collect(),
             fixes_by_issue: HashMap::new(),
         };
+        if facts.repos.is_empty() {
+            return ctx;
+        }
         let mut ranked: HashMap<(String, u64), Vec<(i32, FixRef)>> = HashMap::new();
         for data in repos.iter().filter_map(|r| store.repos.get(r)) {
             for pr in data.prs.values() {
