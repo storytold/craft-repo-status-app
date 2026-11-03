@@ -1,0 +1,11 @@
+[package]
+name = "craft-mcp"
+description = "Read-only MCP server over Craft Status's cache"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+craft-core = { path = "../craft-core" }
+serde_json.workspace = true
+chrono.workspace = true
