@@ -155,9 +155,10 @@ export const windowById = (id: string): ActivityWindow =>
 /**
  * `age` is a timestamp shown and sorted by how long ago it was: ascending puts
  * the newest first. `rate` is a number per second: it sorts like `num`, whatever
- * unit it displays in, but has no footer total.
+ * unit it displays in, but has no footer total. `ratio` sorts like `num` too, and
+ * its footer is the ratio of the totals, not their sum.
  */
-export type Kind = 'text' | 'num' | 'rate' | 'date' | 'age' | 'version';
+export type Kind = 'text' | 'num' | 'rate' | 'ratio' | 'date' | 'age' | 'version';
 export type Value = string | number | null;
 
 export interface Column {
@@ -196,6 +197,33 @@ export function buildRate(entry: RepoEntry): number | null {
   return secs > 0 ? s.latest_build_downloads / secs : null;
 }
 
+/** The function returns commits on main since the latest build, or `null` when the count is unknown. */
+const unreleased = (e: RepoEntry): number | null => e.stats?.since_build?.commits ?? null;
+
+/**
+ * The function returns open PRs per unreleased commit. When no commits are unreleased, it
+ * returns the open PR count.
+ */
+export function prBacklog(openPrs: number, unreleasedCommits: number): number {
+  return unreleasedCommits > 0 ? openPrs / unreleasedCommits : openPrs;
+}
+
+/** The function returns `prBacklog` for a row, or `null` when either count is unknown. */
+export function backlog(entry: RepoEntry): number | null {
+  const prs = entry.stats?.open_prs;
+  const commits = unreleased(entry);
+  return typeof prs === 'number' && commits !== null ? prBacklog(prs, commits) : null;
+}
+
+/** Positive ratios below 0.01 display as `<0.01`; other ratios use at most two decimal places. */
+export function formatRatio(v: number): string {
+  if (v > 0 && v < 0.01) return '<0.01';
+  if (v >= 10) return String(Math.round(v));
+  return String(Number(v.toFixed(v >= 1 ? 1 : 2)));
+}
+
+export const PIPELINE = 'Pipeline';
+
 export const COLUMNS: readonly Column[] = [
   { key: 'name', label: 'Repo', kind: 'text', group: '', get: (e) => e.repo.split('/').pop() ?? e.repo },
   { key: 'fetched', label: 'Fetched', kind: 'age', group: '', title: 'Time since this repo’s data was last fetched in full (failed polls keep the older time)', get: (e) => e.fetched_at ?? null },
@@ -204,7 +232,8 @@ export const COLUMNS: readonly Column[] = [
   { key: 'latest_build_at', label: 'Built', kind: 'date', group: 'Downloads', title: 'When the most recent release was published' },
   { key: 'latest_build_rate', label: 'Build DL Rate', kind: 'rate', group: 'Downloads', title: 'Build DLs divided by how long the most recent release had been out when they were counted', get: buildRate },
   { key: 'latest_build_downloads', label: 'Build DLs', kind: 'num', group: 'Downloads', title: 'Downloads of the most recent release, all OSes and package types (checksums and update deltas excluded)' },
-  { key: 'commits_since_build', label: 'Unreleased', kind: 'num', group: 'Downloads', title: 'Commits on main since the most recent release (~ means estimated: the release’s commit isn’t on main)', get: (e) => e.stats?.since_build?.commits ?? null },
+  { key: 'commits_since_build', label: 'Unreleased', kind: 'num', group: PIPELINE, title: 'Commits on main since the most recent release (~ means estimated: the release’s commit isn’t on main)', get: unreleased },
+  { key: 'pr_backlog', label: 'PR Backlog', kind: 'ratio', group: PIPELINE, title: 'Open PRs per unreleased commit: high means work is piling up in PRs instead of reaching a release (with nothing unreleased, the open PR count)', get: backlog },
   { key: 'urgency', label: 'Urgency', kind: 'num', group: 'Fix first', title: 'Sum of the top five open-issue urgency scores' },
   { key: 'critical_issues', label: 'Critical', kind: 'num', group: 'Fix first', title: 'Open issues that mention a crash, hang, freeze, data loss, launch failure or security problem' },
   { key: 'open_prs', label: 'PRs', kind: 'num', group: 'Open', title: 'Open pull requests' },
@@ -443,6 +472,14 @@ export function totals(entries: readonly RepoEntry[], window: string = DEFAULT_W
   for (const c of COLUMNS) {
     if (c.kind !== 'num') continue;
     out[c.key] = entries.reduce((sum, e) => sum + Number(value(e, c.key, window) ?? 0), 0);
+  }
+  // The table's backlog: every known row's open PRs over its unreleased commits.
+  const known = entries.filter((e) => backlog(e) !== null);
+  if (known.length) {
+    out.pr_backlog = prBacklog(
+      known.reduce((sum, e) => sum + (e.stats?.open_prs ?? 0), 0),
+      known.reduce((sum, e) => sum + (unreleased(e) ?? 0), 0),
+    );
   }
   return out;
 }
