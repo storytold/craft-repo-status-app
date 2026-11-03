@@ -17,7 +17,7 @@
 //! its own would. People data never goes into the [`Snapshot`]; the window
 //! reads it with [`get_people`], [`person_detail`] and [`repo_detail`].
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc, Condvar, Mutex};
@@ -97,6 +97,8 @@ pub struct AppState {
     people: Mutex<Option<Arc<PeopleView>>>,
     /// The credits and events behind the rankings, for the carets' tables.
     rankings: Mutex<Option<Arc<Rankings>>>,
+    /// This cache stores one filtered People view and its rankings.
+    scoped_people: Mutex<Option<ScopedPeople>>,
     /// Keeps the People thread's requests out of the poll thread's fetches.
     gate: Arc<Gate>,
     /// The People thread's jobs.
@@ -109,6 +111,14 @@ pub struct AppState {
     show_on_ready: AtomicBool,
     shrink_check_pending: AtomicBool,
     last_rebuild: Mutex<Option<Instant>>,
+}
+
+#[derive(Clone)]
+struct ScopedPeople {
+    source: Arc<PeopleView>,
+    repos: Vec<String>,
+    view: Arc<PeopleView>,
+    rankings: Arc<Rankings>,
 }
 
 struct TrayItems {
@@ -162,21 +172,39 @@ fn get_snapshot(state: State<AppState>) -> Snapshot {
 }
 
 /// The People tab's view, or `null` before the records are read.
-#[tauri::command]
-fn get_people(state: State<AppState>) -> Option<PeopleView> {
+/// `repos` limits the view to the requested watched repositories when it is present.
+#[tauri::command(async)]
+fn get_people(
+    app: AppHandle,
+    state: State<AppState>,
+    repos: Option<Vec<String>>,
+) -> Option<PeopleView> {
+    if let Some(repos) = repos {
+        return read_scoped_people(&app, &repos).map(|scope| scope.view.as_ref().clone());
+    }
     state.people.lock().unwrap().as_deref().cloned()
 }
 
 /// Where `login`'s work went in window `window`: by repository, area, type
 /// and directory, in `repo` alone when it is given; `null` before the
 /// records are read.
-#[tauri::command]
+/// `repos` limits combined figures to the requested watched repositories.
+#[tauri::command(async)]
 fn person_detail(
+    app: AppHandle,
     state: State<AppState>,
     login: String,
     window: String,
     repo: Option<String>,
+    repos: Option<Vec<String>>,
 ) -> Option<PersonDetail> {
+    if let Some(repos) = repos {
+        return Some(read_scoped_people(&app, &repos)?.rankings.person(
+            &login,
+            &window,
+            repo.as_deref(),
+        ));
+    }
     let rankings = state.rankings.lock().unwrap().clone()?;
     Some(rankings.person(&login, &window, repo.as_deref()))
 }
@@ -968,6 +996,23 @@ fn publish_people(
     dir: &Path,
     now: DateTime<Utc>,
 ) -> Directory {
+    let (view, people, rankings) = build_people(app, caches, cfg, roster, dir, now);
+    let state = app.state::<AppState>();
+    let view = Arc::new(view);
+    *state.people.lock().unwrap() = Some(view.clone());
+    *state.rankings.lock().unwrap() = Some(Arc::new(rankings));
+    let _ = app.emit(EV_PEOPLE, &*view);
+    people
+}
+
+fn build_people(
+    app: &AppHandle,
+    caches: &mut [(String, PrCache)],
+    cfg: &Config,
+    roster: &[RosterRow],
+    dir: &Path,
+    now: DateTime<Utc>,
+) -> (PeopleView, Directory, Rankings) {
     let state = app.state::<AppState>();
     let builds: HashMap<String, DateTime<Utc>> = {
         let snap = state.snapshot.lock().unwrap();
@@ -990,19 +1035,60 @@ fn publish_people(
             )
         })
         .collect();
-    let (view, people, rankings) = assemble(
+    assemble(
         caches,
         &cfg.people,
         roster,
         |repo| builds.get(&repo.to_ascii_lowercase()).copied(),
         &direct,
         now,
-    );
-    let view = Arc::new(view);
-    *state.people.lock().unwrap() = Some(view.clone());
-    *state.rankings.lock().unwrap() = Some(Arc::new(rankings));
-    let _ = app.emit(EV_PEOPLE, &*view);
-    people
+    )
+}
+
+fn scoped_repos(
+    review: &pr_core::Config,
+    configured: &[String],
+    requested: &[String],
+) -> Vec<String> {
+    let requested: HashSet<_> = requested.iter().map(|r| r.to_ascii_lowercase()).collect();
+    review
+        .watched(configured)
+        .into_iter()
+        .filter(|r| requested.contains(&r.to_ascii_lowercase()))
+        .collect()
+}
+
+fn read_scoped_people(app: &AppHandle, requested: &[String]) -> Option<ScopedPeople> {
+    let state = app.state::<AppState>();
+    let source = state.people.lock().unwrap().clone()?;
+    let cfg = state.config.lock().unwrap().clone();
+    let review = app.state::<PrReview>().config.lock().unwrap().clone();
+    let repos = scoped_repos(&review, &cfg.repos, requested);
+    if let Some(kept) = state
+        .scoped_people
+        .lock()
+        .unwrap()
+        .as_ref()
+        .filter(|kept| Arc::ptr_eq(&kept.source, &source) && kept.repos == repos)
+    {
+        return Some(kept.clone());
+    }
+    let dir = state.cache.as_ref()?.dir();
+    let now = source.generated_at.unwrap_or_else(Utc::now);
+    let roster = roster::load_kept(&cfg.people.roster, dir, now);
+    let mut caches: Vec<_> = repos
+        .iter()
+        .map(|r| (r.clone(), PrCache::load(dir, r)))
+        .collect();
+    let (view, _, rankings) = build_people(app, &mut caches, &cfg, &roster.rows, dir, now);
+    let scope = ScopedPeople {
+        source,
+        repos,
+        view: Arc::new(view),
+        rankings: Arc::new(rankings),
+    };
+    *state.scoped_people.lock().unwrap() = Some(scope.clone());
+    Some(scope)
 }
 
 /// A repo's commits outside pull requests: the commits on its default
@@ -1426,6 +1512,7 @@ pub fn run() {
         window_dirty: AtomicBool::new(false),
         people: Mutex::new(None),
         rankings: Mutex::new(None),
+        scoped_people: Mutex::new(None),
         gate: Arc::new(Gate::new()),
         people_work: Arc::new(PeopleWork::default()),
         rebuilding: AtomicBool::new(false),
@@ -1542,6 +1629,37 @@ pub fn run() {
 mod tests {
     use super::*;
     use chrono::Duration as CDuration;
+
+    #[test]
+    fn people_scope_only_reads_requested_watched_repositories() {
+        let review = pr_core::Config {
+            first_party_owners: vec!["first".into()],
+            exclude_repos: vec!["first/excluded".into()],
+            ..Default::default()
+        };
+        let configured = vec![
+            "first/app".into(),
+            "first/assets".into(),
+            "third/app".into(),
+            "first/excluded".into(),
+        ];
+        let requested = vec![
+            "FIRST/APP".into(),
+            "first/app".into(),
+            "third/app".into(),
+            "first/excluded".into(),
+            "unknown/app".into(),
+        ];
+        assert_eq!(
+            scoped_repos(&review, &configured, &requested),
+            ["first/app"]
+        );
+        assert!(scoped_repos(&review, &configured, &[]).is_empty());
+        assert_eq!(
+            scoped_repos(&review, &configured, &configured),
+            ["first/app", "first/assets"]
+        );
+    }
 
     fn snap_with(ages_mins: &[i64], now: DateTime<Utc>) -> Snapshot {
         let mut s = Snapshot {

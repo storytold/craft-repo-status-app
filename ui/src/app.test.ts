@@ -1171,6 +1171,122 @@ test('hiding everything says why, and saved toggles apply from the start', async
   assert.match(h.doc.getElementById('tbody')!.textContent!, /hidden by the toggles/);
 });
 
+test('People kind filters request exact combined figures and remove hidden repositories', async () => {
+  const full = people();
+  full.people[0]!.flow['7d']!['*'] = pflow({ merged: 9, closed_total: 9, median_merge_secs: 10800 });
+  const scoped = structuredClone(full);
+  scoped.items = scoped.items.filter((i) => i.repo === 'o/alpha');
+  scoped.people[0]!.flow['7d']!['*'] = pflow({ merged: 3, closed_total: 3, median_merge_secs: 3600 });
+  scoped.rankings[0]!.windows['7d']!.merged = 1;
+  const h = await setup({
+    snap: snapshot([repo('alpha', {}, { category: 'app' }), repo('beta', {}, { category: 'assets' })]),
+    storage: { view: 'people', peopleWindow: '7d' },
+    host: (cmd, args) => cmd === 'get_people' ? (Array.isArray(args?.repos) ? scoped : full) : undefined,
+  });
+  assert.match(personCell(h, 'ann-example', 1).textContent!, /^3(?: |$)/);
+  assert.equal(personCell(h, 'ann-example', 5).textContent, '9');
+  const toggle = h.doc.querySelector<HTMLElement>('[data-kind="assets"]')!;
+  toggle.click();
+  await tick();
+  assert.deepEqual(h.calls.filter((c) => c.cmd === 'get_people').at(-1)!.args?.repos, ['o/alpha']);
+  const picker = h.doc.getElementById('people-repo') as HTMLSelectElement;
+  assert.deepEqual([...picker.options].map((o) => o.value), ['', 'o/alpha']);
+  assert.match(personCell(h, 'ann-example', 1).textContent!, /^2(?: |$)/);
+  assert.equal(personCell(h, 'ann-example', 5).textContent, '3');
+  assert.equal(personCell(h, 'ann-example', 8).textContent, '1h');
+  assert.ok(!personRows(h).includes('bo-example'));
+  const reads = h.calls.filter((c) => c.cmd === 'get_people').length;
+  h.emit('craft:people', full);
+  assert.equal(personCell(h, 'ann-example', 5).textContent, '3');
+  await tick();
+  assert.equal(h.calls.filter((c) => c.cmd === 'get_people').length, reads + 1);
+  assert.equal(personCell(h, 'ann-example', 5).textContent, '3');
+  h.doc.querySelector<HTMLElement>('[data-pmode="rankings"]')!.click();
+  assert.equal(rankCell(h, 'ann-example', 'Merged').textContent, '1');
+  h.doc.querySelector<HTMLElement>('[data-pmode="work"]')!.click();
+  toggle.click();
+  await tick();
+  assert.match(personCell(h, 'ann-example', 1).textContent!, /^3(?: |$)/);
+  assert.equal(personCell(h, 'ann-example', 5).textContent, '9');
+});
+
+test('People ignores a scoped response after the hidden kind is restored', async () => {
+  const full = people();
+  const scoped = structuredClone(full);
+  scoped.people[0]!.flow['7d']!['*'] = pflow({ merged: 77 });
+  let release: (v: PeopleView) => void = () => {};
+  const h = await setup({
+    snap: snapshot([repo('alpha', {}, { category: 'app' }), repo('beta', {}, { category: 'assets' })]),
+    storage: { view: 'people', peopleWindow: '7d' },
+    host: (cmd, args) => cmd === 'get_people'
+      ? (Array.isArray(args?.repos) ? new Promise<PeopleView>((resolve) => { release = resolve; }) : full)
+      : undefined,
+  });
+  const toggle = h.doc.querySelector<HTMLElement>('[data-kind="assets"]')!;
+  toggle.click();
+  await tick();
+  assert.match(h.doc.getElementById('people-main')!.textContent!, /Loading people/);
+  toggle.click();
+  await tick();
+  assert.equal(personCell(h, 'ann-example', 5).textContent, '2');
+  release(scoped);
+  await tick();
+  assert.equal(personCell(h, 'ann-example', 5).textContent, '2');
+  const picker = h.doc.getElementById('people-repo') as HTMLSelectElement;
+  assert.deepEqual([...picker.options].map((o) => o.value), ['', 'o/alpha', 'o/beta']);
+});
+
+test('People applies saved kind filters before its first data request', async () => {
+  const scoped = people();
+  scoped.items = scoped.items.filter((i) => i.repo === 'o/alpha');
+  const h = await setup({
+    snap: snapshot([repo('alpha', {}, { category: 'app' }), repo('beta', {}, { category: 'assets' })]),
+    storage: { view: 'people', peopleWindow: '7d', hiddenKinds: ['assets'] },
+    host: (cmd, args) => cmd === 'get_people'
+      ? (Array.isArray(args?.repos) && args.repos.length === 0
+        ? { ...scoped, items: [], people: [], rankings: [], repos: {}, main: {}, checked: {} } : scoped)
+      : undefined,
+  });
+  assert.ok(h.calls.filter((c) => c.cmd === 'get_people').length > 0);
+  for (const call of h.calls.filter((c) => c.cmd === 'get_people')) assert.deepEqual(call.args?.repos, ['o/alpha']);
+  assert.ok(!personRows(h).includes('bo-example'));
+  const picker = h.doc.getElementById('people-repo') as HTMLSelectElement;
+  assert.deepEqual([...picker.options].map((o) => o.value), ['', 'o/alpha']);
+  h.doc.querySelector<HTMLElement>('[data-kind="app"]')!.click();
+  await tick();
+  assert.deepEqual(h.calls.filter((c) => c.cmd === 'get_people').at(-1)!.args?.repos, []);
+  assert.deepEqual(personRows(h), []);
+  assert.deepEqual([...picker.options].map((o) => o.value), ['']);
+});
+
+test('People clears detail figures from the previous repository scope', async () => {
+  const full = people();
+  const scoped = structuredClone(full);
+  scoped.items = scoped.items.filter((i) => i.repo === 'o/alpha');
+  let release: (v: PersonDetail) => void = () => {};
+  const h = await setup({
+    snap: snapshot([repo('alpha', {}, { category: 'app' }), repo('beta', {}, { category: 'assets' })]),
+    storage: { view: 'people', peopleWindow: '7d' },
+    host: (cmd, args) => {
+      if (cmd === 'get_people') return Array.isArray(args?.repos) ? scoped : full;
+      if (cmd === 'person_detail') return Array.isArray(args?.repos)
+        ? new Promise<PersonDetail>((resolve) => { release = resolve; }) : annDetail('7d');
+      return undefined;
+    },
+  });
+  caret(h, 'ann-example').click();
+  await tick();
+  assert.ok(h.doc.querySelector('#people-main .work-tables'));
+  h.doc.querySelector<HTMLElement>('[data-kind="assets"]')!.click();
+  await tick();
+  assert.equal(h.doc.querySelector('#people-main .work-tables'), null);
+  assert.match(h.doc.getElementById('people-main')!.textContent!, /Loading where their work went/);
+  assert.deepEqual(h.calls.filter((c) => c.cmd === 'person_detail').at(-1)!.args?.repos, ['o/alpha']);
+  release(annDetail('7d'));
+  await tick();
+  assert.ok(h.doc.querySelector('#people-main .work-tables'));
+});
+
 test('Total DLs sits with the activity columns and only counts under All time', async () => {
   const i = COLUMNS.findIndex((c) => c.key === 'downloads_total');
   assert.equal(COLUMNS[i]!.group, RECENT);

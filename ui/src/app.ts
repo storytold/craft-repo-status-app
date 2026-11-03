@@ -517,6 +517,43 @@ export function start(api: Api, prRoute?: Route): () => void {
   let peoplePickerRepos: string | null = null;
   /** Set when the People tab has to be drawn again at the next render. */
   let peopleRedraw = true;
+  let peopleScopeKey: string | undefined;
+  let peopleRequest = 0;
+  let peopleLoading = false;
+
+  function refreshPeopleScope(force = false): void {
+    if (state.hiddenKinds.length && !state.snap) return;
+    const repos = state.hiddenKinds.length ? shownRepos(state.snap!).map((r) => r.repo) : undefined;
+    const key = repos ? JSON.stringify(repos.map((r) => r.toLowerCase())) : '*';
+    if (!force && key === peopleScopeKey) return;
+    const changed = key !== peopleScopeKey;
+    peopleLoading = repos !== undefined || peopleScopeKey !== undefined;
+    peopleScopeKey = key;
+    const request = ++peopleRequest;
+    if (changed) {
+      state.people = null;
+      personDetails.clear();
+      repoDetails.clear();
+      generation += 1;
+      renderPeopleBadge();
+      redrawPeople();
+    }
+    api.invoke<PeopleView | null>('get_people', repos ? { repos } : {})
+      .then((v) => {
+        if (request !== peopleRequest) return;
+        state.people = v;
+        peopleLoading = false;
+        newPeopleView();
+        renderPeopleBadge();
+        redrawPeople();
+      })
+      .catch((e: unknown) => {
+        console.warn(e);
+        if (request !== peopleRequest) return;
+        peopleLoading = false;
+        redrawPeople();
+      });
+  }
 
   /** Draws the People tab again, and the open carets of the Repos table. */
   function redrawPeople(): void {
@@ -699,7 +736,10 @@ export function start(api: Api, prRoute?: Route): () => void {
 
   /** `key`'s tables in `window`, in `repo` alone when it is not ''. */
   const personDetailOf = (key: string, window: string, repo: string) =>
-    ask<PersonDetail>(personDetails, 'person_detail', `${key}|${window}|${repo}`, { login: key, window, ...(repo ? { repo } : {}) });
+    ask<PersonDetail>(personDetails, 'person_detail', `${key}|${window}|${repo}`, {
+      login: key, window, ...(repo ? { repo } : {}),
+      ...(state.hiddenKinds.length && state.snap ? { repos: shownRepos(state.snap).map((r) => r.repo) } : {}),
+    });
   const repoDetailOf = (repo: string, window: string) =>
     ask<RepoPeople>(repoDetails, 'repo_detail', `${repo}|${window}`, { repo, window });
 
@@ -951,7 +991,7 @@ export function start(api: Api, prRoute?: Route): () => void {
     const win = $<HTMLSelectElement>('people-window');
     if (!win.options.length) win.append(...WINDOWS.map((w) => el('option', { value: w.id }, w.label)));
     if (win.value !== state.peopleWindow) win.value = state.peopleWindow;
-    const repos = snap.repos.map((r) => r.repo);
+    const repos = shownRepos(snap).map((r) => r.repo);
     const sel = $<HTMLSelectElement>('people-repo');
     if (repos.join('\n') !== peoplePickerRepos) {
       sel.replaceChildren(el('option', { value: '' }, 'All repositories'), ...repos.map((r) => el('option', { value: r }, shortName(r))));
@@ -1004,7 +1044,7 @@ export function start(api: Api, prRoute?: Route): () => void {
     const focused = (document.activeElement as HTMLElement | null)?.dataset?.focus;
     if (!v) {
       matches.textContent = '';
-      $('people-main').replaceChildren(el('p', { class: 'empty' }, NO_RECORDS));
+      $('people-main').replaceChildren(el('p', { class: 'empty' }, peopleLoading ? 'Loading people…' : NO_RECORDS));
       return;
     }
     if (state.peopleMode === 'rankings') {
@@ -1108,7 +1148,7 @@ export function start(api: Api, prRoute?: Route): () => void {
     const shown = pane.hidden;
     pane.hidden = false;
     renderPeopleAge(snap);
-    if (shown || peopleRedraw || snap.repos.map((r) => r.repo).join('\n') !== peoplePickerRepos) {
+    if (shown || peopleRedraw || shownRepos(snap).map((r) => r.repo).join('\n') !== peoplePickerRepos) {
       peopleRedraw = false;
       renderPeople(snap);
     }
@@ -1354,6 +1394,7 @@ export function start(api: Api, prRoute?: Route): () => void {
       save('hiddenKinds', state.hiddenKinds);
       renderKinds();
       prs.setHiddenKinds(state.hiddenKinds);
+      refreshPeopleScope();
       render();
     },
   }, k.label));
@@ -1434,19 +1475,20 @@ export function start(api: Api, prRoute?: Route): () => void {
     }
   });
   api.listen<PeopleView>('craft:people', (v) => {
+    if (state.hiddenKinds.length) {
+      refreshPeopleScope(true);
+      return;
+    }
+    peopleScopeKey = '*';
+    peopleRequest += 1;
+    peopleLoading = false;
     state.people = v;
     // The carets' tables come from the same records: open ones ask again.
     newPeopleView();
     renderPeopleBadge();
     redrawPeople();
   });
-  api.invoke<PeopleView | null>('get_people').then((v) => {
-    // A view the event sent first is as new; the browser build answers null.
-    if (!v || state.people) return;
-    state.people = v;
-    renderPeopleBadge();
-    redrawPeople();
-  }).catch((e: unknown) => console.warn(e));
+  refreshPeopleScope();
   document.addEventListener('keydown', (e) => {
     const mod = e.metaKey || e.ctrlKey;
     if (state.view === 'prs' && prs.key(e)) e.preventDefault();
@@ -1457,7 +1499,7 @@ export function start(api: Api, prRoute?: Route): () => void {
     else if (mod && e.key === '4') { e.preventDefault(); setView('people'); }
   });
 
-  api.listen<Snapshot>('craft:snapshot', (s) => { state.snap = s; render(); });
+  api.listen<Snapshot>('craft:snapshot', (s) => { state.snap = s; refreshPeopleScope(); render(); });
   api.listen<Meta>('craft:meta', applyMeta);
   // Relative times and staleness change with the clock alone.
   const clockTimer = setInterval(render, 15_000);
@@ -1467,6 +1509,7 @@ export function start(api: Api, prRoute?: Route): () => void {
     try {
       applyMeta(await api.invoke<Meta>('get_meta'));
       state.snap = await api.invoke<Snapshot>('get_snapshot');
+      refreshPeopleScope();
       render();
     } catch (e) {
       console.error(e);
