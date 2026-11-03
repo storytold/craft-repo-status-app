@@ -1,22 +1,22 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  PR_COLUMNS, REPO_COLUMNS, STATE_LABEL, STATUS_HELP, ago, claudeLine, compact, filterCounts, matchesQuery, nextSort, sorted, relatedTitle, statePill, totals, visibleRows,
+  ISSUE_STAGES, PR_COLUMNS, REPO_COLUMNS, STATE_LABEL, issuesByStage, STATUS_HELP, ago, claudeLine, compact, filterCounts, matchesQuery, nextSort, sorted, relatedTitle, statePill, totals, visibleRows,
 } from './pr-model.ts';
-import type { ClaudeStatus, PrRow, RepoRow, Status } from './pr-model.ts';
+import type { ClaudeStatus, IssueRow, IssueStage, PrRow, RepoRow, Status } from './pr-model.ts';
 
 export const pr = (o: Partial<PrRow> = {}): PrRow => ({
   repo: 'o/a', number: 1, title: 'Change', url: 'https://github.com/o/a/pull/1', author: 'ann', avatar: '', tier: 'regular',
   landed_total: 0, approved_by: [], approved: false, approval_stale: false, conflicted: false, is_draft: false, additions: 1, deletions: 1, changed_files: 1, labels: [], mergeable: 'MERGEABLE',
   comments_total: 0, reactions: 0, state: 'promising', ease: 'easy', quality: 80, high_quality: true, inspected: true,
   ci: 'success', rabbit_flags: 0, rabbit_nits: 0, security_flags: 0, security_nits: 0, sensitive: 0, interesting: false, summary: '',
-  analysed: false, related: [], focus: 100, ...o,
+  analysed: false, related: [], focus: 100, fixes: [], ...o,
 });
 
 const repoRow = (o: Partial<RepoRow> = {}): RepoRow => ({
   repo: 'o/a', open: 5, listed: true, inspected: 1, analysed: 0, approved: 0, landable: 0, promising: 0, reviewable: 1, ci_not_run: 0, checking: 0, not_inspected: 0, high_quality: 0, easy: 1, medium: 0, hard: 0,
   needs_work: 0, conflicted: 0, draft: 0, conflicts: 0, ci_failing: 0, rabbit_flagged: 0, rabbit_nits: 0, security: 0, security_nits: 0,
-  core: 0, frequent: 0, new: 0, bots: 0, interesting: 0, groups: 0, grouped_prs: 0, inaccessible: false, ...o,
+  core: 0, frequent: 0, new: 0, bots: 0, interesting: 0, groups: 0, grouped_prs: 0, critical_issues: 0, fix_ready: 0, no_fix: 0, inaccessible: false, ...o,
 });
 
 test('sorting reverses on a second click, starts text columns ascending and numbers descending', () => {
@@ -147,4 +147,21 @@ test('the Claude line reports spending and problems', () => {
   assert.equal(failed.bad, true);
   assert.equal(failed.title, 'Not logged in');
   assert.match(claudeLine({ ...claude, running: '12 PRs in o/a' }).text, /12 PRs in o\/a/);
+});
+
+test('issues group by what they need next, in that order, without empty groups', () => {
+  const issue = (number: number, stage: IssueStage): IssueRow => ({
+    repo: 'o/a', number, title: '', url: '', created_at: null, updated_at: null, comments: 0, reactions: 0, labels: [],
+    score: 0, critical: false, reasons: [], stage, fixes: [],
+  });
+  const rows = [issue(1, 'needs_info'), issue(2, 'no_fix'), issue(3, 'fix_ready'), issue(4, 'no_fix')];
+  const groups = issuesByStage(rows);
+  assert.deepEqual(groups.map((g) => g.id), ['fix_ready', 'no_fix', 'needs_info']);
+  assert.deepEqual(groups[1]!.rows.map((r) => r.number), [2, 4], 'keeping their order');
+  assert.equal(ISSUE_STAGES.length, 4);
+});
+
+test('the Fixes filter finds PRs naming an urgent issue', () => {
+  const fixing = pr({ number: 2, fixes: [{ number: 9, title: '', url: '', score: 50, critical: true }] });
+  assert.deepEqual(visibleRows([pr({ number: 1 }), fixing], 'fixes', '', false).map((r) => r.number), [2]);
 });
