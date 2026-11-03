@@ -102,6 +102,16 @@ impl Server {
             ));
         };
         let id = m.get("id").cloned();
+        if id
+            .as_ref()
+            .is_some_and(|id| !matches!(id, Value::String(_) | Value::Number(_) | Value::Null))
+        {
+            return Some(error(
+                Value::Null,
+                INVALID_REQUEST,
+                "Invalid request: id must be a string, number or null",
+            ));
+        }
         let Some(method) = m.get("method").and_then(Value::as_str) else {
             // A response from the client (`result` or `error`) needs no answer.
             if m.contains_key("result") || m.contains_key("error") {
@@ -435,6 +445,24 @@ mod tests {
         assert_eq!(code("[]"), INVALID_REQUEST, "an empty batch");
         assert_eq!(code("1"), INVALID_REQUEST);
         assert_eq!(code(r#"{"jsonrpc":"2.0","id":1}"#), INVALID_REQUEST);
+        for id in ["true", "{}", "[]"] {
+            let line = format!(r#"{{"jsonrpc":"2.0","id":{id},"method":"ping"}}"#);
+            let response: Value = serde_json::from_str(&s.handle_line(&line).unwrap()).unwrap();
+            assert_eq!(response["error"]["code"], INVALID_REQUEST);
+            assert_eq!(response["id"], Value::Null);
+        }
+        assert_eq!(
+            s.handle_line(r#"{"jsonrpc":"2.0","method":"ping"}"#),
+            None,
+            "a notification"
+        );
+        let null_id: Value = serde_json::from_str(
+            &s.handle_line(r#"{"jsonrpc":"2.0","id":null,"method":"ping"}"#)
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(null_id["id"], Value::Null);
+        assert_eq!(null_id["result"], json!({}));
         assert_eq!(
             code(r#"{"jsonrpc":"1.0","id":1,"method":"ping"}"#),
             INVALID_REQUEST

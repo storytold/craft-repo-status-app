@@ -558,6 +558,7 @@ fn step(app: &AppHandle, pacing: &mut Pacing) {
             eprintln!("could not share the backoff: {e}");
         }
     }
+    let mut manual = false;
     let due = {
         let mut snap = state.snapshot.lock().unwrap();
         snap.sync_repos(&cfg.repos);
@@ -579,10 +580,14 @@ fn step(app: &AppHandle, pacing: &mut Pacing) {
         // Rows refreshed by hand go first.
         let due = (!paused)
             .then(|| {
-                snap.take_requested().or_else(|| {
-                    snap.next_due(now, &schedule(pacing))
-                        .map(|e| e.repo.clone())
-                })
+                snap.take_requested()
+                    .inspect(|_| {
+                        manual = true;
+                    })
+                    .or_else(|| {
+                        snap.next_due(now, &schedule(pacing))
+                            .map(|e| e.repo.clone())
+                    })
             })
             .flatten();
         snap.refreshing = due.is_some();
@@ -594,6 +599,7 @@ fn step(app: &AppHandle, pacing: &mut Pacing) {
         let (session, result) =
             fetch_in_session(&state.gate, || fetch_into_snapshot(app, &cfg, repo));
         let fetched = result.is_ok();
+        let retry_manual = manual && matches!(&result, Err(GhError::RateLimited(_)));
         let now = Utc::now();
         let mut snap = state.snapshot.lock().unwrap();
         let (pause, error) = match result {
@@ -644,6 +650,9 @@ fn step(app: &AppHandle, pacing: &mut Pacing) {
         drop(session);
         snap.refreshing = false;
         snap.fetching = None;
+        if retry_manual {
+            snap.request(repo);
+        }
         // Keep a config error up until the file is fixed.
         if !snap
             .error
@@ -836,6 +845,14 @@ fn spawn_people(app: AppHandle) {
                 if job.fetch {
                     run_people(&app, &job, &mut runs);
                 } else {
+                    if let Some(cache) = &state.cache {
+                        let token = resolve_token(&job.cfg.github_token).ok();
+                        clear_viewer_for_token(
+                            cache.dir(),
+                            &mut runs.viewer,
+                            token.as_ref().map(|t| t.value.as_str()),
+                        );
+                    }
                     load_people(&app, &job.cfg, runs.viewer.login.as_deref());
                 }
             }
@@ -876,9 +893,12 @@ fn run_people(app: &AppHandle, job: &PeopleJob, runs: &mut PeopleRuns) {
                 interval,
                 &mut runs.viewer.login,
             );
-            keep_viewer(cache.dir(), runs.viewer.login.as_deref(), now);
+            keep_viewer(cache.dir(), runs.viewer.login.as_deref(), &token, now);
         }
-        Err(e) => eprintln!("people: {e}"),
+        Err(e) => {
+            clear_viewer_for_token(cache.dir(), &mut runs.viewer, None);
+            eprintln!("people: {e}");
+        }
     }
 }
 
@@ -891,19 +911,28 @@ fn viewer_for_token(
     token: &str,
     ask: impl FnOnce() -> Result<String, GhError>,
 ) {
-    if !viewer.token.is_empty() && viewer.token != token {
+    clear_viewer_for_token(dir, viewer, Some(token));
+    viewer.for_token(token, ask);
+}
+
+fn clear_viewer_for_token(dir: &Path, viewer: &mut Viewer, token: Option<&str>) {
+    let fingerprint = token.map(viewer::fingerprint);
+    if viewer::load(dir).is_some_and(|kept| kept.token_fingerprint != fingerprint) {
         if let Err(e) = viewer::forget(dir) {
             eprintln!("people: removing the earlier token's login: {e}");
         }
     }
-    viewer.for_token(token, ask);
+    if token.is_none_or(|token| viewer.token != token) {
+        viewer.token = token.unwrap_or_default().to_string();
+        viewer.login = None;
+    }
 }
 
 /// Keeps the token user's `login`, read at `now`, in `dir`'s `viewer.json`
-/// for `craft-mcp` ([`viewer::keep`]), and logs a failure.
-fn keep_viewer(dir: &Path, login: Option<&str>, now: DateTime<Utc>) {
+/// for `craft-mcp` ([`viewer::keep_for_token`]), and logs a failure.
+fn keep_viewer(dir: &Path, login: Option<&str>, token: &str, now: DateTime<Utc>) {
     if let Some(login) = login {
-        if let Err(e) = viewer::keep(dir, login, now) {
+        if let Err(e) = viewer::keep_for_token(dir, login, token, now) {
             eprintln!("people: keeping the token's login: {e}");
         }
     }
@@ -1631,10 +1660,10 @@ mod tests {
                 .parse::<DateTime<Utc>>()
                 .unwrap()
         };
-        keep_viewer(&dir, None, at(1));
+        keep_viewer(&dir, None, "t1", at(1));
         assert_eq!(viewer::load(&dir), None, "no login, no file");
-        keep_viewer(&dir, Some("Ann-Example"), at(2));
-        keep_viewer(&dir, Some("ann-example"), at(3));
+        keep_viewer(&dir, Some("Ann-Example"), "t1", at(2));
+        keep_viewer(&dir, Some("ann-example"), "t1", at(3));
         let kept = viewer::load(&dir).unwrap();
         assert_eq!(
             (kept.login.as_str(), kept.read_at),
@@ -1650,18 +1679,28 @@ mod tests {
             std::env::temp_dir().join(format!("craft-status-new-token-{}", std::process::id()));
         std::fs::remove_dir_all(&dir).ok();
         let at = "2026-10-18T01:00:00Z".parse::<DateTime<Utc>>().unwrap();
-        keep_viewer(&dir, Some("Ann-Example"), at);
+        keep_viewer(&dir, Some("Ann-Example"), "old-token", at);
         let mut v = Viewer::default();
+        clear_viewer_for_token(&dir, &mut v, Some("old-token"));
+        assert_eq!(
+            viewer::load(&dir).map(|k| k.login).as_deref(),
+            Some("Ann-Example")
+        );
         viewer_for_token(&dir, &mut v, "t1", || Err(GhError::Unauthorized));
         assert_eq!(
             viewer::load(&dir).map(|k| k.login).as_deref(),
-            Some("Ann-Example"),
-            "the first token read since launch keeps the file"
+            None,
+            "a new token clears the login even on the first read after launch"
         );
         viewer_for_token(&dir, &mut v, "t1", || Ok("Ann-Example".into()));
         viewer_for_token(&dir, &mut v, "t2", || Err(GhError::Unauthorized));
         assert_eq!(v.login, None);
         assert_eq!(viewer::load(&dir), None, "another token's user is not kept");
+        keep_viewer(&dir, Some("Bo-Example"), "t2", at);
+        v.login = Some("Bo-Example".into());
+        clear_viewer_for_token(&dir, &mut v, Some("t3"));
+        assert_eq!(v.login, None, "config reload clears the old login");
+        assert_eq!(viewer::load(&dir), None, "config reload clears the file");
         std::fs::remove_dir_all(&dir).ok();
     }
 

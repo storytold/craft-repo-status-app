@@ -497,6 +497,8 @@ test('the state breakdown groups items by who they wait on, with time in state a
 test('the badge counts held pull requests, and the tab says how much of the records it has read', () => {
   const v = peopleView();
   assert.equal(heldCount(v), 1);
+  assert.equal(heldCount({ ...v, items: [pitem('o/x', 1, 'ann-example', { state: 'author_stepped_back', also: ['held_for_owner'] })] }), 1);
+  assert.equal(heldCount({ ...v, items: [pitem('o/x', 1, 'ann-example', { state: 'changes_requested_by_maintainer', flags: ['also_held_for_owner'] })] }), 1);
   assert.equal(heldCount(null), 0);
   assert.equal(cachedText(v), '10 of 12 timelines read');
   assert.equal(cachedText({ ...v, fetched: 12, load: { merged: 30, total: 120, closed: 0, closed_total: null, done: false } }),

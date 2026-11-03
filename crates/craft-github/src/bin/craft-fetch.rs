@@ -164,6 +164,10 @@ fn main() {
     let mut args: Vec<String> = std::env::args().skip(1).collect();
     let snapshot_path = args.iter().position(|a| a == "--snapshot").map(|i| {
         args.remove(i);
+        if i >= args.len() || args[i].starts_with("--") {
+            eprintln!("--snapshot needs a file path");
+            std::process::exit(2);
+        }
         args.remove(i)
     });
     let people_only = args
@@ -172,7 +176,7 @@ fn main() {
         .map(|i| args.remove(i));
     let roster_source = args.iter().position(|a| a == "--roster").map(|i| {
         args.remove(i);
-        if i >= args.len() {
+        if i >= args.len() || args[i].starts_with("--") {
             eprintln!("--roster needs a URL or a file path");
             std::process::exit(2);
         }

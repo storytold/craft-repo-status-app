@@ -865,10 +865,13 @@ export const firstRole = (w: WorkState): RoleGroup => (w.state === NOT_READ_YET 
 /** Whether `item` waits on the person `key`: their own item that waits on the author, an item where they made the last maintainer request or comment, or a hold they own. */
 export const waitsOn = (item: Item, key: string): boolean => item.work.waits_for.includes(key);
 
-const held = (i: Item): boolean => i.work.state === 'held_for_owner' || i.work.flags.includes('also_held_for_owner');
+const held = (i: Item): boolean => i.work.state === 'held_for_owner'
+  || i.work.flags.includes('also_held_for_owner')
+  || i.work.also.includes('held_for_owner')
+  || Boolean(i.work.hold);
 
 /** The open pull requests held for the owner, which the tab's badge counts. */
-export const heldCount = (view: PeopleView | null | undefined): number => view?.items.filter((i) => i.work.hold).length ?? 0;
+export const heldCount = (view: PeopleView | null | undefined): number => view?.items.filter(held).length ?? 0;
 
 /** One person's figures for the table, for one window and one repo ('' for every repo). */
 export interface PersonFigures {
@@ -1407,7 +1410,7 @@ function toneOf(item: Item, login: string): Tone {
 }
 
 /** Whether `item` is held for the owner: its state, a request that also carries a hold, or a hold that an earlier rule outranked. */
-export const isHeld = (i: Item): boolean => held(i) || i.work.also.includes('held_for_owner');
+export const isHeld = held;
 
 /** Who `item` waits on, with "you" for `login`. */
 export function waitsText(item: Item, login: string): string {

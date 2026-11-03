@@ -541,8 +541,10 @@ pub struct MainChecks {
 
 impl PrCache {
     pub fn path(dir: &Path, repo: &str) -> PathBuf {
-        dir.join("prs")
-            .join(format!("{}.json", repo.replace('/', "@")))
+        dir.join("prs").join(format!(
+            "{}.json",
+            repo.to_ascii_lowercase().replace('/', "@")
+        ))
     }
 
     /// The records kept for `repo` under `dir`; empty if missing or corrupt.
@@ -550,7 +552,22 @@ impl PrCache {
     /// commit (see [`super::merger`]), so a file written by an earlier rule
     /// gets the current one.
     pub fn load(dir: &Path, repo: &str) -> PrCache {
-        let mut cache: PrCache = std::fs::read_to_string(Self::path(dir, repo))
+        let canonical = Self::path(dir, repo);
+        let legacy_name = format!("{}.json", repo.replace('/', "@"));
+        let mut cache: PrCache = std::fs::read_to_string(canonical)
+            .or_else(|_| {
+                let legacy = std::fs::read_dir(dir.join("prs")).ok().and_then(|entries| {
+                    entries.flatten().map(|entry| entry.path()).find(|path| {
+                        path.file_name()
+                            .and_then(|name| name.to_str())
+                            .is_some_and(|name| name.eq_ignore_ascii_case(&legacy_name))
+                    })
+                });
+                match legacy {
+                    Some(path) => std::fs::read_to_string(path),
+                    None => Err(std::io::Error::from(std::io::ErrorKind::NotFound)),
+                }
+            })
             .ok()
             .and_then(|t| serde_json::from_str(&t).ok())
             .unwrap_or_default();
@@ -868,6 +885,11 @@ mod tests {
         c.save(&dir, "o/r").unwrap();
         assert!(PrCache::path(&dir, "o/r").ends_with("prs/o@r.json"));
         assert_eq!(PrCache::load(&dir, "o/r"), c);
+        assert_eq!(PrCache::path(&dir, "O/R"), PrCache::path(&dir, "o/r"));
+        assert_eq!(PrCache::load(&dir, "O/R"), c);
+        let legacy = dir.join("prs").join("Old@Case.json");
+        std::fs::write(&legacy, serde_json::to_string(&c).unwrap()).unwrap();
+        assert_eq!(PrCache::load(&dir, "old/case"), c);
         assert_eq!(c.by_id_mut("PR_9").map(|r| r.number), Some(9));
         // A file written before records had contributions or derived values.
         let old = r#"{"records":{"3":{"id":"PR_3","number":3,"state":"OPEN"}}}"#;

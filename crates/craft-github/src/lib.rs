@@ -248,7 +248,7 @@ impl GitHub {
     /// [`gate::Permit`] for a background one, with the lease when the client
     /// has one ([`GitHub::with_lease`]).
     fn permit(&self) -> Result<(Option<gate::Permit<'_>>, Option<Lease>)> {
-        let started = std::time::Instant::now();
+        let mut waited = Duration::ZERO;
         loop {
             let permit = self.gate.as_deref().map(Gate::background).transpose()?;
             let Some((shared, patience)) = self.lease.as_ref().filter(|_| permit.is_some()) else {
@@ -258,10 +258,12 @@ impl GitHub {
                 return Ok((permit, Some(lease)));
             }
             drop(permit);
-            if started.elapsed() >= *patience {
+            if waited >= *patience {
                 return Err(Error::Halted("the GitHub lease is held".into()));
             }
-            std::thread::sleep(Duration::from_millis(500));
+            let interval = Duration::from_millis(500).min(*patience - waited);
+            std::thread::sleep(interval);
+            waited += interval;
         }
     }
 
@@ -1818,6 +1820,35 @@ mod tests {
         requests.recv_timeout(Duration::from_secs(5)).unwrap();
         assert!(shared.try_lease().is_some(), "the request let the lease go");
         assert_eq!(shared.budget().remaining, Some(1234), "for the PR poller");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn gate_wait_does_not_spend_lease_patience() {
+        let dir =
+            std::env::temp_dir().join(format!("craft-lease-gate-wait-{}", std::process::id()));
+        let shared = SharedCache::at(dir.clone());
+        let (api, requests) = stub(vec![ok_json(r#"{"data":{}}"#)]);
+        let gate = Arc::new(Gate::new());
+        let background = GitHub::with_api("t", api)
+            .unwrap()
+            .with_pacing(0.0)
+            .in_background(gate.clone())
+            .with_lease(shared.clone(), Duration::from_millis(200));
+        let other = shared.try_lease().expect("the lease is free");
+        let session = gate.poll_session();
+        let (started_tx, started) = std::sync::mpsc::channel();
+        let people = std::thread::spawn(move || {
+            started_tx.send(()).unwrap();
+            background.graphql_body("query { viewer { login } }", json!({}))
+        });
+        started.recv_timeout(Duration::from_secs(5)).unwrap();
+        std::thread::sleep(Duration::from_millis(300));
+        drop(session);
+        std::thread::sleep(Duration::from_millis(50));
+        drop(other);
+        people.join().unwrap().unwrap();
+        requests.recv_timeout(Duration::from_secs(5)).unwrap();
         std::fs::remove_dir_all(&dir).ok();
     }
 

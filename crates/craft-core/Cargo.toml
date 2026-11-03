@@ -13,3 +13,4 @@ dirs.workspace = true
 thiserror.workspace = true
 chrono.workspace = true
 regex.workspace = true
+ring = "0.17"

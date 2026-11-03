@@ -15,6 +15,16 @@ use crate::{atomic_write, Error, Result};
 pub struct KeptViewer {
     pub login: String,
     pub read_at: Option<Time>,
+    pub token_fingerprint: Option<String>,
+}
+
+/// Returns a SHA-256 fingerprint of the effective token.
+pub fn fingerprint(token: &str) -> String {
+    ring::digest::digest(&ring::digest::SHA256, token.as_bytes())
+        .as_ref()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
 }
 
 /// `dir/viewer.json`.
@@ -31,14 +41,31 @@ pub fn load(dir: &Path) -> Option<KeptViewer> {
 }
 
 /// Keeps `login`, read at `now`, unless the file already holds it in any
-/// letter case. Returns whether it wrote the file.
+/// letter case without a token fingerprint. Returns whether it wrote the file.
 pub fn keep(dir: &Path, login: &str, now: Time) -> Result<bool> {
-    if load(dir).is_some_and(|k| k.login.eq_ignore_ascii_case(login)) {
+    keep_with_fingerprint(dir, login, None, now)
+}
+
+/// Writes the login together with the effective token's fingerprint.
+pub fn keep_for_token(dir: &Path, login: &str, token: &str, now: Time) -> Result<bool> {
+    keep_with_fingerprint(dir, login, Some(fingerprint(token)), now)
+}
+
+fn keep_with_fingerprint(
+    dir: &Path,
+    login: &str,
+    token_fingerprint: Option<String>,
+    now: Time,
+) -> Result<bool> {
+    if load(dir).is_some_and(|k| {
+        k.login.eq_ignore_ascii_case(login) && k.token_fingerprint == token_fingerprint
+    }) {
         return Ok(false);
     }
     let kept = KeptViewer {
         login: login.to_string(),
         read_at: Some(now),
+        token_fingerprint,
     };
     atomic_write(&path(dir), &serde_json::to_string(&kept)?)?;
     Ok(true)
@@ -72,10 +99,18 @@ mod tests {
             Some(KeptViewer {
                 login: "Ann-Example".into(),
                 read_at: Some(t(1)),
+                token_fingerprint: None,
             })
         );
         assert!(keep(&dir, "Bo-Example", t(3)).unwrap());
         assert_eq!(load(&dir).map(|k| k.login).as_deref(), Some("Bo-Example"));
+        assert!(keep_for_token(&dir, "Bo-Example", "token-one", t(3)).unwrap());
+        assert!(!keep_for_token(&dir, "Bo-Example", "token-one", t(3)).unwrap());
+        assert!(keep_for_token(&dir, "Bo-Example", "token-two", t(3)).unwrap());
+        assert_eq!(
+            load(&dir).unwrap().token_fingerprint,
+            Some(fingerprint("token-two"))
+        );
         std::fs::write(path(&dir), "{not json").unwrap();
         assert_eq!(load(&dir), None);
         forget(&dir).unwrap();

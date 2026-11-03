@@ -1074,13 +1074,34 @@ export function start(api: Api, prRoute?: Route): () => void {
     const body = el('tbody');
     for (const r of rows) {
       body.append(el('tr', { class: classes('mine-row', r.needsMe && 'needs-me'), dataset: { key: `${r.item.repo}#${r.item.number}` } },
-        MINE_COLUMNS.map((c) => el('td', { class: c.text ? 'text' : '' }, mineCell(c.key, r, login, now)))));
+        MINE_COLUMNS.map((c) => el('td', { class: c.text ? 'text' : '', dataset: { column: c.key } }, mineCell(c.key, r, login, now)))));
     }
     if (!rows.length) {
       const text = state.mineNeedsOnly ? `Nothing by ${login} needs you right now.` : `No open pull requests by ${login} in the configured repos.`;
       body.append(el('tr', {}, el('td', { colspan: MINE_COLUMNS.length, class: 'empty' }, text)));
     }
     main.replaceChildren(el('table', { class: 'people-table', id: 'mine-table' }, el('thead', {}, head), body));
+  }
+
+  function refreshMineTimes(snap: Snapshot): void {
+    const login = myLogin(state.people);
+    if (!login) return;
+    const now = Date.now();
+    const rows = new Map(mine(snap.repos.map((r) => r.repo), state.mineNeedsOnly)
+      .map((r) => [`${r.item.repo}#${r.item.number}`, r]));
+    for (const row of document.querySelectorAll<HTMLTableRowElement>('#mine-table tr.mine-row')) {
+      const r = rows.get(row.dataset.key!);
+      if (!r) continue;
+      const cell = (key: string) => row.querySelector<HTMLElement>(`[data-column="${key}"] > span`);
+      const reply = cell('reply');
+      if (reply && r.reply) reply.title = replyTip(r.reply, now);
+      const held = cell('held');
+      if (held && r.held) held.title = heldTip(r.item, now);
+      const inState = cell('in_state');
+      if (inState) inState.textContent = durationText(mineValue(r, 'in_state', login, now) as number | null);
+      const age = cell('age');
+      if (age) age.textContent = ago(r.item.created_at, now);
+    }
   }
 
   /** Shows My PRs and draws it when it was hidden or something it shows changed. */
@@ -1093,6 +1114,8 @@ export function start(api: Api, prRoute?: Route): () => void {
       mineRedraw = false;
       mineDrawnFor = repos;
       renderMine(snap);
+    } else {
+      refreshMineTimes(snap);
     }
   }
 
