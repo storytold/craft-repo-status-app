@@ -2,7 +2,7 @@
 //! tables and everything about one PR. Computed on demand from the store, so the
 //! heuristics are always applied as currently written.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use craft_core::{category_of, needs_info, RepoCategory, UrgentIssue};
 use serde::{Deserialize, Serialize};
@@ -159,6 +159,7 @@ pub struct PrRow {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 #[serde(default)]
 pub struct FixesIssue {
+    pub repo: String,
     pub number: u64,
     pub title: String,
     pub url: String,
@@ -184,6 +185,7 @@ pub enum IssueStage {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 #[serde(default)]
 pub struct FixRef {
+    pub repo: String,
     pub number: u64,
     pub title: String,
     pub state: PrState,
@@ -203,18 +205,14 @@ pub struct IssueRow {
 }
 
 /// The issues `pr` names in its title or says it closes.
-fn issues_of(pr: &Pr, repo: &str) -> Vec<u64> {
-    let mut out: Vec<u64> = issues_in_title(&pr.title, repo)
-        .into_iter()
-        .filter(|(r, _)| r.eq_ignore_ascii_case(repo))
-        .map(|(_, n)| n)
-        .collect();
+fn issues_of(pr: &Pr, repo: &str) -> Vec<(String, u64)> {
+    let mut out = issues_in_title(&pr.title, repo);
     if let Some(d) = pr.current_detail() {
         out.extend(
             d.linked_issues
                 .iter()
-                .filter(|i| i.repository.eq_ignore_ascii_case(repo))
-                .map(|i| i.number),
+                .filter(|i| !i.repository.is_empty())
+                .map(|i| (i.repository.to_ascii_lowercase(), i.number)),
         );
     }
     out.sort_unstable();
@@ -295,11 +293,13 @@ struct Ctx<'a> {
     complete: bool,
     /// Per repo: each author's merged PRs. Counting per PR would be quadratic.
     here: HashMap<String, HashMap<String, u64>>,
+    reviewed: HashSet<String>,
+    fixes_by_issue: HashMap<(String, u64), Vec<FixRef>>,
 }
 
 impl<'a> Ctx<'a> {
     fn new(store: &Store, repos: &[String], cfg: &'a Config, facts: &'a StatusFacts) -> Self {
-        Ctx {
+        let mut ctx = Ctx {
             cfg,
             facts,
             totals: store.landed_totals(repos),
@@ -308,7 +308,41 @@ impl<'a> Ctx<'a> {
                 .iter()
                 .filter_map(|r| store.repos.get(r).map(|d| (r.clone(), landed_counts(d))))
                 .collect(),
+            reviewed: repos.iter().map(|r| r.to_ascii_lowercase()).collect(),
+            fixes_by_issue: HashMap::new(),
+        };
+        let mut ranked: HashMap<(String, u64), Vec<(i32, FixRef)>> = HashMap::new();
+        for data in repos.iter().filter_map(|r| store.repos.get(r)) {
+            for pr in data.prs.values() {
+                let references: Vec<_> = issues_of(pr, &data.repo)
+                    .into_iter()
+                    .filter(|issue| ctx.reviewed.contains(&issue.0))
+                    .collect();
+                if references.is_empty() {
+                    continue;
+                }
+                let (_, assessment) = ctx.judge(pr, data);
+                for issue in references {
+                    ranked.entry(issue).or_default().push((
+                        assessment.focus,
+                        FixRef {
+                            repo: data.repo.clone(),
+                            number: pr.number,
+                            title: pr.title.clone(),
+                            state: assessment.state,
+                        },
+                    ));
+                }
+            }
         }
+        for (issue, mut fixes) in ranked {
+            fixes.sort_by_key(|(focus, fix)| {
+                (std::cmp::Reverse(*focus), fix.repo.clone(), fix.number)
+            });
+            ctx.fixes_by_issue
+                .insert(issue, fixes.into_iter().map(|(_, fix)| fix).collect());
+        }
+        ctx
     }
 
     fn judge(&self, pr: &Pr, d: &RepoData) -> (AuthorInfo, Assessment) {
@@ -326,21 +360,34 @@ impl<'a> Ctx<'a> {
     }
 
     fn fixes(&self, pr: &Pr, repo: &str) -> Vec<FixesIssue> {
-        let Some(facts) = self.facts.repos.get(repo) else {
-            return vec![];
-        };
-        let names = issues_of(pr, repo);
-        facts
-            .urgent
-            .iter()
-            .filter(|u| names.contains(&u.number))
-            .map(|u| FixesIssue {
-                number: u.number,
-                title: u.title.clone(),
-                url: u.url.clone(),
-                score: u.score,
-                critical: u.critical,
+        issues_of(pr, repo)
+            .into_iter()
+            .filter(|(r, _)| self.reviewed.contains(r))
+            .filter_map(|(repo, number)| {
+                let (repo, facts) = self
+                    .facts
+                    .repos
+                    .iter()
+                    .find(|(r, _)| r.eq_ignore_ascii_case(&repo))?;
+                let u = facts.urgent.iter().find(|u| u.number == number)?;
+                Some(FixesIssue {
+                    repo: repo.clone(),
+                    number: u.number,
+                    title: u.title.clone(),
+                    url: u.url.clone(),
+                    score: u.score,
+                    critical: u.critical,
+                })
             })
+            .collect()
+    }
+
+    fn issue_states(&self, repo: &str, number: u64) -> Vec<PrState> {
+        self.fixes_by_issue
+            .get(&(repo.to_ascii_lowercase(), number))
+            .into_iter()
+            .flatten()
+            .map(|f| f.state)
             .collect()
     }
 
@@ -395,37 +442,19 @@ impl<'a> Ctx<'a> {
     }
 
     /// `repo`'s urgent issues, with the PRs that name them, if it's reviewed here.
-    fn issues(&self, store: &Store, repo: &str, reviewed: bool) -> Vec<IssueRow> {
+    fn issues(&self, repo: &str) -> Vec<IssueRow> {
         let Some(facts) = self.facts.repos.get(repo) else {
             return vec![];
         };
-        let data = store.repos.get(repo).filter(|_| reviewed);
-        let mut by_issue: HashMap<u64, Vec<&Pr>> = HashMap::new();
-        for pr in data.iter().flat_map(|d| d.prs.values()) {
-            for n in issues_of(pr, repo) {
-                by_issue.entry(n).or_default().push(pr);
-            }
-        }
         facts
             .urgent
             .iter()
             .map(|u| {
-                let mut fixes: Vec<(i32, FixRef)> = by_issue
-                    .get(&u.number)
-                    .into_iter()
-                    .flatten()
-                    .filter_map(|pr| {
-                        let (_, a) = self.judge(pr, data?);
-                        let fix = FixRef {
-                            number: pr.number,
-                            title: pr.title.clone(),
-                            state: a.state,
-                        };
-                        Some((a.focus, fix))
-                    })
-                    .collect();
-                fixes.sort_by_key(|(focus, _)| std::cmp::Reverse(*focus));
-                let fixes: Vec<FixRef> = fixes.into_iter().map(|(_, f)| f).collect();
+                let fixes = self
+                    .fixes_by_issue
+                    .get(&(repo.to_ascii_lowercase(), u.number))
+                    .cloned()
+                    .unwrap_or_default();
                 let states: Vec<PrState> = fixes.iter().map(|f| f.state).collect();
                 IssueRow {
                     repo: repo.to_string(),
@@ -455,12 +484,8 @@ impl<'a> Ctx<'a> {
             critical_issues: sib.map_or(0, |s| s.critical_issues),
             ..Default::default()
         };
-        let mut states: HashMap<u64, Vec<PrState>> = HashMap::new();
         for pr in d.prs.values() {
             let (author, a) = self.judge(pr, d);
-            for n in issues_of(pr, &d.repo) {
-                states.entry(n).or_default().push(a.state);
-            }
             r.inspected += a.inspected as u64;
             r.analysed += pr.analysis_is_current() as u64;
             r.approved += a.approved as u64;
@@ -508,8 +533,7 @@ impl<'a> Ctx<'a> {
             };
         }
         for u in sib.iter().flat_map(|s| &s.urgent) {
-            let names = states.get(&u.number).map_or(&[][..], Vec::as_slice);
-            match stage_of(u, names) {
+            match stage_of(u, &self.issue_states(&d.repo, u.number)) {
                 IssueStage::FixReady => r.fix_ready += 1,
                 IssueStage::NoFix => r.no_fix += 1,
                 _ => {}
@@ -534,8 +558,15 @@ pub fn overview(store: &Store, repos: &[String], cfg: &Config, sib: &StatusFacts
                     icon: s.and_then(|s| s.icon.clone()),
                     open_hint: s.and_then(|s| s.open_prs),
                     critical_issues: s.map_or(0, |s| s.critical_issues),
+                    fix_ready: ctx
+                        .issues(repo)
+                        .iter()
+                        .filter(|u| u.stage == IssueStage::FixReady)
+                        .count() as u64,
                     no_fix: s.map_or(0, |s| {
-                        let none = |u: &&UrgentIssue| stage_of(u, &[]) == IssueStage::NoFix;
+                        let none = |u: &&UrgentIssue| {
+                            stage_of(u, &ctx.issue_states(repo, u.number)) == IssueStage::NoFix
+                        };
                         s.urgent.iter().filter(none).count() as u64
                     }),
                     ..Default::default()
@@ -554,11 +585,7 @@ pub fn issues(
     sib: &StatusFacts,
 ) -> Vec<IssueRow> {
     let ctx = Ctx::new(store, reviewed, cfg, sib);
-    let mut rows: Vec<IssueRow> = sib
-        .repos
-        .keys()
-        .flat_map(|repo| ctx.issues(store, repo, reviewed.contains(repo)))
-        .collect();
+    let mut rows: Vec<IssueRow> = sib.repos.keys().flat_map(|repo| ctx.issues(repo)).collect();
     rows.sort_by(|a, b| {
         let score = b.issue.score.total_cmp(&a.issue.score);
         score.then(b.issue.created_at.cmp(&a.issue.created_at))
@@ -1037,6 +1064,77 @@ mod tests {
     }
 
     #[test]
+    fn fixes_from_other_reviewed_repositories_are_associated() {
+        let (mut s, mut repos) = store();
+        let facts = with_issues(&mut s, &repos);
+        let mut foreign = s.repo_mut(&repos[0]).prs[&1].clone();
+        foreign.title = "Repair O/R#701".into();
+        foreign.detail.as_mut().unwrap().linked_issues = vec![crate::model::LinkedIssue {
+            repository: "O/R".into(),
+            number: 700,
+            ..Default::default()
+        }];
+        s.repo_mut("o/other").prs.insert(1, foreign.clone());
+        s.repo_mut("third/party").prs.insert(1, foreign);
+        repos.push("o/other".into());
+        let cfg = Config::default();
+        let rows = issues(&s, &repos, &cfg, &facts);
+        let named = rows
+            .iter()
+            .find(|r| r.repo == "o/r" && r.issue.number == 701)
+            .unwrap();
+        assert_eq!(named.fixes.len(), 1);
+        assert_ne!(named.stage, IssueStage::NoFix);
+        let closed = rows
+            .iter()
+            .find(|r| r.repo == "o/r" && r.issue.number == 700)
+            .unwrap();
+        assert_eq!(closed.fixes.len(), 2);
+        assert_eq!(named.fixes[0].repo, "o/other");
+        assert!(closed.fixes.iter().any(|f| f.repo == "o/r"));
+        assert!(closed.fixes.iter().any(|f| f.repo == "o/other"));
+        let view = repo_view(&s, "o/other", &repos, &cfg, &facts).unwrap();
+        assert_eq!(
+            view.prs[0]
+                .fixes
+                .iter()
+                .map(|f| f.number)
+                .collect::<Vec<_>>(),
+            [700, 701]
+        );
+        assert_eq!(
+            repo_view(&s, "o/r", &repos, &cfg, &facts)
+                .unwrap()
+                .row
+                .no_fix,
+            0
+        );
+    }
+
+    #[test]
+    fn fixes_for_unlisted_reviewed_repositories_update_counts() {
+        let (mut s, repos) = store();
+        let mut facts = with_issues(&mut s, &repos);
+        facts.repos.insert(
+            "o/unlisted".into(),
+            StatusRepo {
+                urgent: vec![urgent(702, &[])],
+                ..Default::default()
+            },
+        );
+        s.repo_mut("o/r").prs.get_mut(&1).unwrap().title = "Repair O/UNLISTED#702".into();
+        let cfg = Config::default();
+        let row = overview(&s, &repos, &cfg, &facts)
+            .into_iter()
+            .find(|r| r.repo == "o/unlisted")
+            .unwrap();
+        assert!(!row.listed);
+        assert_eq!(row.fix_ready, 1);
+        assert_eq!(row.no_fix, 0);
+        assert!(!s.repos.contains_key("o/unlisted"));
+    }
+
+    #[test]
     fn stale_closing_references_do_not_classify_fixes() {
         let (mut s, repos) = store();
         let facts = with_issues(&mut s, &repos);
@@ -1047,7 +1145,10 @@ mod tests {
             number: 700,
             ..Default::default()
         }];
-        assert_eq!(issues_of(pr, &repos[0]), [700]);
+        assert_eq!(
+            issues_of(pr, &repos[0]),
+            [(repos[0].to_ascii_lowercase(), 700)]
+        );
         pr.absorb_listing(Pr {
             updated_at: Some(chrono::Utc::now()),
             ..pr.clone()

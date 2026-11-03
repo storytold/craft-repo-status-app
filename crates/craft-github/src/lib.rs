@@ -255,6 +255,11 @@ impl GitHub {
                 return Ok((permit, None));
             };
             if let Some(lease) = shared.try_lease() {
+                if let Some(until) = shared.budget().backoff(Utc::now()) {
+                    return Err(Error::Halted(format!(
+                        "GitHub requests are paused until {until}"
+                    )));
+                }
                 return Ok((permit, Some(lease)));
             }
             drop(permit);
@@ -1823,6 +1828,29 @@ mod tests {
         );
         drop(session);
         people.join().unwrap();
+    }
+
+    #[test]
+    fn a_background_request_honors_persisted_shared_backoff() {
+        let dir =
+            std::env::temp_dir().join(format!("craft-shared-backoff-bg-{}", std::process::id()));
+        let shared = SharedCache::at(dir.clone());
+        shared
+            .note_backoff(Utc::now() + chrono::Duration::minutes(5))
+            .unwrap();
+        let (api, requests) = stub(vec![ok_json(r#"{"data":{}}"#)]);
+        let background = GitHub::with_api("t", api)
+            .unwrap()
+            .with_pacing(0.0)
+            .in_background(Arc::new(Gate::new()))
+            .with_lease(shared.clone(), Duration::ZERO);
+        assert!(matches!(
+            background.graphql_body("query { viewer { login } }", json!({})),
+            Err(Error::Halted(_))
+        ));
+        assert!(requests.recv_timeout(Duration::from_millis(200)).is_err());
+        assert!(shared.try_lease().is_some());
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

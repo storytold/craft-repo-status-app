@@ -883,9 +883,15 @@ fn update_people(
 ) {
     let state = app.state::<AppState>();
     let started = Instant::now();
+    let repos = app
+        .state::<PrReview>()
+        .config
+        .lock()
+        .unwrap()
+        .watched(&cfg.repos);
     let (remaining, seen) = {
         let snap = state.snapshot.lock().unwrap().clone();
-        let seen = seen_by_fetches(&snap, &cfg.repos, dir);
+        let seen = seen_by_fetches(&snap, &repos, dir);
         (snap.rate_limit_remaining, seen)
     };
     let kept = roster::load_kept(&cfg.people.roster, dir, now);
@@ -901,7 +907,7 @@ fn update_people(
         }
     };
     let (report, mut caches) = gh.update_prs(&PrInput {
-        repos: &cfg.repos,
+        repos: &repos,
         seen: &seen,
         dir,
         now,
@@ -1020,8 +1026,13 @@ fn load_people(app: &AppHandle, cfg: &Config) {
     let state = app.state::<AppState>();
     let Some(cache) = &state.cache else { return };
     let dir = cache.dir();
-    let mut caches: Vec<(String, PrCache)> = cfg
-        .repos
+    let repos = app
+        .state::<PrReview>()
+        .config
+        .lock()
+        .unwrap()
+        .watched(&cfg.repos);
+    let mut caches: Vec<(String, PrCache)> = repos
         .iter()
         .map(|r| (r.clone(), PrCache::load(dir, r)))
         .collect();
