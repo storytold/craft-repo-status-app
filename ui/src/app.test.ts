@@ -590,6 +590,14 @@ test('All gaps drops a saved app filter for a repo no longer configured', async 
   assert.equal((stored(h, 'gapFilter') as { repo: string }).repo, '');
 });
 
+test('All gaps keeps a saved app filter while a kind toggle hides that app', async () => {
+  const snap = paritySnapshot();
+  snap.repos.find((e) => e.repo === 'o/gamma')!.category = 'library';
+  const h = await setup({ snap, storage: { view: 'parity', parityView: 'gaps', hiddenKinds: ['library'], gapFilter: { repo: 'o/gamma' } } });
+  assert.equal((stored(h, 'gapFilter') as { repo: string }).repo, 'o/gamma');
+  assert.equal(h.doc.querySelector<HTMLSelectElement>('#gap-repo')!.value, 'o/gamma', 'the dropdown still names the hidden app');
+});
+
 test('the Fetched column shows each repo’s data age and sorts by it, freshest first ascending', async () => {
   const ago = (s: number) => new Date(Date.now() - s * 1000).toISOString();
   const h = await setup({ snap: snapshot([

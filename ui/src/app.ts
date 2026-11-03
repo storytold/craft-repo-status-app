@@ -682,14 +682,17 @@ export function start(api: Api, prRoute?: Route): () => void {
       el('input', { type: 'search', id: 'gap-text', placeholder: 'Filter text', 'aria-label': 'Filter text', spellcheck: 'false',
         oninput: (ev: Event) => setFilter({ text: (ev.target as HTMLInputElement).value }) }));
     // A filter for a repo no longer configured is cleared; one whose report
-    // is not read yet keeps its option.
-    if (state.gapFilter.repo && !snap.repos.some((e) => e.repo === state.gapFilter.repo)) {
+    // is not read yet keeps its option, and one hidden by a kind toggle keeps
+    // its repo until the toggle is turned back on.
+    const configured = (state.snap ?? snap).repos;
+    if (state.gapFilter.repo && !configured.some((e) => e.repo === state.gapFilter.repo)) {
       state.gapFilter = { ...state.gapFilter, repo: '' };
       save('gapFilter', state.gapFilter);
     }
     const f = state.gapFilter;
     const repoSel = gapControls.querySelector<HTMLSelectElement>('#gap-repo')!;
     const repos = snap.repos.filter((e) => hasParity(e) || e.repo === f.repo).map((e) => e.repo);
+    if (f.repo && !repos.includes(f.repo)) repos.push(f.repo);
     if (repoSel.dataset.repos !== repos.join('\n')) {
       repoSel.replaceChildren(el('option', { value: '' }, 'All apps'), ...repos.map((r) => el('option', { value: r }, shortName(r))));
       repoSel.dataset.repos = repos.join('\n');
