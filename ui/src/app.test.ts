@@ -1133,6 +1133,8 @@ test('Downloads leads with the build, then its download columns', async () => {
   const h = await setup();
   const groups = [...h.doc.querySelectorAll('thead tr.groups th')].map((th) => th.textContent);
   assert.equal(groups.includes('Downloads'), true);
+  assert.equal(groups[groups.indexOf('Downloads') + 1], 'Pipeline', 'unreleased work sits right after Downloads');
+  assert.deepEqual(COLUMNS.filter((c) => c.group === 'Pipeline').map((c) => c.key), ['commits_since_build', 'pr_backlog']);
 });
 
 test('third-party repos stay on Downloads, tagged', async () => {
@@ -1189,6 +1191,23 @@ test('hiding everything says why, and saved toggles apply from the start', async
   assert.equal(h.doc.querySelector('[data-kind="third_party"]')!.getAttribute('aria-pressed'), 'false');
   assert.equal(h.doc.querySelector('tr[data-repo]'), null);
   assert.match(h.doc.getElementById('tbody')!.textContent!, /hidden by the toggles/);
+});
+
+test('the backlog displays positive tiny ratios and leaves an unavailable footer empty', async () => {
+  const i = COLUMNS.findIndex((c) => c.key === 'pr_backlog');
+  const h = await setup({ snap: snapshot([repo('alpha', { open_prs: 1, since_build: { commits: 300, basis: 'exact', from_sha: 'x' } })]) });
+  const cell = () => h.row('alpha').cells[i]!.textContent;
+  const foot = () => (h.doc.querySelector('#tfoot tr') as HTMLTableRowElement).cells[i]!.textContent;
+  assert.equal(cell(), '<0.01');
+  assert.equal(foot(), '<0.01');
+  h.emit('craft:snapshot', snapshot([repo('alpha', { open_prs: 1, since_build: null })]));
+  assert.equal(cell(), '—');
+  assert.equal(foot(), '');
+  h.emit('craft:snapshot', snapshot([]));
+  assert.equal(foot(), '');
+  h.emit('craft:snapshot', snapshot([repo('alpha', { open_prs: 0, since_build: { commits: 300, basis: 'exact', from_sha: 'x' } })]));
+  assert.equal(cell(), '0');
+  assert.equal(foot(), '0');
 });
 
 test('Total DLs sits with the activity columns and only counts under All time', async () => {
