@@ -42,6 +42,8 @@ pub const DEFAULT_REPOS: &[(&str, RepoCategory)] = &[
     ("storytold/cadcraft", RepoCategory::App),
     ("storytold/soundcraft", RepoCategory::App),
     ("storytold/figcraft", RepoCategory::App),
+    ("storytold/texturecraft", RepoCategory::App),
+    ("storytold/materialcraft", RepoCategory::App),
     ("storytold/craft-launcher", RepoCategory::App),
     ("storytold/craft-anything", RepoCategory::App),
     ("tangency-labs/solidcraft", RepoCategory::App),
@@ -79,6 +81,32 @@ pub struct Config {
     pub tray: TrayConfig,
     pub shortcuts: Shortcuts,
     pub people: PeopleConfig,
+    pub table_headings: TableHeadings,
+}
+
+/// Which way a table's column headings read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum HeadingDirection {
+    Horizontal,
+    Vertical,
+}
+
+/// How each tab's main table labels its columns.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct TableHeadings {
+    pub downloads: HeadingDirection,
+    pub prs: HeadingDirection,
+}
+
+impl Default for TableHeadings {
+    fn default() -> Self {
+        TableHeadings {
+            downloads: HeadingDirection::Horizontal,
+            prs: HeadingDirection::Vertical,
+        }
+    }
 }
 
 /// The `[people]` table: where the team roster comes from, and who owns and
@@ -243,6 +271,7 @@ impl Default for Config {
             tray: TrayConfig::default(),
             shortcuts: Shortcuts::default(),
             people: PeopleConfig::default(),
+            table_headings: TableHeadings::default(),
         }
     }
 }
@@ -431,6 +460,21 @@ mod tests {
         )
         .unwrap();
         assert_eq!(c.repos, vec!["storytold/photocraft", "a/b"]);
+    }
+
+    #[test]
+    fn table_headings_are_set_independently() {
+        let c = Config::parse("[table_headings]\ndownloads = \"vertical\"").unwrap();
+        assert_eq!(c.table_headings.downloads, HeadingDirection::Vertical);
+        assert_eq!(
+            c.table_headings.prs,
+            HeadingDirection::Vertical,
+            "its default"
+        );
+        let c = Config::parse("[table_headings]\nprs = \"horizontal\"").unwrap();
+        assert_eq!(c.table_headings.downloads, HeadingDirection::Horizontal);
+        assert_eq!(c.table_headings.prs, HeadingDirection::Horizontal);
+        assert!(Config::parse("[table_headings]\nprs = \"sideways\"").is_err());
     }
 
     #[test]

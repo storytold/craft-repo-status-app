@@ -115,7 +115,10 @@ export interface Meta {
   shortcut?: string;
   frequent_over?: number;
   high_quality?: number;
+  table_headings?: { downloads: HeadingDirection; prs: HeadingDirection };
 }
+
+export type HeadingDirection = 'horizontal' | 'vertical';
 
 // ───────────────────────────── windows ─────────────────────────────
 
@@ -443,26 +446,6 @@ export function totals(entries: readonly RepoEntry[], window: string = DEFAULT_W
   }
   return out;
 }
-
-export type RepoUrgentIssue = UrgentIssue & { repo: string };
-
-/** Every repo's urgent issues merged, best first. */
-export function urgentAcross(
-  entries: readonly RepoEntry[],
-  { repo = '', criticalOnly = false, limit = 60 }: { repo?: string; criticalOnly?: boolean; limit?: number } = {},
-): RepoUrgentIssue[] {
-  const all: RepoUrgentIssue[] = [];
-  for (const e of entries) {
-    if (repo && e.repo !== repo) continue;
-    for (const u of e.stats?.urgent ?? []) {
-      if (criticalOnly && !u.critical) continue;
-      all.push({ ...u, repo: e.repo });
-    }
-  }
-  all.sort((a, b) => b.score - a.score || Date.parse(b.created_at ?? '0') - Date.parse(a.created_at ?? '0'));
-  return all.slice(0, limit);
-}
-
 // ───────────────────────────── people tab ─────────────────────────────
 // The People tab's data: mirrors `PeopleView` and its parts in
 // crates/craft-core/src/people/view.rs, and `WorkState` in states.rs. It

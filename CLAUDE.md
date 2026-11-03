@@ -33,15 +33,15 @@
 ## Layout
 
 - `crates/craft-core`, `crates/craft-github`: the status poller's model, config, shared
-  cache and GitHub client. The Downloads and Fix first tabs.
+  cache and GitHub client. The Downloads tab, and the urgency scoring.
 - `crates/pr-core`: PR model, CodeRabbit parser, heuristics (`assess`), overlap
   detection, fetch schedule, disk store and the views the PR tab reads. No network.
 - `crates/pr-github`: PR list, roster, detail and diff fetching.
 - `crates/pr-claude`: the Claude CLI call, prompts, schemas and spending ledger.
 - `crates/craft-status-app`: the Tauri shell. `src/lib.rs` has the status poller,
   window and tray; `src/pr/` the PR tab's commands and two threads.
-- `ui/src/`: `app.ts` is the shell, Downloads and Fix first (logic in `model.ts`);
-  `pr-app.ts` the PR tab (logic in `pr-model.ts`); `dom.ts` what they share.
+- `ui/src/`: `app.ts` is the shell and Downloads (logic in `model.ts`); `pr-app.ts` the PR
+  tab, with the issue lists (logic in `pr-model.ts`); `dom.ts` what they share.
 
 ## PR review rules
 
@@ -51,8 +51,9 @@
   runs with no tools, MCP servers or settings (`pr_claude::cli_args`). Claude's
   opinion can make a PR look harder and mark it interesting, nothing else:
   the status and quality in `pr_core::assess` must never depend on it.
-- **Third parties aren't reviewed.** They stay on Downloads and Fix first, but
-  everything PR-side goes through `pr_core::Config::watched`, which drops them.
+- **Third parties aren't reviewed.** They stay on Downloads and show their
+  issues on the PR tab, but everything that fetches or grades PRs goes through
+  `pr_core::Config::watched`, which drops them.
 - **The status truth table has three copies:** `assess::headline` (tested row by
   row), `STATUS_HELP` in `ui/src/pr-model.ts` (the `?` panel) and the README. Change
   them together.

@@ -24,6 +24,7 @@ use std::sync::{mpsc, Arc, Condvar, Mutex};
 use std::time::{Duration, Instant, SystemTime};
 
 use chrono::{DateTime, Local, Timelike, Utc};
+use craft_core::config::TableHeadings;
 use craft_core::people::ledger::Ledger;
 use craft_core::people::rank::{direct, Direct, PersonDetail, Rankings, RepoPeople};
 use craft_core::people::record::PrCache;
@@ -126,6 +127,7 @@ struct Meta {
     shortcut: String,
     frequent_over: u64,
     high_quality: u8,
+    table_headings: TableHeadings,
 }
 
 fn meta(app: &AppHandle) -> Meta {
@@ -148,6 +150,7 @@ fn meta(app: &AppHandle) -> Meta {
         shortcut: cfg.shortcuts.toggle_window.clone(),
         frequent_over: pr_cfg.frequent_over,
         high_quality: pr_cfg.high_quality,
+        table_headings: cfg.table_headings,
     }
 }
 

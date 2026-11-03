@@ -43,3 +43,7 @@ export const classes = (...cs: (string | false | null | undefined)[]): string =>
 export const localTime = (iso: string | null | undefined): string =>
   (iso ? new Date(iso).toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' }) : '');
 export const DAY = 86400e3;
+
+/** A column heading's content: turned on its side if asked for, reading bottom to top. */
+export const headingLabel = (label: string, vertical: boolean): Child =>
+  (vertical ? el('span', { class: 'vertical-label' }, label) : label);
