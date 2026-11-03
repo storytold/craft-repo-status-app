@@ -544,6 +544,28 @@ test('an issue fix opens the PR in its actual repository', async () => {
   assert.deepEqual(h.calls.findLast((c) => c.cmd === 'get_pr'), { cmd: 'get_pr', args: { repo: 'o/alpha', number: 1 } });
 });
 
+test('Escape from a foreign fixing PR returns to the original repository Issues pane', async () => {
+  const h = await setup({ issues: [issue({
+    fixes: [{ repo: 'o/beta', number: 1, title: 'Foreign fix', state: 'promising' }],
+  })] }, { view: 'repo', repo: 'o/alpha' }, { ...FULL, repo: 'o/beta', related: [pr({ repo: 'o/gamma', number: 2 })] });
+  (h.$('[data-pane="issues"]') as HTMLElement).click();
+  (h.$('.issue-fix') as HTMLElement).click();
+  await tick();
+  assert.deepEqual(h.calls.findLast((c) => c.cmd === 'get_pr'), { cmd: 'get_pr', args: { repo: 'o/beta', number: 1 } });
+  h.key('Escape');
+  await tick();
+  assert.deepEqual(h.calls.findLast((c) => c.cmd === 'get_pr_repo'), { cmd: 'get_pr_repo', args: { repo: 'o/alpha' } });
+  assert.equal(h.$('[data-pane="issues"]')!.getAttribute('aria-pressed'), 'true');
+  assert.deepEqual(issueNumbers(h), [50]);
+  (h.$('.issue-fix') as HTMLElement).click();
+  await tick();
+  (h.$('[data-rel="2"]') as HTMLElement).click();
+  await tick();
+  h.key('Escape');
+  await tick();
+  assert.deepEqual(h.calls.findLast((c) => c.cmd === 'get_pr_repo'), { cmd: 'get_pr_repo', args: { repo: 'o/alpha' } });
+});
+
 test('foreign issue chips and cards show the repository', async () => {
   const fixes = [{ repo: 'o/beta', number: 50, title: 'Foreign issue', url: 'https://github.com/o/beta/issues/50', score: 60, critical: false }];
   const original = REPO.prs[0]!.fixes;

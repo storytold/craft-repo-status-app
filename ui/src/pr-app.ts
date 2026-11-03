@@ -22,7 +22,7 @@ export type Route =
   | { view: 'queue' }
   | { view: 'issues' }
   | { view: 'repo'; repo: string }
-  | { view: 'pr'; repo: string; number: number; from: PrOrigin };
+  | { view: 'pr'; repo: string; number: number; from: PrOrigin; fromRepo?: string };
 
 /** How the window's shell drives this tab. */
 export interface PrTab {
@@ -391,6 +391,12 @@ export function startPrs(api: Api, initial: Route = { view: 'apps' }): PrTab {
   // ───────────────────────────── navigation ─────────────────────────────
 
   function go(route: Route): void {
+    if (route.view === 'pr' && route.from === 'repo' && !route.fromRepo) {
+      const previous = state.route;
+      const fromRepo = previous.view === 'repo' ? previous.repo
+        : previous.view === 'pr' ? previous.fromRepo ?? previous.repo : route.repo;
+      route = { ...route, fromRepo };
+    }
     const sameRepo = state.route.view === 'repo' && route.view === 'pr';
     const backToRepo = state.route.view === 'pr' && route.view === 'repo';
     state.route = route;
@@ -414,7 +420,7 @@ export function startPrs(api: Api, initial: Route = { view: 'apps' }): PrTab {
   function back(): boolean {
     const r = state.route;
     if (r.view === 'pr') {
-      if (r.from === 'repo') go({ view: 'repo', repo: r.repo });
+      if (r.from === 'repo') go({ view: 'repo', repo: r.fromRepo ?? r.repo });
       else go({ view: r.from });
       return true;
     }
