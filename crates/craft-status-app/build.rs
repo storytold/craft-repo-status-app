@@ -25,7 +25,8 @@ fn build_ui() {
             root.display()
         );
     }
-    let status = Command::new("npm")
+    let npm = if cfg!(windows) { "npm.cmd" } else { "npm" };
+    let status = Command::new(npm)
         .args(["run", "--silent", "build"])
         .current_dir(&root)
         .status()
