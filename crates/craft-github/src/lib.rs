@@ -882,6 +882,11 @@ pub struct Probe {
     pub release_draft: bool,
     pub release_published_at: Option<DateTime<Utc>>,
     pub release_updated_at: Option<DateTime<Utc>>,
+    /// The tag of the most recently published release among the 20 newest by
+    /// creation date. A draft created after it can come first in that order,
+    /// so publishing an older draft changes only these two fields.
+    pub build_tag: Option<String>,
+    pub build_published_at: Option<DateTime<Utc>>,
 }
 
 impl RawActivity {
@@ -1209,6 +1214,13 @@ pub fn parse_probe(data: &Value, n: usize) -> Vec<Option<Probe>> {
                 return None;
             }
             let release = &r["releases"]["nodes"][0];
+            let build = r["releases"]["nodes"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter(|n| !n["isDraft"].as_bool().unwrap_or(false))
+                .filter_map(|n| time(&n["publishedAt"]).map(|at| (at, &n["tagName"])))
+                .max_by_key(|(at, _)| *at);
             Some(Probe {
                 head_oid: r["defaultBranchRef"]["target"]["oid"]
                     .as_str()
@@ -1222,6 +1234,8 @@ pub fn parse_probe(data: &Value, n: usize) -> Vec<Option<Probe>> {
                 release_draft: release["isDraft"].as_bool().unwrap_or(false),
                 release_published_at: time(&release["publishedAt"]),
                 release_updated_at: time(&release["updatedAt"]),
+                build_tag: build.and_then(|(_, tag)| tag.as_str().map(str::to_string)),
+                build_published_at: build.map(|(at, _)| at),
             })
         })
         .collect()
@@ -1324,7 +1338,7 @@ fragment P on Repository {
   lastIssue: issues(first: 1, orderBy: {field: UPDATED_AT, direction: DESC}) { nodes { updatedAt } }
   pullRequests { totalCount }
   lastPr: pullRequests(first: 1, orderBy: {field: UPDATED_AT, direction: DESC}) { nodes { updatedAt } }
-  releases(first: 1, orderBy: {field: CREATED_AT, direction: DESC}) {
+  releases(first: 20, orderBy: {field: CREATED_AT, direction: DESC}) {
     totalCount
     nodes { tagName publishedAt updatedAt isDraft }
   }
@@ -1775,7 +1789,7 @@ mod tests {
         assert!(q.contains("defaultBranchRef { target { oid } }"));
         assert!(q.contains("issues(first: 1, orderBy: {field: UPDATED_AT, direction: DESC})"));
         assert!(q.contains("pullRequests(first: 1, orderBy: {field: UPDATED_AT, direction: DESC})"));
-        assert!(q.contains("releases(first: 1, orderBy: {field: CREATED_AT, direction: DESC})"));
+        assert!(q.contains("releases(first: 20, orderBy: {field: CREATED_AT, direction: DESC})"));
         assert!(q.contains("rateLimit { cost remaining resetAt }"));
         assert!(!q.contains("search(") && !q.contains("pushedAt"));
     }
@@ -1790,8 +1804,10 @@ mod tests {
             "lastIssue": {"nodes": [{"updatedAt": "2026-10-08T02:00:00Z"}]},
             "pullRequests": {"totalCount": 40},
             "lastPr": {"nodes": [{"updatedAt": "2026-10-08T03:00:00Z"}]},
-            "releases": {"totalCount": 2, "nodes": [
-              {"tagName": "v1.1.0", "isDraft": true, "publishedAt": null, "updatedAt": "2026-10-08T00:30:00Z"}
+            "releases": {"totalCount": 3, "nodes": [
+              {"tagName": "v1.1.0", "isDraft": true, "publishedAt": null, "updatedAt": "2026-10-08T00:30:00Z"},
+              {"tagName": "v1.0.1", "isDraft": false, "publishedAt": "2026-10-07T00:00:00Z", "updatedAt": "2026-10-07T00:00:00Z"},
+              {"tagName": "v1.0.2", "isDraft": false, "publishedAt": "2026-10-07T12:00:00Z", "updatedAt": "2026-10-07T12:00:00Z"}
             ]}
           },
           "r1": null,
@@ -1811,17 +1827,46 @@ mod tests {
                 issue_updated_at: t("2026-10-08T02:00:00Z"),
                 prs: 40,
                 pr_updated_at: t("2026-10-08T03:00:00Z"),
-                releases: 2,
+                releases: 3,
                 release_tag: Some("v1.1.0".into()),
                 release_draft: true,
                 release_published_at: None,
                 release_updated_at: t("2026-10-08T00:30:00Z"),
+                build_tag: Some("v1.0.2".into()),
+                build_published_at: t("2026-10-07T12:00:00Z"),
             })
         );
         assert_eq!(probes[1], None);
         // An empty repository: no branch, no issues, no releases.
         assert_eq!(probes[2], Some(Probe::default()));
         assert_eq!(probes.len(), 3);
+    }
+
+    #[test]
+    fn publishing_an_older_draft_changes_the_probe() {
+        let payload = |older: Value| {
+            json!({
+              "r0": {
+                "defaultBranchRef": {"target": {"oid": "h1"}},
+                "issues": {"totalCount": 0}, "lastIssue": {"nodes": []},
+                "pullRequests": {"totalCount": 0}, "lastPr": {"nodes": []},
+                "releases": {"totalCount": 3, "nodes": [
+                  {"tagName": "v1.2.0", "isDraft": true, "publishedAt": null, "updatedAt": "2026-10-08T00:30:00Z"},
+                  older,
+                  {"tagName": "v1.0.0", "isDraft": false, "publishedAt": "2026-10-01T00:00:00Z", "updatedAt": "2026-10-01T00:00:00Z"}
+                ]}
+              }
+            })
+        };
+        let draft = json!({"tagName": "v1.1.0", "isDraft": true, "publishedAt": null, "updatedAt": "2026-10-07T00:00:00Z"});
+        let published = json!({"tagName": "v1.1.0", "isDraft": false, "publishedAt": "2026-10-08T01:00:00Z", "updatedAt": "2026-10-08T01:00:00Z"});
+        let before = parse_probe(&payload(draft), 1);
+        let after = parse_probe(&payload(published), 1);
+        assert_ne!(before, after);
+        assert_eq!(
+            after[0].as_ref().and_then(|p| p.build_tag.as_deref()),
+            Some("v1.1.0")
+        );
     }
 
     #[test]
