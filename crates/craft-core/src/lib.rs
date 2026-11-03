@@ -1,16 +1,18 @@
 //! What the Downloads and Fix first tabs know that isn't network or UI: the per-repo
 //! statistics model, release/download accounting, the urgency heuristic for
-//! open issues, the config file, the on-disk cache and window geometry.
+//! open issues, the pull request records and work states behind the People
+//! tab, the config file, the on-disk cache and window geometry.
 
 pub mod cache;
 pub mod config;
 pub mod model;
+pub mod people;
 pub mod releases;
 pub mod shared;
 pub mod urgency;
 
 pub use cache::Cache;
-pub use config::{category_of, Config, RepoCategory, WindowState};
+pub use config::{category_of, Config, PeopleConfig, RepoCategory, WindowState};
 pub use model::{
     Activity, RepoEntry, RepoStats, Schedule, Snapshot, TokenStatus, UrgentIssue, ALL_TIME,
     SINCE_RELEASE, WINDOWS,

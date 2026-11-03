@@ -341,8 +341,9 @@ pub fn score_issue(
     })
 }
 
-/// Returns the top `keep` issues (score > 0, best first, ties → newest), the
-/// repo urgency (sum of the top five scores) and the count of critical issues.
+/// The ranked list contains up to `keep` issues with positive scores or critical priority.
+/// Higher scores come first, followed by newer issues when scores tie.
+/// The other outputs are the sum of the top five scores and the total count of critical issues.
 pub fn rank_issues(
     issues: &[IssueInput],
     now: DateTime<Utc>,
@@ -371,7 +372,7 @@ pub fn rank_issues(
         })
         .collect();
     let critical = ranked.iter().filter(|u| u.critical).count() as u64;
-    ranked.retain(|u| u.score > 0.0);
+    ranked.retain(|u| u.score > 0.0 || u.critical);
     ranked.sort_by(|a, b| {
         b.score
             .total_cmp(&a.score)
@@ -531,5 +532,37 @@ mod tests {
         assert!(waiting.critical, "still critical if the report is right");
         assert!(needs_info(&["needs-info".to_string()]));
         assert!(!needs_info(&["bug".to_string()]));
+    }
+
+    #[test]
+    fn explicitly_critical_zero_score_issues_remain_ranked() {
+        let now = Utc::now();
+        for label in ["priority: critical", "priority:P0"] {
+            let critical = IssueInput {
+                number: 1,
+                title: "Add an option".into(),
+                labels: vec![label.into(), "enhancement".into()],
+                author_association: "MEMBER".into(),
+                created_at: Some(now - Duration::days(4)),
+                updated_at: Some(now - Duration::days(4)),
+                ..Default::default()
+            };
+            let scored = score_issue(&critical, now, None).unwrap();
+            assert!(scored.critical);
+            assert_eq!(scored.score, 0.0);
+            let plain = IssueInput {
+                number: 2,
+                labels: vec!["enhancement".into()],
+                ..critical.clone()
+            };
+            let (ranked, urgency, count) = rank_issues(&[critical, plain], now, None, 10);
+            assert_eq!(
+                ranked.iter().map(|i| i.number).collect::<Vec<_>>(),
+                [1],
+                "{label}"
+            );
+            assert_eq!(urgency, 0.0);
+            assert_eq!(count, 1);
+        }
     }
 }
