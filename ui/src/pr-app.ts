@@ -393,8 +393,9 @@ export function startPrs(api: Api, initial: Route = { view: 'apps' }): PrTab {
   function go(route: Route): void {
     if (route.view === 'pr' && route.from === 'repo' && !route.fromRepo) {
       const previous = state.route;
-      const fromRepo = previous.view === 'repo' ? previous.repo
-        : previous.view === 'pr' ? previous.fromRepo ?? previous.repo : route.repo;
+      let fromRepo = route.repo;
+      if (previous.view === 'repo') fromRepo = previous.repo;
+      else if (previous.view === 'pr') fromRepo = previous.fromRepo ?? previous.repo;
       route = { ...route, fromRepo };
     }
     const sameRepo = state.route.view === 'repo' && route.view === 'pr';
