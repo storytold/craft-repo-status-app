@@ -102,7 +102,18 @@ thead tr.groups th { top: 0; color: var(--muted); font-size: 10px; font-weight: 
 thead tr.groups th:not(:empty) { box-shadow: inset 0 -1px 0 var(--border); }
 thead tr.cols th { top: 0; color: var(--muted); font-weight: 600; cursor: pointer; user-select: none; -webkit-user-select: none; }
 thead tr.groups + tr.cols th { top: 21px; }
-#table thead th:first-child, #apps-table thead th:first-child { z-index: 3; }
+#table thead th:first-child { z-index: 3; }
+#apps-table thead th:first-child { z-index: 3; }
+table.vertical-headings td { padding-left: 6px; padding-right: 6px; }
+table.vertical-headings td:first-child { padding-left: 15px; }
+thead tr.cols th { vertical-align: bottom; }
+thead tr.cols th.vertical { padding: 4px 6px; }
+thead tr.cols th.sorted.vertical::after { content: none; }
+/* The arrow sits upright above the label, so it never turns with the text. */
+thead tr.cols th.sorted.vertical::before { content: '↓'; display: block; }
+thead tr.cols th.sorted.asc.vertical::before { content: '↑'; }
+/* Reads bottom to top, right-aligned over its numbers. */
+.vertical-label { display: inline-block; writing-mode: vertical-rl; transform: rotate(180deg); white-space: nowrap; }
 thead tr.cols th:hover { color: var(--fg); }
 thead tr.cols th.sorted { color: var(--accent); }
 thead tr.cols th.sorted::after { content: ' ↓'; }
@@ -157,13 +168,18 @@ tfoot td { color: var(--muted); font-weight: 600; border-bottom: 0; position: st
 .n-bad { color: var(--bad); font-weight: 600; }
 .n-warn { color: var(--warn); font-weight: 600; }
 
-/* ───── urgent view ───── */
-.urgent-controls { position: sticky; top: 0; z-index: 2; display: flex; align-items: center; gap: 12px; padding: 7px 15px; background: rgb(var(--bg)); border-bottom: 1px solid var(--border); }
-.urgent-controls select { border: 1px solid var(--border); background: var(--surface); border-radius: 6px; padding: 2px 6px; }
-.toggle { display: flex; gap: 5px; align-items: center; color: var(--muted); white-space: nowrap; }
+/* ───── issue lists ───── */
 .hint { color: var(--muted); font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .urgent-list { list-style: none; margin: 0; padding: 0; }
 .urgent-item { display: grid; grid-template-columns: 44px 112px 1fr auto; gap: 10px; align-items: baseline; padding: 7px 15px; border-bottom: 1px solid var(--border); cursor: pointer; }
+.urgent-list.one-repo .urgent-item { grid-template-columns: 44px 1fr auto; }
+.issue-stage .group-head { display: flex; align-items: baseline; gap: 6px; border-bottom: 1px solid var(--border); }
+.issue-fixes { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 4px; }
+.issue-fix { display: inline-flex; align-items: center; gap: 5px; border: 1px solid var(--border); background: none; color: var(--accent); border-radius: 10px; padding: 0 3px 0 7px; font-size: 11px; }
+.issue-fix:hover { border-color: var(--accent); }
+.pane-gap { width: 1px; height: 14px; margin: 0 4px; background: var(--border); }
+.chip.fixes { color: var(--accent); background: color-mix(in srgb, var(--accent) 12%, transparent); }
+.chip.fixes.crit { color: var(--bad); background: color-mix(in srgb, var(--bad) 12%, transparent); }
 .urgent-item:hover { background: var(--row-hover); }
 .score { font-weight: 700; text-align: center; border-radius: 4px; font-variant-numeric: tabular-nums; }
 .u-repo { display: flex; align-items: center; gap: 5px; color: var(--muted); font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
