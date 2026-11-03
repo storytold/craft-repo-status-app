@@ -22,7 +22,7 @@ export type Route =
   | { view: 'queue' }
   | { view: 'issues' }
   | { view: 'repo'; repo: string }
-  | { view: 'pr'; repo: string; number: number; from: PrOrigin };
+  | { view: 'pr'; repo: string; number: number; from: PrOrigin; fromRepo?: string };
 
 /** How the window's shell drives this tab. */
 export interface PrTab {
@@ -128,15 +128,19 @@ function approvers(r: PrRow): HTMLElement {
   return el('span', { class: 'n-good' }, names);
 }
 
-function fixesChip(f: FixesIssue): HTMLElement {
-  return el('span', { class: `chip fixes${f.critical ? ' crit' : ''}`, title: `Names an urgent issue: ${f.title}` }, `Fixes #${f.number}`);
+function issueNumber(f: { repo?: string; number: number }, repo: string): string {
+  return f.repo && f.repo.toLowerCase() !== repo.toLowerCase() ? `${f.repo}#${f.number}` : `#${f.number}`;
+}
+
+function fixesChip(f: FixesIssue, repo: string): HTMLElement {
+  return el('span', { class: `chip fixes${f.critical ? ' crit' : ''}`, title: `Names an urgent issue: ${f.title}` }, `Fixes ${issueNumber(f, repo)}`);
 }
 
 function titleCell(r: PrRow): HTMLElement {
   const chips: Node[] = [];
   if (r.interesting) chips.push(el('span', { class: 'chip star' }, '★ interesting'));
   chips.push(...flagChips(r, r.related));
-  for (const f of r.fixes.slice(0, 2)) chips.push(fixesChip(f));
+  for (const f of r.fixes.slice(0, 2)) chips.push(fixesChip(f, r.repo));
   for (const l of r.labels.slice(0, 3)) chips.push(el('span', { class: 'chip' }, l));
   return el('div', {},
     el('span', { class: 'pr-num' }, `#${r.number}`),
@@ -387,10 +391,18 @@ export function startPrs(api: Api, initial: Route = { view: 'apps' }): PrTab {
   // ───────────────────────────── navigation ─────────────────────────────
 
   function go(route: Route): void {
+    if (route.view === 'pr' && route.from === 'repo' && !route.fromRepo) {
+      const previous = state.route;
+      let fromRepo = route.repo;
+      if (previous.view === 'repo') fromRepo = previous.repo;
+      else if (previous.view === 'pr') fromRepo = previous.fromRepo ?? previous.repo;
+      route = { ...route, fromRepo };
+    }
     const sameRepo = state.route.view === 'repo' && route.view === 'pr';
     const backToRepo = state.route.view === 'pr' && route.view === 'repo';
+    const betweenPrs = state.route.view === 'pr' && route.view === 'pr';
     state.route = route;
-    if (!sameRepo && !backToRepo) {
+    if (!sameRepo && !backToRepo && !betweenPrs) {
       state.filter = 'all';
       state.query = '';
       state.limit = PAGE_SIZE;
@@ -410,7 +422,7 @@ export function startPrs(api: Api, initial: Route = { view: 'apps' }): PrTab {
   function back(): boolean {
     const r = state.route;
     if (r.view === 'pr') {
-      if (r.from === 'repo') go({ view: 'repo', repo: r.repo });
+      if (r.from === 'repo') go({ view: 'repo', repo: r.fromRepo ?? r.repo });
       else go({ view: r.from });
       return true;
     }
@@ -820,9 +832,9 @@ export function startPrs(api: Api, initial: Route = { view: 'apps' }): PrTab {
       title: f.title,
       onclick: (e: Event) => {
         e.stopPropagation();
-        go({ view: 'pr', repo: u.repo, number: f.number, from });
+        go({ view: 'pr', repo: f.repo || u.repo, number: f.number, from });
       },
-    }, `PR #${f.number}`, stateBadge(f.state));
+    }, `PR ${issueNumber(f, u.repo)}`, stateBadge(f.state));
     return el('li', { class: classes('urgent-item', u.critical && 'critical'), 'data-issue': u.number, onclick: () => openUrl(u.url), title: u.url },
       el('span', { class: 'score', style: `background: rgb(var(--hot-rgb) / ${heat.toFixed(2)})` }, Math.round(u.score)),
       showRepo ? el('span', { class: 'u-repo' }, appIcon(u.repo, icon), shortName(u.repo), thirdParty) : null,
@@ -896,17 +908,20 @@ export function startPrs(api: Api, initial: Route = { view: 'apps' }): PrTab {
     ];
   }
 
+  const reviewedRepo = (repo: string): boolean =>
+    state.overview?.repos.some((r) => r.repo.toLowerCase() === repo.toLowerCase()) ?? false;
+
   function renderRepoIssues(repo: string): void {
     const rows = (state.overview?.issues ?? []).filter((i) => i.repo === repo);
-    const controls: Node[] = state.repoView
+    const controls: Node[] = reviewedRepo(repo)
       ? paneSwitch(repo)
-      : [el('span', { class: 'hint' }, 'Third-party repo: its issues are here, but its PRs aren\'t fetched or reviewed.')];
+      : [el('span', { class: 'hint' }, 'The app shows this repository\'s issues, but its PRs aren\'t fetched or reviewed.')];
     renderIssueList([...controls, criticalToggle(() => renderRepoIssues(repo))], rows, false, 'repo', 'No urgent issues.');
   }
 
-  /** A repo's page. A repo without a PR view (a third party's) has only its issues. */
+  /** Each reviewed repository has PR and Issues panes. */
   function renderRepo(repo: string): void {
-    if (state.repoView && state.repoPane === 'prs') renderPrPage('repo');
+    if (reviewedRepo(repo) && state.repoPane === 'prs') renderPrPage('repo');
     else renderRepoIssues(repo);
   }
 
@@ -1019,7 +1034,7 @@ export function startPrs(api: Api, initial: Route = { view: 'apps' }): PrTab {
     if (!pr.fixes.length) return null;
     return el('section', { class: 'card', id: 'fixes' }, el('h2', {}, 'Fixes urgent issues'),
       el('ul', { class: 'rows' }, pr.fixes.map((f) => el('li', {},
-        ghLink(`#${f.number} ${f.title}`, f.url, classes('name', f.critical && 'n-bad')),
+        ghLink(`${issueNumber(f, pr.repo)} ${f.title}`, f.url, classes('name', f.critical && 'n-bad')),
         el('span', { class: 'fig muted', title: 'Urgency score' }, Math.round(f.score))))));
   }
 
@@ -1082,7 +1097,7 @@ export function startPrs(api: Api, initial: Route = { view: 'apps' }): PrTab {
     if (r.view === 'issues') void api.invoke('refresh_now');
     else if (r.view === 'repo') {
       // A third party's page only has what the status poller fetches.
-      void api.invoke(state.repoView && state.repoPane === 'prs' ? 'refresh_pr_repo' : 'refresh_repo', { repo: r.repo });
+      void api.invoke(reviewedRepo(r.repo) && state.repoPane === 'prs' ? 'refresh_pr_repo' : 'refresh_repo', { repo: r.repo });
     } else if (r.view === 'pr') void api.invoke('refresh_pr', { repo: r.repo, number: r.number });
     else void api.invoke('refresh_prs');
   };
@@ -1091,7 +1106,7 @@ export function startPrs(api: Api, initial: Route = { view: 'apps' }): PrTab {
     const typing = (e.target as HTMLElement | null)?.tagName === 'INPUT';
     if (e.key === 'Escape') {
       if (closeHelp()) return true;
-      if (typing && state.query) {
+      if (typing && (e.target as HTMLInputElement).type === 'search' && state.query) {
         state.query = '';
         (e.target as HTMLInputElement).value = '';
         renderPrPage(state.route.view === 'queue' ? 'queue' : 'repo');

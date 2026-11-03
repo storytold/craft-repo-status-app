@@ -234,6 +234,36 @@ test('PR tables filter, search, sort and group', async () => {
   assert.match(h.$('.group-head')!.textContent!, /Land one first/);
 });
 
+test('Escape from the Issues checkbox navigates back without rendering the PR table', async () => {
+  const h = await setup();
+  (h.$('tr[data-repo="o/alpha"]') as HTMLElement).click();
+  await tick();
+  const search = h.$('input[type="search"]') as HTMLInputElement;
+  search.value = 'Blocked one';
+  search.dispatchEvent(new h.win.Event('input') as unknown as Event);
+  (h.$('[data-pane="issues"]') as HTMLElement).click();
+  const checkbox = h.$('#critical-only')!;
+  checkbox.focus();
+  checkbox.dispatchEvent(new h.win.KeyboardEvent('keydown', { key: 'Escape', bubbles: true }) as unknown as Event);
+  await tick();
+  assert.equal(appRows(h).length, 3);
+  assert.equal(h.$('.pr-table'), null);
+});
+
+test('Escape in the search input clears the query and keeps the PR table', async () => {
+  const h = await setup();
+  (h.$('tr[data-repo="o/alpha"]') as HTMLElement).click();
+  await tick();
+  const search = h.$('input[type="search"]') as HTMLInputElement;
+  search.value = 'Blocked one';
+  search.dispatchEvent(new h.win.Event('input') as unknown as Event);
+  search.focus();
+  search.dispatchEvent(new h.win.KeyboardEvent('keydown', { key: 'Escape', bubbles: true }) as unknown as Event);
+  await tick();
+  assert.equal((h.$('input[type="search"]') as HTMLInputElement).value, '');
+  assert.deepEqual(prRows(h), [1, 2]);
+});
+
 test('approval is a flag beside the status, naming who', async () => {
   const h = await setup();
   const row2 = REPO.prs[1]!;
@@ -539,6 +569,61 @@ test('Fix first groups every repo\'s issues by what they need next, third partie
   assert.deepEqual(h.calls.at(-1), { cmd: 'open_url', args: { url: 'https://github.com/o/alpha/issues/50' } }, 'a row opens on GitHub');
 });
 
+test('an issue fix opens the PR in its actual repository', async () => {
+  const h = await setup({ issues: [issue({
+    repo: 'o/beta',
+    fixes: [{ repo: 'o/alpha', number: 1, title: 'Foreign fix', state: 'promising' }],
+  })] });
+  (h.$('[data-pr-view="issues"]') as HTMLElement).click();
+  await tick();
+  assert.match(h.$('.issue-fix')!.textContent!, /PR o\/alpha#1/);
+  (h.$('.issue-fix') as HTMLElement).click();
+  await tick();
+  assert.deepEqual(h.calls.findLast((c) => c.cmd === 'get_pr'), { cmd: 'get_pr', args: { repo: 'o/alpha', number: 1 } });
+});
+
+test('Escape from a foreign fixing PR returns to the original repository Issues pane', async () => {
+  const h = await setup({ issues: [issue({
+    fixes: [{ repo: 'o/beta', number: 1, title: 'Foreign fix', state: 'promising' }],
+  })] }, { view: 'repo', repo: 'o/alpha' }, { ...FULL, repo: 'o/beta', related: [pr({ repo: 'o/gamma', number: 2 })] });
+  (h.$('[data-pane="issues"]') as HTMLElement).click();
+  (h.$('.issue-fix') as HTMLElement).click();
+  await tick();
+  assert.deepEqual(h.calls.findLast((c) => c.cmd === 'get_pr'), { cmd: 'get_pr', args: { repo: 'o/beta', number: 1 } });
+  h.key('Escape');
+  await tick();
+  assert.deepEqual(h.calls.findLast((c) => c.cmd === 'get_pr_repo'), { cmd: 'get_pr_repo', args: { repo: 'o/alpha' } });
+  assert.equal(h.$('[data-pane="issues"]')!.getAttribute('aria-pressed'), 'true');
+  assert.deepEqual(issueNumbers(h), [50]);
+  (h.$('.issue-fix') as HTMLElement).click();
+  await tick();
+  (h.$('[data-rel="2"]') as HTMLElement).click();
+  await tick();
+  h.key('Escape');
+  await tick();
+  assert.deepEqual(h.calls.findLast((c) => c.cmd === 'get_pr_repo'), { cmd: 'get_pr_repo', args: { repo: 'o/alpha' } });
+  assert.equal(h.$('[data-pane="issues"]')!.getAttribute('aria-pressed'), 'true');
+  assert.deepEqual(issueNumbers(h), [50]);
+});
+
+test('foreign issue chips and cards show the repository', async () => {
+  const fixes = [{ repo: 'o/beta', number: 50, title: 'Foreign issue', url: 'https://github.com/o/beta/issues/50', score: 60, critical: false }];
+  const original = REPO.prs[0]!.fixes;
+  REPO.prs[0]!.fixes = fixes;
+  try {
+    const h = await setup(undefined, { view: 'repo', repo: 'o/alpha' }, { ...FULL, fixes });
+    assert.equal(h.$('tr[data-number="1"] .chip.fixes')!.textContent, 'Fixes o/beta#50');
+    (h.$('tr[data-number="1"]') as HTMLElement).click();
+    await tick();
+    const link = h.$$('#fixes .link')[0]!;
+    assert.equal(link.textContent, 'o/beta#50 Foreign issue');
+    link.click();
+    assert.deepEqual(h.calls.at(-1), { cmd: 'open_url', args: { url: 'https://github.com/o/beta/issues/50' } });
+  } finally {
+    REPO.prs[0]!.fixes = original;
+  }
+});
+
 test('an issue\'s PR opens here, and Esc comes back to the list', async () => {
   const h = await setup();
   (h.$('[data-pr-view="issues"]') as HTMLElement).click();
@@ -582,6 +667,21 @@ test('a repo\'s page switches between its PRs and its issues, and keeps the pane
   assert.deepEqual(issueNumbers(h), [50, 51, 52], 'still on the issues');
   (h.$('[data-pane="prs"]') as HTMLElement).click();
   assert.deepEqual(prRows(h), [1, 2]);
+});
+
+test('an uncached reviewed repository keeps its PR pane and can request the first listing', async () => {
+  const h = await setup(undefined, { view: 'repo', repo: 'o/gamma' });
+  assert.ok(h.$('[data-pane="prs"]'));
+  assert.equal(h.$('[data-pane="prs"]')!.getAttribute('aria-pressed'), 'true');
+  assert.doesNotMatch(h.$('#prs-view')!.textContent!, /Third-party repo/);
+  (h.$('#refresh') as HTMLElement).click();
+  assert.deepEqual(h.calls.at(-1), { cmd: 'refresh_pr_repo', args: { repo: 'o/gamma' } });
+  (h.$('[data-pane="issues"]') as HTMLElement).click();
+  (h.$('#refresh') as HTMLElement).click();
+  assert.deepEqual(h.calls.at(-1), { cmd: 'refresh_repo', args: { repo: 'o/gamma' } });
+  (h.$('[data-pane="prs"]') as HTMLElement).click();
+  (h.$('#refresh') as HTMLElement).click();
+  assert.deepEqual(h.calls.at(-1), { cmd: 'refresh_pr_repo', args: { repo: 'o/gamma' } });
 });
 
 test('a third party\'s page has its issues only, and never asks for its PRs', async () => {

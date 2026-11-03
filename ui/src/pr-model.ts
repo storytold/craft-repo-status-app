@@ -110,6 +110,7 @@ export interface PrRow {
 
 /** An urgent issue a PR names or closes. */
 export interface FixesIssue {
+  repo?: string;
   number: number;
   title: string;
   url: string;
@@ -121,6 +122,7 @@ export type IssueStage = 'fix_ready' | 'fix_in_progress' | 'no_fix' | 'needs_inf
 
 /** A PR that names or closes an issue. */
 export interface FixRef {
+  repo?: string;
   number: number;
   title: string;
   state: PrState;
