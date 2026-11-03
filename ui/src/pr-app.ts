@@ -400,8 +400,9 @@ export function startPrs(api: Api, initial: Route = { view: 'apps' }): PrTab {
     }
     const sameRepo = state.route.view === 'repo' && route.view === 'pr';
     const backToRepo = state.route.view === 'pr' && route.view === 'repo';
+    const betweenPrs = state.route.view === 'pr' && route.view === 'pr';
     state.route = route;
-    if (!sameRepo && !backToRepo) {
+    if (!sameRepo && !backToRepo && !betweenPrs) {
       state.filter = 'all';
       state.query = '';
       state.limit = PAGE_SIZE;

@@ -564,6 +564,8 @@ test('Escape from a foreign fixing PR returns to the original repository Issues 
   h.key('Escape');
   await tick();
   assert.deepEqual(h.calls.findLast((c) => c.cmd === 'get_pr_repo'), { cmd: 'get_pr_repo', args: { repo: 'o/alpha' } });
+  assert.equal(h.$('[data-pane="issues"]')!.getAttribute('aria-pressed'), 'true');
+  assert.deepEqual(issueNumbers(h), [50]);
 });
 
 test('foreign issue chips and cards show the repository', async () => {
