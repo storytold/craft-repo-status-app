@@ -21,7 +21,7 @@ pub use releases::{summarize_releases, Asset, BuildLag, LagBasis, Release, Relea
 pub use shared::{
     ledger_from_old_raw, Lease, LedgerPr, PrLedger, SharedBudget, SharedCache, WalkPlan,
 };
-pub use urgency::{rank_issues, score_issue, IssueInput, Scored};
+pub use urgency::{needs_info, rank_issues, score_issue, IssueInput, Scored};
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
