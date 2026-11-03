@@ -435,6 +435,7 @@ version = "0.1.0"
 dependencies = [
  "chrono",
  "dirs",
+ "regex",
  "serde",
  "serde_json",
  "thiserror 2.0.21",
@@ -447,6 +448,7 @@ version = "0.1.0"
 dependencies = [
  "chrono",
  "craft-core",
+ "pr-core",
  "reqwest 0.12.28",
  "serde",
  "serde_json",
