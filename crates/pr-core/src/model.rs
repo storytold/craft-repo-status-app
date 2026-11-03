@@ -198,11 +198,9 @@ pub struct Pr {
 impl Pr {
     /// The detail, if it describes the PR as last listed.
     pub fn current_detail(&self) -> Option<&PrDetail> {
-        self.detail.as_ref().filter(|d| {
-            d.for_head == self.head_oid
-                && d.for_updated_at >= self.updated_at
-                && d.linked_issues.iter().all(|i| !i.repository.is_empty())
-        })
+        self.detail
+            .as_ref()
+            .filter(|d| d.for_head == self.head_oid && d.for_updated_at >= self.updated_at)
     }
 
     pub fn analysis_is_current(&self) -> bool {
@@ -376,19 +374,26 @@ mod tests {
     use super::*;
 
     #[test]
-    fn cached_linked_issues_without_repository_need_refresh() {
+    fn cached_linked_issues_refresh_without_hiding_current_checks() {
         let mut pr = Pr {
             id: "node".into(),
             detail: Some(PrDetail {
+                checks: vec![Check {
+                    name: "tests".into(),
+                    state: "SUCCESS".into(),
+                    ..Default::default()
+                }],
                 linked_issues: serde_json::from_str(r#"[{"number":42,"title":"Old cache"}]"#)
                     .unwrap(),
                 ..Default::default()
             }),
             ..Default::default()
         };
-        assert!(pr.current_detail().is_none());
+        assert!(pr.current_detail().is_some());
+        assert_eq!(crate::assess::ci_state(&pr), "success");
         assert!(crate::schedule::detail_priority(&pr, chrono::Utc::now()).is_some());
         pr.detail.as_mut().unwrap().linked_issues[0].repository = "o/r".into();
         assert!(pr.current_detail().is_some());
+        assert!(crate::schedule::detail_priority(&pr, chrono::Utc::now()).is_none());
     }
 }
