@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   sortEntries, manualOrder, orderedEntries, nextSort, dropIndex, MANUAL, versionKey, freshness, isStale, ago, compact, formatRate, buildRate, tokenStatus,
-  totals, urgentAcross, isRefreshing, isThirdParty, isRepoHidden, toggleKind, reorderVisible, defaultDir, value, windowById, WINDOWS, COLUMNS, COLUMN,
+  totals, isRefreshing, isThirdParty, isRepoHidden, toggleKind, reorderVisible, defaultDir, value, windowById, WINDOWS, COLUMNS, COLUMN,
 } from './model.ts';
 import type { Activity, RepoEntry, RepoStats, UrgentIssue } from './model.ts';
 
@@ -200,23 +200,10 @@ test('formatting', () => {
   assert.equal(formatRate(0), '0.0/d');
 });
 
-test('totals and urgent merge', () => {
+test('totals add the numeric columns', () => {
   assert.equal(totals(rows).urgency, 110);
   assert.equal(totals(rows).latest_build_rate, undefined, 'rates have no total');
   assert.equal(totals(rows).latest_build, undefined, 'versions have no total');
-  const e = [
-    entry('a', { urgent: [issue(1, 30), issue(2, 80, true)] }),
-    entry('b', { urgent: [issue(3, 50, true)] }),
-  ];
-  assert.deepEqual(urgentAcross(e).map((u) => u.number), [2, 3, 1]);
-  assert.deepEqual(urgentAcross(e, { criticalOnly: true }).map((u) => u.repo), ['o/a', 'o/b']);
-  assert.deepEqual(urgentAcross(e, { repo: 'o/b' }).map((u) => u.number), [3]);
-  assert.deepEqual(urgentAcross(e, { limit: 2 }).map((u) => u.number), [2, 3]);
-});
-
-test('urgent ties go to the newer issue', () => {
-  const e = [entry('a', { urgent: [issue(1, 40, false, '2026-10-01T00:00:00Z'), issue(2, 40, false, '2026-10-05T00:00:00Z')] })];
-  assert.deepEqual(urgentAcross(e).map((u) => u.number), [2, 1]);
 });
 
 test('recent-activity columns follow the selected window', () => {

@@ -16,12 +16,12 @@
       <nav class="views" role="tablist" aria-label="Tabs">
         <button class="view" data-view="repos" role="tab" title="Downloads (⌘1)">Downloads <span class="badge" id="repo-count"></span></button>
         <button class="view" data-view="prs" role="tab" title="PRs (⌘2)">PRs <span class="badge good" id="prs-count"></span></button>
-        <button class="view" data-view="urgent" role="tab" title="Fix first (⌘3)">Fix first <span class="badge hot" id="urgent-count"></span></button>
       </nav>
       <fieldset class="kinds" id="repo-kinds" aria-label="Which repos to show"></fieldset>
       <nav class="views sub" id="pr-nav" aria-label="PR views" hidden>
         <button class="view" data-pr-view="apps">Repos <span class="badge" id="apps-count"></span></button>
         <button class="view" data-pr-view="queue">Review queue <span class="badge good" id="queue-count"></span></button>
+        <button class="view" data-pr-view="issues">Fix first <span class="badge hot" id="fix-count"></span></button>
       </nav>
       <nav class="crumbs" id="crumbs" aria-label="Breadcrumb" hidden></nav>
       <div class="status" data-tauri-drag-region>
@@ -53,15 +53,6 @@
     </main>
 
     <main id="prs-view" hidden></main>
-
-    <main id="urgent-view" hidden>
-      <div class="urgent-controls">
-        <select id="urgent-repo" aria-label="Repository"></select>
-        <label class="toggle"><input type="checkbox" id="critical-only"> Critical only</label>
-        <span class="hint">Scored by severity words, labels, user reports, 👍/💬, the latest build and freshness. Click to open on GitHub.</span>
-      </div>
-      <ol class="urgent-list" id="urgent-list"></ol>
-    </main>
 
     <footer data-tauri-drag-region>
       <span class="foot-group" id="status-foot" data-tauri-drag-region>
