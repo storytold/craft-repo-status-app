@@ -18,7 +18,7 @@ use serde::{Deserialize, Serialize};
 
 use super::kind::{self, Kinded, PathClass};
 use super::ledger::{Kind, Ledger};
-use super::record::{PrCache, PrRecord, PrState};
+use super::record::{Contribution, PrCache, PrCommit, PrRecord, PrState};
 use super::states::WorkState;
 use super::{canonical, is_bot, Directory};
 use crate::model::{Time, ALL_TIME, SINCE_RELEASE, WINDOWS};
@@ -140,38 +140,12 @@ pub fn credit(
 ) -> PrCredit {
     let author = human_author(r);
     let c = &r.contribution;
-    let mut lp = (0u64, 0u64);
-    let mut gp = (0u64, 0u64);
-    let mut dirs: Vec<DirLines> = Vec::new();
-    for f in &c.files {
-        if kind::product_lines(&f.path) {
-            lp = (lp.0 + f.additions, lp.1 + f.deletions);
-        } else {
-            gp = (gp.0 + f.additions, gp.1 + f.deletions);
-        }
-        let (dir, module) = dir_of(&f.path);
-        match dirs.iter_mut().find(|d| d.dir == dir && d.module == module) {
-            Some(d) => {
-                d.added += f.additions;
-                d.removed += f.deletions;
-            }
-            None => dirs.push(DirLines {
-                dir,
-                module,
-                added: f.additions,
-                removed: f.deletions,
-            }),
-        }
-    }
-    // Until the rest of a long file list is read, the lines no file read so
-    // far holds count as product lines.
-    let files_cut = c.files_total > c.files.len() as u64 || c.files_cursor.is_some();
-    if c.files.is_empty() || files_cut {
-        lp = (
-            c.additions.saturating_sub(gp.0),
-            c.deletions.saturating_sub(gp.1),
-        );
-    }
+    let FileCredit {
+        product: lp,
+        generated: gp,
+        dirs,
+        truncated: files_cut,
+    } = file_credit(c);
     let all: Vec<_> = c.commits.iter().filter(|k| !k.is_merge).collect();
     let total: u64 = all.iter().map(|k| k.additions + k.deletions).sum();
     let mut stacked_in = None;
@@ -235,25 +209,7 @@ pub fn credit(
         s.product = (lp.0 as f64 * s.weight, lp.1 as f64 * s.weight);
         s.generated = (gp.0 as f64 * s.weight, gp.1 as f64 * s.weight);
     }
-    let mut co_authors = Vec::new();
-    for k in &fresh {
-        let who = linked(k.author.as_deref());
-        for co in &k.co_authors {
-            let login = co
-                .login
-                .clone()
-                .or_else(|| emails.get(&co.email).cloned())
-                .filter(|l| !is_bot(l, None))
-                .map(|l| canonical(&l));
-            if login.is_some() && login == who {
-                continue;
-            }
-            co_authors.push(CoCredit {
-                login,
-                name: co.name.clone(),
-            });
-        }
-    }
+    let co_authors = co_credits(&fresh, emails);
     let headlines: Vec<&str> = all.iter().map(|k| k.headline.as_str()).collect();
     let merge_headline = c.merge_commit.as_ref().map_or("", |m| m.headline.as_str());
     let mut kind = kind::classify(&kind::Input {
@@ -290,6 +246,118 @@ pub fn credit(
         dirs,
         co_authors,
     }
+}
+
+struct FileCredit {
+    product: (u64, u64),
+    generated: (u64, u64),
+    dirs: Vec<DirLines>,
+    truncated: bool,
+}
+
+fn file_credit(c: &Contribution) -> FileCredit {
+    let mut product = (0u64, 0u64);
+    let mut generated = (0u64, 0u64);
+    let mut dirs: Vec<DirLines> = Vec::new();
+    for f in &c.files {
+        if kind::product_lines(&f.path) {
+            product = (product.0 + f.additions, product.1 + f.deletions);
+        } else {
+            generated = (generated.0 + f.additions, generated.1 + f.deletions);
+        }
+        let (dir, module) = dir_of(&f.path);
+        match dirs.iter_mut().find(|d| d.dir == dir && d.module == module) {
+            Some(d) => {
+                d.added += f.additions;
+                d.removed += f.deletions;
+            }
+            None => dirs.push(DirLines {
+                dir,
+                module,
+                added: f.additions,
+                removed: f.deletions,
+            }),
+        }
+    }
+    let truncated = c.files_total > c.files.len() as u64 || c.files_cursor.is_some();
+    if c.files.is_empty() || truncated {
+        product = (
+            c.additions.saturating_sub(generated.0),
+            c.deletions.saturating_sub(generated.1),
+        );
+    }
+    FileCredit {
+        product,
+        generated,
+        dirs,
+        truncated,
+    }
+}
+
+fn add_rank_credit(
+    c: &PrCredit,
+    acc: &mut BTreeMap<String, Acc>,
+    unlinked: &mut BTreeMap<String, u64>,
+) {
+    if let Some(author) = &c.author {
+        let r = &mut acc.entry(author.clone()).or_default().rank;
+        *r.types.entry(c.kind.kind.value.clone()).or_default() += 1;
+        if c.kind.guess {
+            *r.guessed.entry(c.kind.kind.value.clone()).or_default() += 1;
+        }
+        r.files += c.changed_files;
+        r.stacked += u64::from(c.stacked_in.is_some());
+        r.truncated += u64::from(c.truncated);
+    }
+    if let (true, Some(merger)) = (c.batch, &c.merger) {
+        acc.entry(merger.clone()).or_default().rank.batch_merges += 1;
+    }
+    for share in &c.shares {
+        let a = acc.entry(share.login.clone()).or_default();
+        a.lines[0] += share.product.0;
+        a.lines[1] += share.product.1;
+        a.lines[2] += share.generated.0;
+        a.lines[3] += share.generated.1;
+        a.rank.commits += share.commits;
+        if share.review {
+            a.lines[4] += share.product.0;
+            a.lines[5] += share.product.1;
+            a.rank.review_commits += share.commits;
+        }
+    }
+    for co in &c.co_authors {
+        match &co.login {
+            Some(login) => acc.entry(login.clone()).or_default().rank.co_authored += 1,
+            None => *unlinked.entry(co.name.clone()).or_default() += 1,
+        }
+    }
+}
+
+fn co_credits(fresh: &[&PrCommit], emails: &BTreeMap<String, String>) -> Vec<CoCredit> {
+    let mut co_authors = Vec::new();
+    for k in fresh {
+        let who = k
+            .author
+            .as_deref()
+            .filter(|l| !is_bot(l, None))
+            .map(canonical);
+        for co in &k.co_authors {
+            let login = co
+                .login
+                .clone()
+                .or_else(|| emails.get(&co.email).cloned())
+                .filter(|l| !is_bot(l, None))
+                .map(|l| canonical(&l));
+            if login.is_some() && login == who {
+                continue;
+            }
+            co_authors.push(CoCredit {
+                login,
+                name: co.name.clone(),
+            });
+        }
+    }
+    co_authors
 }
 
 /// One person's figures in one window, for every repository or one.
@@ -683,38 +751,7 @@ impl Rankings {
             if !self.in_window(&c.repo, id, c.merged_at) {
                 continue;
             }
-            if let Some(a) = &c.author {
-                let r = &mut acc.entry(a.clone()).or_default().rank;
-                *r.types.entry(c.kind.kind.value.clone()).or_default() += 1;
-                if c.kind.guess {
-                    *r.guessed.entry(c.kind.kind.value.clone()).or_default() += 1;
-                }
-                r.files += c.changed_files;
-                r.stacked += u64::from(c.stacked_in.is_some());
-                r.truncated += u64::from(c.truncated);
-            }
-            if let (true, Some(m)) = (c.batch, &c.merger) {
-                acc.entry(m.clone()).or_default().rank.batch_merges += 1;
-            }
-            for s in &c.shares {
-                let a = acc.entry(s.login.clone()).or_default();
-                a.lines[0] += s.product.0;
-                a.lines[1] += s.product.1;
-                a.lines[2] += s.generated.0;
-                a.lines[3] += s.generated.1;
-                a.rank.commits += s.commits;
-                if s.review {
-                    a.lines[4] += s.product.0;
-                    a.lines[5] += s.product.1;
-                    a.rank.review_commits += s.commits;
-                }
-            }
-            for co in &c.co_authors {
-                match &co.login {
-                    Some(l) => acc.entry(l.clone()).or_default().rank.co_authored += 1,
-                    None => *unlinked.entry(co.name.clone()).or_default() += 1,
-                }
-            }
+            add_rank_credit(c, &mut acc, &mut unlinked);
         }
         let tally = self.ledger.tally(|repo| {
             Self::matches(repo, filter)
@@ -843,73 +880,21 @@ impl Rankings {
     pub fn person(&self, key: &str, id: &str, only: Option<&str>) -> PersonDetail {
         let key = canonical(key);
         let kept = |repo: &str| only.is_none_or(|o| o.eq_ignore_ascii_case(repo));
-        let mut repo: BTreeMap<String, DetailRow> = BTreeMap::new();
-        let mut area: BTreeMap<String, DetailRow> = BTreeMap::new();
-        let mut ty: BTreeMap<String, DetailRow> = BTreeMap::new();
-        let mut dirs: BTreeMap<String, DirAcc> = BTreeMap::new();
-        let mut child_lines: BTreeMap<(String, String), [f64; 2]> = BTreeMap::new();
-        let mut lines: BTreeMap<(u8, String), [f64; 2]> = BTreeMap::new();
+        let mut tables = PersonTables::default();
         for c in &self.credits {
             if !kept(&c.repo) || !self.in_window(&c.repo, id, c.merged_at) {
                 continue;
             }
-            if c.merger.as_deref() == Some(key.as_str()) {
-                repo.entry(c.repo.clone()).or_default().merges += 1;
-            }
-            let share = c.shares.iter().find(|s| s.login == key);
-            let authored = c.author.as_deref() == Some(key.as_str());
-            if share.is_none() && !authored {
-                continue;
-            }
-            let (a, d) = share.map_or((0.0, 0.0), |s| s.product);
-            let merged = u64::from(authored);
-            let mut put =
-                |table: u8, map: &mut BTreeMap<String, DetailRow>, k: &str, rule: Option<&str>| {
-                    let row = map.entry(k.to_string()).or_default();
-                    row.merged += merged;
-                    row.guessed += u64::from(authored && table == 2 && c.kind.guess);
-                    if let Some(rule) = rule {
-                        if row.rules.len() < 3 && !row.rules.iter().any(|x| x == rule) {
-                            row.rules.push(rule.to_string());
-                        }
-                    }
-                    let l = lines.entry((table, k.to_string())).or_default();
-                    l[0] += a;
-                    l[1] += d;
-                };
-            put(0, &mut repo, &c.repo, None);
-            put(1, &mut area, &c.kind.area.value, Some(&c.kind.area.rule));
-            put(2, &mut ty, &c.kind.kind.value, Some(&c.kind.kind.rule));
-            if let Some(s) = share {
-                for dl in &c.dirs {
-                    let e = dirs.entry(dl.dir.clone()).or_default();
-                    e.2[0] += dl.added as f64 * s.weight;
-                    e.2[1] += dl.removed as f64 * s.weight;
-                    let child = child_lines
-                        .entry((dl.dir.clone(), dl.module.clone()))
-                        .or_default();
-                    child[0] += dl.added as f64 * s.weight;
-                    child[1] += dl.removed as f64 * s.weight;
-                    e.1.entry(dl.module.clone()).or_default();
-                }
-            }
-            if authored {
-                let mut seen = BTreeSet::new();
-                for dl in &c.dirs {
-                    let e = dirs.entry(dl.dir.clone()).or_default();
-                    if seen.insert(dl.dir.clone()) {
-                        e.0.merged += 1;
-                    }
-                    let child = e.1.entry(dl.module.clone()).or_default();
-                    if seen.insert(format!("{}\n{}", dl.dir, dl.module)) {
-                        child.merged += 1;
-                    }
-                }
-            }
-            if let (Some(s), true) = (share, !authored) {
-                repo.entry(c.repo.clone()).or_default().review_commits += s.commits;
-            }
+            tables.add_credit(c, &key);
         }
+        let PersonTables {
+            mut repo,
+            area,
+            ty,
+            dirs,
+            child_lines,
+            lines,
+        } = tables;
         let tally = |repo_name: &str| {
             self.ledger
                 .tally(|r| {
@@ -1021,6 +1006,85 @@ impl Rankings {
 
 /// One directory's row, its modules' rows and its lines added and removed.
 type DirAcc = (DetailRow, BTreeMap<String, DetailRow>, [f64; 2]);
+
+#[derive(Default)]
+struct PersonTables {
+    repo: BTreeMap<String, DetailRow>,
+    area: BTreeMap<String, DetailRow>,
+    ty: BTreeMap<String, DetailRow>,
+    dirs: BTreeMap<String, DirAcc>,
+    child_lines: BTreeMap<(String, String), [f64; 2]>,
+    lines: BTreeMap<(u8, String), [f64; 2]>,
+}
+
+impl PersonTables {
+    fn add_credit(&mut self, c: &PrCredit, key: &str) {
+        let Self {
+            repo,
+            area,
+            ty,
+            dirs,
+            child_lines,
+            lines,
+        } = self;
+        if c.merger.as_deref() == Some(key) {
+            repo.entry(c.repo.clone()).or_default().merges += 1;
+        }
+        let share = c.shares.iter().find(|s| s.login == key);
+        let authored = c.author.as_deref() == Some(key);
+        if share.is_none() && !authored {
+            return;
+        }
+        let (a, d) = share.map_or((0.0, 0.0), |s| s.product);
+        let merged = u64::from(authored);
+        let mut put =
+            |table: u8, map: &mut BTreeMap<String, DetailRow>, k: &str, rule: Option<&str>| {
+                let row = map.entry(k.to_string()).or_default();
+                row.merged += merged;
+                row.guessed += u64::from(authored && table == 2 && c.kind.guess);
+                if let Some(rule) = rule {
+                    if row.rules.len() < 3 && !row.rules.iter().any(|x| x == rule) {
+                        row.rules.push(rule.to_string());
+                    }
+                }
+                let l = lines.entry((table, k.to_string())).or_default();
+                l[0] += a;
+                l[1] += d;
+            };
+        put(0, repo, &c.repo, None);
+        put(1, area, &c.kind.area.value, Some(&c.kind.area.rule));
+        put(2, ty, &c.kind.kind.value, Some(&c.kind.kind.rule));
+        if let Some(s) = share {
+            for dl in &c.dirs {
+                let e = dirs.entry(dl.dir.clone()).or_default();
+                e.2[0] += dl.added as f64 * s.weight;
+                e.2[1] += dl.removed as f64 * s.weight;
+                let child = child_lines
+                    .entry((dl.dir.clone(), dl.module.clone()))
+                    .or_default();
+                child[0] += dl.added as f64 * s.weight;
+                child[1] += dl.removed as f64 * s.weight;
+                e.1.entry(dl.module.clone()).or_default();
+            }
+        }
+        if authored {
+            let mut seen = BTreeSet::new();
+            for dl in &c.dirs {
+                let e = dirs.entry(dl.dir.clone()).or_default();
+                if seen.insert(dl.dir.clone()) {
+                    e.0.merged += 1;
+                }
+                let child = e.1.entry(dl.module.clone()).or_default();
+                if seen.insert(format!("{}\n{}", dl.dir, dl.module)) {
+                    child.merged += 1;
+                }
+            }
+        }
+        if let (Some(s), true) = (share, !authored) {
+            repo.entry(c.repo.clone()).or_default().review_commits += s.commits;
+        }
+    }
+}
 
 /// Most lines first, then most merged, then by key.
 fn sort_rows(rows: &mut [DetailRow]) {

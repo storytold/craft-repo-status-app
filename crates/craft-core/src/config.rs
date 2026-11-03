@@ -146,8 +146,14 @@ impl Default for PeopleConfig {
             owner_logins: Vec::new(),
             repo_owners: BTreeMap::new(),
             maintainers: Vec::new(),
-            rebase_repos: DEFAULT_REBASE_REPOS.iter().map(|s| s.to_string()).collect(),
-            batch_repos: DEFAULT_BATCH_REPOS.iter().map(|s| s.to_string()).collect(),
+            rebase_repos: DEFAULT_REBASE_REPOS
+                .iter()
+                .map(ToString::to_string)
+                .collect(),
+            batch_repos: DEFAULT_BATCH_REPOS
+                .iter()
+                .map(ToString::to_string)
+                .collect(),
         }
     }
 }
