@@ -10,9 +10,9 @@ use chrono::SubsecRound;
 use serde::{Deserialize, Serialize};
 
 use super::rank::{Direct, RankInput, RankRow, Rankings};
-use super::record::{Decision, MainChecks, PrCache, PrState};
+use super::record::{Decision, MainChecks, PrCache, PrRecord, PrState};
 use super::roster::RosterRow;
-use super::states::{self, Ctx, MergeAt, WorkState};
+use super::states::{self, Ctx, MergeAt, Timings, WorkState};
 use super::track::TrackRecord;
 use super::{canonical, directory, is_bot, maintainers, Directory, RepoPeople};
 use crate::config::PeopleConfig;
@@ -438,6 +438,280 @@ struct PersonAcc {
     active: bool,
 }
 
+impl FlowAcc {
+    fn record(&mut self, r: &PrRecord, work: &WorkState, tm: Option<&Timings>) {
+        let landed = work.state == super::ledger::LANDED_ELSEWHERE;
+        let skip = work.state == "closed_folded_split_or_moved"
+            || work.subtype.as_deref() == Some("accidental_quick_close");
+        if r.state == PrState::Merged {
+            self.flow.merged += 1;
+            *self
+                .flow
+                .merged_by
+                .entry(work.subtype.clone().unwrap_or_default())
+                .or_default() += 1;
+            self.flow.closed_total += 1;
+            if let (Some(m), Some(c)) = (r.merged_at, r.created_at) {
+                self.merge.push((m - c).num_seconds());
+            }
+            if let (Some(m), Some(ready)) = (r.merged_at, tm.and_then(|tm| tm.ready_at)) {
+                self.ready.push((m - ready).num_seconds());
+            }
+        } else if landed {
+            self.flow.landed_elsewhere += 1;
+            self.flow.closed_total += 1;
+        } else if !skip {
+            *self.flow.closed.entry(work.state.clone()).or_default() += 1;
+            self.flow.closed_total += 1;
+        }
+    }
+}
+
+impl RepoFlowAcc {
+    fn record(
+        &mut self,
+        r: &PrRecord,
+        work: &WorkState,
+        tm: Option<&Timings>,
+        merger: Option<&str>,
+        method: &str,
+    ) {
+        let landed = work.state == super::ledger::LANDED_ELSEWHERE;
+        let skip = work.state == "closed_folded_split_or_moved"
+            || work.subtype.as_deref() == Some("accidental_quick_close");
+        if r.state == PrState::Merged {
+            self.flow.merged += 1;
+            *self
+                .flow
+                .merged_by
+                .entry(work.subtype.clone().unwrap_or_default())
+                .or_default() += 1;
+            *self.flow.methods.entry(method.to_string()).or_default() += 1;
+            if let Some(m) = merger {
+                *self.flow.mergers.entry(m.to_string()).or_default() += 1;
+            }
+            if let (Some(m), Some(c)) = (r.merged_at, r.created_at) {
+                self.merge.push((m - c).num_seconds());
+            }
+        } else if landed {
+            self.flow.landed_elsewhere += 1;
+        } else if !skip {
+            *self.flow.closed.entry(work.state.clone()).or_default() += 1;
+        }
+        if let Some((Some(ready), Some(first))) = tm.map(|tm| (tm.ready_at, tm.first_response)) {
+            self.response.push((first - ready).num_seconds().max(0));
+        }
+    }
+}
+
+impl ResponseAcc {
+    fn record(&mut self, r: &PrRecord, tm: &Timings) {
+        for q in &tm.requests {
+            match (q.at, q.answered) {
+                (Some(at), Some(ans)) => {
+                    self.theirs.push((ans - at).num_seconds());
+                    self.response.their_answered += 1;
+                }
+                (Some(at), None) if r.state == PrState::Open && !q.resolved => {
+                    self.response.unanswered += 1;
+                    self.response.oldest_unanswered =
+                        Some(self.response.oldest_unanswered.map_or(at, |o| o.min(at)));
+                }
+                _ => {}
+            }
+        }
+        match (tm.ready_at, tm.first_response) {
+            (Some(ready), Some(first)) => {
+                self.m.push((first - ready).num_seconds().max(0));
+                self.response.m_answered += 1;
+            }
+            (Some(ready), None) if r.state == PrState::Open && !r.is_draft => {
+                self.response.awaiting_first += 1;
+                self.response.oldest_awaiting = Some(
+                    self.response
+                        .oldest_awaiting
+                        .map_or(ready, |o| o.min(ready)),
+                );
+            }
+            _ => {}
+        }
+    }
+}
+
+fn given_record(
+    r: &PrRecord,
+    repo: &str,
+    author: Option<&str>,
+    in_windows: &impl Fn(Option<Time>) -> Vec<&'static str>,
+    acc: &mut BTreeMap<String, PersonAcc>,
+) {
+    let mut give = |who: &str, at: Option<Time>, reviewed: bool, f: &dyn Fn(&mut Given)| {
+        if is_bot(who, None) {
+            return;
+        }
+        let key = canonical(who);
+        if author == Some(key.as_str()) {
+            return;
+        }
+        let p = acc.entry(key).or_default();
+        for id in in_windows(at) {
+            for k in [repo, ALL_REPOS] {
+                let g = p.given.entry((id.to_string(), k.to_string())).or_default();
+                f(&mut g.given);
+                if reviewed && g.prs.insert((repo.to_string(), r.number)) {
+                    g.given.prs += 1;
+                }
+            }
+        }
+    };
+    for t in &r.timeline {
+        let Some(who) = t.actor.as_deref().filter(|_| !t.actor_bot) else {
+            continue;
+        };
+        let said = states::phrases(t.body.as_deref().unwrap_or(""));
+        match t.kind.as_str() {
+            "IssueComment" => give(who, t.at, true, &|g| {
+                g.comments += 1;
+                g.requests += u64::from(said.request);
+                g.holds += u64::from(said.hold);
+            }),
+            "PullRequestReview" if t.state.as_deref() != Some("PENDING") => {
+                let state = t.state.clone().unwrap_or_default();
+                give(who, t.at, true, &|g| {
+                    g.reviews += 1;
+                    g.approved += u64::from(state == "APPROVED");
+                    g.changes_requested += u64::from(state == "CHANGES_REQUESTED");
+                    g.requests += u64::from(said.request || state == "CHANGES_REQUESTED");
+                    g.holds += u64::from(said.hold);
+                })
+            }
+            "ClosedEvent" if r.state == PrState::Closed => {
+                give(who, t.at, false, &|g| g.closes += 1)
+            }
+            _ => {}
+        }
+    }
+    if r.state == PrState::Merged {
+        let merger = r
+            .contribution
+            .merger
+            .clone()
+            .or_else(|| r.merged_by.clone());
+        if let Some(m) = merger {
+            give(&m, r.merged_at, false, &|g| g.merges += 1);
+        }
+    }
+}
+
+#[derive(Default)]
+struct ViewAcc {
+    people: BTreeMap<String, PersonAcc>,
+    repos: BTreeMap<(String, &'static str), RepoFlowAcc>,
+}
+
+impl ViewAcc {
+    fn record(
+        &mut self,
+        view: &mut PeopleView,
+        r: &PrRecord,
+        work: &WorkState,
+        repo: &str,
+        starts: &[(&'static str, Time)],
+        ctx: &Ctx,
+    ) {
+        let Self {
+            people: acc,
+            repos: repo_acc,
+        } = self;
+        let in_windows = |at: Option<Time>| -> Vec<&'static str> {
+            at.map(|at| {
+                starts
+                    .iter()
+                    .filter(|(_, s)| at >= *s)
+                    .map(|(id, _)| *id)
+                    .collect()
+            })
+            .unwrap_or_default()
+        };
+        let author = r.author.as_deref().map(canonical);
+        let human_author = author
+            .clone()
+            .filter(|_| !r.author_bot && !r.author.as_deref().is_some_and(|a| is_bot(a, None)));
+        let tm = human_author
+            .as_ref()
+            .filter(|_| r.fetched_at.is_some())
+            .map(|_| states::timings(r, ctx));
+        if r.state == PrState::Open {
+            let reply = tm.as_ref().and_then(|tm| {
+                tm.requests
+                    .iter()
+                    .rev()
+                    .find(|q| q.answered.is_none() && !q.resolved)
+                    .map(|q| Reply {
+                        at: q.at,
+                        by: q.by.clone(),
+                        subtype: q.subtype.clone(),
+                        url: q.url.clone(),
+                    })
+            });
+            view.items.push(Item {
+                repo: repo.to_string(),
+                number: r.number,
+                title: r.title.clone(),
+                url: match r.url.is_empty() {
+                    true => format!("https://github.com/{repo}/pull/{}", r.number),
+                    false => r.url.clone(),
+                },
+                author: author.clone(),
+                created_at: r.created_at,
+                work: work.clone(),
+                reply,
+            });
+            if let Some(a) = &human_author {
+                acc.entry(a.clone()).or_default().active = true;
+            }
+            for w in &work.waits_for {
+                acc.entry(w.clone()).or_default().active = true;
+            }
+        }
+        if matches!(r.state, PrState::Merged | PrState::Closed) {
+            let merger = r
+                .contribution
+                .merger
+                .clone()
+                .or_else(|| r.merged_by.clone())
+                .map(|m| canonical(&m));
+            let method = match r.contribution.merge_commit.as_ref().map(|m| m.parents) {
+                Some(2) => "merge commit",
+                Some(1) => "squash or rebase",
+                _ => "unknown",
+            };
+            for id in in_windows(r.merged_at.or(r.closed_at)) {
+                let f = repo_acc.entry((repo.to_string(), id)).or_default();
+                f.record(r, work, tm.as_ref(), merger.as_deref(), method);
+            }
+        }
+        if let (Some(a), PrState::Merged | PrState::Closed) = (&human_author, r.state) {
+            let at = r.merged_at.or(r.closed_at);
+            let p = acc.entry(a.clone()).or_default();
+            for id in in_windows(at) {
+                for key in [repo, ALL_REPOS] {
+                    let f = p.flow.entry((id.to_string(), key.to_string())).or_default();
+                    f.record(r, work, tm.as_ref());
+                }
+            }
+        }
+        if let (Some(a), Some(tm)) = (&human_author, &tm) {
+            let p = acc.entry(a.clone()).or_default();
+            for key in [repo, ALL_REPOS] {
+                let resp = p.response.entry(key.to_string()).or_default();
+                resp.record(r, tm);
+            }
+        }
+        given_record(r, repo, author.as_deref(), &in_windows, acc);
+    }
+}
+
 /// Builds the view from each repository's records and their work states
 /// (`states[i]` for `repos[i]`, from [`classify_repo`]) and the directory.
 pub fn build(
@@ -450,8 +724,7 @@ pub fn build(
         generated_at: Some(now),
         ..Default::default()
     };
-    let mut acc: BTreeMap<String, PersonAcc> = BTreeMap::new();
-    let mut repo_acc: BTreeMap<(String, &'static str), RepoFlowAcc> = BTreeMap::new();
+    let mut acc = ViewAcc::default();
     let empty = BTreeMap::new();
     for (i, input) in repos.iter().enumerate() {
         let repo = input.repo;
@@ -464,16 +737,6 @@ pub fn build(
         let starts = window_starts(now, input.release_at);
         let merges = states::merge_index(input.cache);
         let ctx = input.ctx(now, &merges);
-        let in_windows = |at: Option<Time>| -> Vec<&'static str> {
-            at.map(|at| {
-                starts
-                    .iter()
-                    .filter(|(_, s)| at >= *s)
-                    .map(|(id, _)| *id)
-                    .collect()
-            })
-            .unwrap_or_default()
-        };
         for r in input.cache.records.values() {
             view.records += 1;
             if r.fetched_at.is_some() {
@@ -482,228 +745,18 @@ pub fn build(
             let Some(work) = works.get(&r.number) else {
                 continue;
             };
-            let author = r.author.as_deref().map(canonical);
-            let human_author = author
-                .clone()
-                .filter(|_| !r.author_bot && !r.author.as_deref().is_some_and(|a| is_bot(a, None)));
-            // A record no deep fetch has read holds no timeline to time.
-            let tm = human_author
-                .as_ref()
-                .filter(|_| r.fetched_at.is_some())
-                .map(|_| states::timings(r, &ctx));
-            if r.state == PrState::Open {
-                let reply = tm.as_ref().and_then(|tm| {
-                    tm.requests
-                        .iter()
-                        .rev()
-                        .find(|q| q.answered.is_none() && !q.resolved)
-                        .map(|q| Reply {
-                            at: q.at,
-                            by: q.by.clone(),
-                            subtype: q.subtype.clone(),
-                            url: q.url.clone(),
-                        })
-                });
-                view.items.push(Item {
-                    repo: repo.to_string(),
-                    number: r.number,
-                    title: r.title.clone(),
-                    // A record no deep fetch has read holds no link yet.
-                    url: match r.url.is_empty() {
-                        true => format!("https://github.com/{repo}/pull/{}", r.number),
-                        false => r.url.clone(),
-                    },
-                    author: author.clone(),
-                    created_at: r.created_at,
-                    work: work.clone(),
-                    reply,
-                });
-                if let Some(a) = &human_author {
-                    acc.entry(a.clone()).or_default().active = true;
-                }
-                for w in &work.waits_for {
-                    acc.entry(w.clone()).or_default().active = true;
-                }
-            }
-
-            // The repository's flow: every merged and closed pull request.
-            if matches!(r.state, PrState::Merged | PrState::Closed) {
-                let landed = work.state == super::ledger::LANDED_ELSEWHERE;
-                let skip = work.state == "closed_folded_split_or_moved"
-                    || work.subtype.as_deref() == Some("accidental_quick_close");
-                let merger = r
-                    .contribution
-                    .merger
-                    .clone()
-                    .or_else(|| r.merged_by.clone())
-                    .map(|m| canonical(&m));
-                let method = match r.contribution.merge_commit.as_ref().map(|m| m.parents) {
-                    Some(2) => "merge commit",
-                    Some(1) => "squash or rebase",
-                    _ => "unknown",
-                };
-                for id in in_windows(r.merged_at.or(r.closed_at)) {
-                    let f = repo_acc.entry((repo.to_string(), id)).or_default();
-                    if r.state == PrState::Merged {
-                        f.flow.merged += 1;
-                        *f.flow
-                            .merged_by
-                            .entry(work.subtype.clone().unwrap_or_default())
-                            .or_default() += 1;
-                        *f.flow.methods.entry(method.to_string()).or_default() += 1;
-                        if let Some(m) = &merger {
-                            *f.flow.mergers.entry(m.clone()).or_default() += 1;
-                        }
-                        if let (Some(m), Some(c)) = (r.merged_at, r.created_at) {
-                            f.merge.push((m - c).num_seconds());
-                        }
-                    } else if landed {
-                        f.flow.landed_elsewhere += 1;
-                    } else if !skip {
-                        *f.flow.closed.entry(work.state.clone()).or_default() += 1;
-                    }
-                    if let Some((Some(ready), Some(first))) =
-                        tm.as_ref().map(|tm| (tm.ready_at, tm.first_response))
-                    {
-                        f.response.push((first - ready).num_seconds().max(0));
-                    }
-                }
-            }
-
-            // Flow: the author's merged and closed pull requests.
-            if let (Some(a), PrState::Merged | PrState::Closed) = (&human_author, r.state) {
-                let at = r.merged_at.or(r.closed_at);
-                let landed = work.state == super::ledger::LANDED_ELSEWHERE;
-                let skip = work.state == "closed_folded_split_or_moved"
-                    || work.subtype.as_deref() == Some("accidental_quick_close");
-                let p = acc.entry(a.clone()).or_default();
-                for id in in_windows(at) {
-                    for key in [repo, ALL_REPOS] {
-                        let f = p.flow.entry((id.to_string(), key.to_string())).or_default();
-                        if r.state == PrState::Merged {
-                            f.flow.merged += 1;
-                            *f.flow
-                                .merged_by
-                                .entry(work.subtype.clone().unwrap_or_default())
-                                .or_default() += 1;
-                            f.flow.closed_total += 1;
-                            if let (Some(m), Some(c)) = (r.merged_at, r.created_at) {
-                                f.merge.push((m - c).num_seconds());
-                            }
-                            if let (Some(m), Some(ready)) =
-                                (r.merged_at, tm.as_ref().and_then(|tm| tm.ready_at))
-                            {
-                                f.ready.push((m - ready).num_seconds());
-                            }
-                        } else if landed {
-                            f.flow.landed_elsewhere += 1;
-                            f.flow.closed_total += 1;
-                        } else if !skip {
-                            *f.flow.closed.entry(work.state.clone()).or_default() += 1;
-                            f.flow.closed_total += 1;
-                        }
-                    }
-                }
-            }
-
-            // Response times on the author's pull requests.
-            if let (Some(a), Some(tm)) = (&human_author, &tm) {
-                let p = acc.entry(a.clone()).or_default();
-                for key in [repo, ALL_REPOS] {
-                    let resp = p.response.entry(key.to_string()).or_default();
-                    for q in &tm.requests {
-                        match (q.at, q.answered) {
-                            (Some(at), Some(ans)) => {
-                                resp.theirs.push((ans - at).num_seconds());
-                                resp.response.their_answered += 1;
-                            }
-                            (Some(at), None) if r.state == PrState::Open && !q.resolved => {
-                                resp.response.unanswered += 1;
-                                resp.response.oldest_unanswered =
-                                    Some(resp.response.oldest_unanswered.map_or(at, |o| o.min(at)));
-                            }
-                            _ => {}
-                        }
-                    }
-                    match (tm.ready_at, tm.first_response) {
-                        (Some(ready), Some(first)) => {
-                            resp.m.push((first - ready).num_seconds().max(0));
-                            resp.response.m_answered += 1;
-                        }
-                        (Some(ready), None) if r.state == PrState::Open && !r.is_draft => {
-                            resp.response.awaiting_first += 1;
-                            resp.response.oldest_awaiting = Some(
-                                resp.response
-                                    .oldest_awaiting
-                                    .map_or(ready, |o| o.min(ready)),
-                            );
-                        }
-                        _ => {}
-                    }
-                }
-            }
-
-            // What people gave on someone else's pull request.
-            // `reviewed`: a comment or review, which counts the pull request
-            // among those they reviewed; merges and closes do not.
-            let mut give = |who: &str, at: Option<Time>, reviewed: bool, f: &dyn Fn(&mut Given)| {
-                if is_bot(who, None) {
-                    return;
-                }
-                let key = canonical(who);
-                if author.as_deref() == Some(key.as_str()) {
-                    return;
-                }
-                let p = acc.entry(key).or_default();
-                for id in in_windows(at) {
-                    for k in [repo, ALL_REPOS] {
-                        let g = p.given.entry((id.to_string(), k.to_string())).or_default();
-                        f(&mut g.given);
-                        if reviewed && g.prs.insert((repo.to_string(), r.number)) {
-                            g.given.prs += 1;
-                        }
-                    }
-                }
-            };
-            for t in &r.timeline {
-                let Some(who) = t.actor.as_deref().filter(|_| !t.actor_bot) else {
-                    continue;
-                };
-                let said = states::phrases(t.body.as_deref().unwrap_or(""));
-                match t.kind.as_str() {
-                    "IssueComment" => give(who, t.at, true, &|g| {
-                        g.comments += 1;
-                        g.requests += u64::from(said.request);
-                        g.holds += u64::from(said.hold);
-                    }),
-                    "PullRequestReview" if t.state.as_deref() != Some("PENDING") => {
-                        let state = t.state.clone().unwrap_or_default();
-                        give(who, t.at, true, &|g| {
-                            g.reviews += 1;
-                            g.approved += u64::from(state == "APPROVED");
-                            g.changes_requested += u64::from(state == "CHANGES_REQUESTED");
-                            g.requests += u64::from(said.request || state == "CHANGES_REQUESTED");
-                            g.holds += u64::from(said.hold);
-                        })
-                    }
-                    "ClosedEvent" if r.state == PrState::Closed => {
-                        give(who, t.at, false, &|g| g.closes += 1)
-                    }
-                    _ => {}
-                }
-            }
-            if r.state == PrState::Merged {
-                let merger = r
-                    .contribution
-                    .merger
-                    .clone()
-                    .or_else(|| r.merged_by.clone());
-                if let Some(m) = merger {
-                    give(&m, r.merged_at, false, &|g| g.merges += 1);
-                }
-            }
+            acc.record(&mut view, r, work, repo, &starts, &ctx);
         }
     }
+    finish_view(view, acc.people, acc.repos, dir)
+}
+
+fn finish_view(
+    mut view: PeopleView,
+    acc: BTreeMap<String, PersonAcc>,
+    repo_acc: BTreeMap<(String, &'static str), RepoFlowAcc>,
+    dir: &Directory,
+) -> PeopleView {
     view.items
         .sort_by(|a, b| (&a.repo, a.number).cmp(&(&b.repo, b.number)));
     for ((repo, id), mut f) in repo_acc {

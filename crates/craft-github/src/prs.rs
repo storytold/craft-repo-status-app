@@ -575,6 +575,35 @@ impl<'a> Pass<'a> {
         Ok(())
     }
 
+    fn sweep_main(&self, v: &Value, cache: &mut PrCache) -> Result<bool> {
+        let mut target = v["repository"]["defaultBranchRef"]["target"].clone();
+        let mut next = contexts_cursor(&target);
+        while let Some(at) = next.take() {
+            if self.low() {
+                self.note_low();
+                return Ok(false);
+            }
+            self.count();
+            let (rollup, more) = self.contexts_page(&at)?;
+            let page = &rollup["contexts"];
+            let contexts = &mut target["statusCheckRollup"]["contexts"];
+            if let (Some(nodes), Some(read)) =
+                (contexts["nodes"].as_array_mut(), page["nodes"].as_array())
+            {
+                nodes.extend(read.iter().cloned());
+            }
+            if page["pageInfo"].is_object() {
+                contexts["pageInfo"] = page["pageInfo"].clone();
+            }
+            next = more;
+        }
+        cache.note_main(parse_main(&target), self.clock());
+        if let Some(me) = login(&v["viewer"]) {
+            self.update(|r| r.viewer = Some(me));
+        }
+        Ok(true)
+    }
+
     /// Sweeps `repo`'s open pull requests. Returns whether every page was
     /// read; only then are records missing from the open list marked for
     /// the backfill and `swept_at` set. Its pages count in the report but
@@ -594,34 +623,8 @@ impl<'a> Pass<'a> {
             vars.insert("after".into(), json!(after));
             let v = self.repo_query(SWEEP_QUERY, repo, vars)?;
             let r = &v["repository"];
-            if page == 0 {
-                // The checks on main are kept once every page is read; below
-                // the floor the checks read before stay.
-                let mut target = r["defaultBranchRef"]["target"].clone();
-                let mut next = contexts_cursor(&target);
-                while let Some(at) = next.take() {
-                    if self.low() {
-                        self.note_low();
-                        return Ok(false);
-                    }
-                    self.count();
-                    let (rollup, more) = self.contexts_page(&at)?;
-                    let page = &rollup["contexts"];
-                    let contexts = &mut target["statusCheckRollup"]["contexts"];
-                    if let (Some(nodes), Some(read)) =
-                        (contexts["nodes"].as_array_mut(), page["nodes"].as_array())
-                    {
-                        nodes.extend(read.iter().cloned());
-                    }
-                    if page["pageInfo"].is_object() {
-                        contexts["pageInfo"] = page["pageInfo"].clone();
-                    }
-                    next = more;
-                }
-                cache.note_main(parse_main(&target), self.clock());
-                if let Some(me) = login(&v["viewer"]) {
-                    self.update(|r| r.viewer = Some(me));
-                }
+            if page == 0 && !self.sweep_main(&v, cache)? {
+                return Ok(false);
             }
             let conn = &r["pullRequests"];
             for light in conn["nodes"]

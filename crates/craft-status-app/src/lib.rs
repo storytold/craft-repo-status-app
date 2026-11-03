@@ -537,6 +537,16 @@ fn hold_people(gate: &Gate, fetched: bool, pause: Option<(Instant, &str)>) {
     }
 }
 
+fn share_backoff(state: &AppState, resume: DateTime<Utc>) {
+    if let Err(e) = state
+        .shared
+        .as_ref()
+        .map_or(Ok(()), |s| s.note_backoff(resume))
+    {
+        eprintln!("could not share the backoff: {e}");
+    }
+}
+
 /// Fetch the most overdue repository, if one is due and pacing allows, and
 /// decide how long to wait before the next.
 fn step(app: &AppHandle, pacing: &mut Pacing) {
@@ -551,13 +561,7 @@ fn step(app: &AppHandle, pacing: &mut Pacing) {
     let people_limit = people_rate_limit(&state.gate, pacing, now);
     // The PR poller shares the account: it should stop too.
     if let Some((_, resume)) = &people_limit {
-        if let Err(e) = state
-            .shared
-            .as_ref()
-            .map_or(Ok(()), |s| s.note_backoff(*resume))
-        {
-            eprintln!("could not share the backoff: {e}");
-        }
+        share_backoff(&state, *resume);
     }
     let due = {
         let mut snap = state.snapshot.lock().unwrap();
@@ -601,13 +605,7 @@ fn step(app: &AppHandle, pacing: &mut Pacing) {
             Err(GhError::RateLimited(until)) => {
                 let (pause, msg) = rate_limited(pacing, &until, now);
                 // The PR poller shares the account: it should stop too.
-                if let Err(e) = state
-                    .shared
-                    .as_ref()
-                    .map_or(Ok(()), |s| s.note_backoff(now + pause))
-                {
-                    eprintln!("could not share the backoff: {e}");
-                }
+                share_backoff(&state, now + pause);
                 (pause, Some(msg))
             }
             Err(GhError::Unauthorized) => {

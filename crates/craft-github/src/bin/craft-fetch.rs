@@ -210,6 +210,10 @@ fn main() {
         people(&gh, &repos, &cfg, &source);
         return;
     }
+    fetch_stats(&gh, &repos, &cfg, snapshot_path);
+}
+
+fn fetch_stats(gh: &GitHub, repos: &[String], cfg: &Config, snapshot_path: Option<String>) {
     let now = Utc::now();
     let shared = SharedCache::default_location().unwrap();
     let mut snap = Snapshot {
@@ -222,7 +226,7 @@ fn main() {
         "repo", "oPR", "oIss", "c4h", "p4h", "m4h", "i4h", "commits", "ppl", "issues", "prs", "build", "since", "bld dl",
         "total dl", "urg", "crit"
     );
-    for repo in &repos {
+    for repo in repos {
         let mut entry = RepoEntry::new(repo);
         entry.last_attempt_at = Some(now);
         // Shares the app's raw cache, so either warms it for the other.

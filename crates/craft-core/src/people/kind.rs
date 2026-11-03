@@ -93,7 +93,7 @@ static FIX_WORDS: LazyLock<Regex> = LazyLock::new(|| {
 });
 static COMMIT_FIX: LazyLock<Regex> = LazyLock::new(|| re(r"(?i)^fix(\(|:|\b)"));
 static BRANCH_PREFIX: LazyLock<Regex> = LazyLock::new(|| re(r"^(codex|claude|copilot|pr)/"));
-static BRANCH_TYPES: LazyLock<Vec<(Regex, &'static str)>> = LazyLock::new(|| {
+static BRANCH_TYPES: LazyLock<Vec<(Regex, &str)>> = LazyLock::new(|| {
     [
         (r"^(fix|bugfix|hotfix)[/-]", "fix"),
         (r"^(feat|feature)[/-]", "feature"),
@@ -381,14 +381,7 @@ pub fn classify(input: &Input) -> Kinded {
     }
 }
 
-fn kind_of(input: &Input, p: &Parsed) -> (&'static str, String) {
-    let title = strip_refs(input.title);
-    if RELEASE_TITLE.is_match(&title) || p.ty == Some("release") {
-        return (
-            "release",
-            "R1: a release title with a version number".into(),
-        );
-    }
+fn explicit_kind(input: &Input, p: &Parsed) -> Option<(&'static str, String)> {
     let area = p.area.as_deref().unwrap_or_default();
     let explicit = if let Some(t) = p.ty {
         let how = match p.form {
@@ -409,8 +402,19 @@ fn kind_of(input: &Input, p: &Parsed) -> (&'static str, String) {
     } else {
         None
     };
-    if let Some((Some(t), how)) = explicit {
-        return (t, how);
+    explicit.and_then(|(kind, how)| kind.map(|kind| (kind, how)))
+}
+
+fn kind_of(input: &Input, p: &Parsed) -> (&'static str, String) {
+    let title = strip_refs(input.title);
+    if RELEASE_TITLE.is_match(&title) || p.ty == Some("release") {
+        return (
+            "release",
+            "R1: a release title with a version number".into(),
+        );
+    }
+    if let Some(kind) = explicit_kind(input, p) {
+        return kind;
     }
 
     let mut by_class: Vec<(PathClass, u64)> = Vec::new();

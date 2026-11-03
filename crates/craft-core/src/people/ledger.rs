@@ -86,83 +86,9 @@ impl Ledger {
         for (repo, cache) in repos {
             let mut authored: BTreeSet<&str> = BTreeSet::new();
             for r in cache.records.values() {
-                let author = author_of(r);
-                let author_key = author.map(canonical);
-                let mut push =
-                    |at: Option<Time>, login: &str, kind: Kind, detail: Option<String>| {
-                        events.extend(event(repo, r.number, at, login, kind, detail));
-                    };
-                let merged = r.state == PrState::Merged;
-                if let (true, Some(a)) = (merged, author) {
-                    push(r.merged_at, a, Kind::AuthoredMerged, None);
-                }
-                if merged {
-                    if let Some(m) = r.contribution.merger.clone().or_else(|| {
-                        super::merger(r.contribution.merge_commit.as_ref(), r.merged_by.as_deref())
-                    }) {
-                        push(r.merged_at, &m, Kind::MergedBy, None);
-                    }
-                }
-                // The work state decides when there is one; otherwise the
-                // latest close, since a reopened pull request may have been
-                // closed again by hand.
-                let landed = match &r.derived.state {
-                    Some(d) => d.value == LANDED_ELSEWHERE,
-                    None => r
-                        .timeline
-                        .iter()
-                        .rev()
-                        .find(|t| t.kind == "ClosedEvent")
-                        .is_some_and(|t| t.closer.is_some()),
-                };
-                if let (PrState::Closed, true, Some(a)) = (r.state, landed, author) {
-                    push(r.closed_at, a, Kind::LandedElsewhere, None);
-                }
-                for t in r.timeline.iter().filter(|t| t.kind == "PullRequestReview") {
-                    let Some(actor) = t.actor.as_deref().filter(|_| !t.actor_bot) else {
-                        continue;
-                    };
-                    if Some(canonical(actor)) == author_key || t.state.as_deref() == Some("PENDING")
-                    {
-                        continue;
-                    }
-                    push(t.at, actor, Kind::Reviewed, t.state.clone());
-                }
-                for c in &r.contribution.commits {
-                    if c.is_merge || !authored.insert(c.oid.as_str()) {
-                        continue;
-                    }
-                    if let Some(who) = c.author.as_deref() {
-                        push(c.authored_at, who, Kind::Committed, None);
-                    }
-                }
+                record_events(repo, r, &mut authored, &mut events);
             }
-            let mut merged: Vec<&PrRecord> = cache
-                .records
-                .values()
-                .filter(|r| r.state == PrState::Merged)
-                .collect();
-            merged.sort_by_key(|r| (r.merged_at, r.number));
-            let mut credited: BTreeSet<&str> = BTreeSet::new();
-            for r in merged {
-                let author_key = author_of(r).map(canonical);
-                for c in &r.contribution.commits {
-                    if c.is_merge || !credited.insert(c.oid.as_str()) {
-                        continue;
-                    }
-                    if let Some(who) = c.author.as_deref() {
-                        if Some(canonical(who)) != author_key {
-                            let e =
-                                event(repo, r.number, r.merged_at, who, Kind::ReviewCommit, None);
-                            events.extend(e);
-                        }
-                    }
-                    for login in c.co_authors.iter().filter_map(|co| co.login.as_deref()) {
-                        let e = event(repo, r.number, r.merged_at, login, Kind::CoAuthored, None);
-                        events.extend(e);
-                    }
-                }
-            }
+            merged_events(repo, cache, &mut events);
         }
         events.sort_by(|a, b| {
             (a.at, &a.repo, a.number, a.kind).cmp(&(b.at, &b.repo, b.number, b.kind))
@@ -239,6 +165,89 @@ impl Ledger {
         );
         out.insert(ALL_TIME.to_string(), self.tally(|_| Some(Time::MIN_UTC)));
         out
+    }
+}
+
+fn record_events<'a>(
+    repo: &str,
+    r: &'a PrRecord,
+    authored: &mut BTreeSet<&'a str>,
+    events: &mut Vec<Event>,
+) {
+    let author = author_of(r);
+    let author_key = author.map(canonical);
+    let mut push = |at: Option<Time>, login: &str, kind: Kind, detail: Option<String>| {
+        events.extend(event(repo, r.number, at, login, kind, detail));
+    };
+    let merged = r.state == PrState::Merged;
+    if let (true, Some(a)) = (merged, author) {
+        push(r.merged_at, a, Kind::AuthoredMerged, None);
+    }
+    if merged {
+        if let Some(m) =
+            r.contribution.merger.clone().or_else(|| {
+                super::merger(r.contribution.merge_commit.as_ref(), r.merged_by.as_deref())
+            })
+        {
+            push(r.merged_at, &m, Kind::MergedBy, None);
+        }
+    }
+    let landed = match &r.derived.state {
+        Some(d) => d.value == LANDED_ELSEWHERE,
+        None => r
+            .timeline
+            .iter()
+            .rev()
+            .find(|t| t.kind == "ClosedEvent")
+            .is_some_and(|t| t.closer.is_some()),
+    };
+    if let (PrState::Closed, true, Some(a)) = (r.state, landed, author) {
+        push(r.closed_at, a, Kind::LandedElsewhere, None);
+    }
+    for t in r.timeline.iter().filter(|t| t.kind == "PullRequestReview") {
+        let Some(actor) = t.actor.as_deref().filter(|_| !t.actor_bot) else {
+            continue;
+        };
+        if Some(canonical(actor)) == author_key || t.state.as_deref() == Some("PENDING") {
+            continue;
+        }
+        push(t.at, actor, Kind::Reviewed, t.state.clone());
+    }
+    for c in &r.contribution.commits {
+        if c.is_merge || !authored.insert(c.oid.as_str()) {
+            continue;
+        }
+        if let Some(who) = c.author.as_deref() {
+            push(c.authored_at, who, Kind::Committed, None);
+        }
+    }
+}
+
+fn merged_events(repo: &str, cache: &PrCache, events: &mut Vec<Event>) {
+    let mut merged: Vec<&PrRecord> = cache
+        .records
+        .values()
+        .filter(|r| r.state == PrState::Merged)
+        .collect();
+    merged.sort_by_key(|r| (r.merged_at, r.number));
+    let mut credited: BTreeSet<&str> = BTreeSet::new();
+    for r in merged {
+        let author_key = author_of(r).map(canonical);
+        for c in &r.contribution.commits {
+            if c.is_merge || !credited.insert(c.oid.as_str()) {
+                continue;
+            }
+            if let Some(who) = c.author.as_deref() {
+                if Some(canonical(who)) != author_key {
+                    let e = event(repo, r.number, r.merged_at, who, Kind::ReviewCommit, None);
+                    events.extend(e);
+                }
+            }
+            for login in c.co_authors.iter().filter_map(|co| co.login.as_deref()) {
+                let e = event(repo, r.number, r.merged_at, login, Kind::CoAuthored, None);
+                events.extend(e);
+            }
+        }
     }
 }
 

@@ -1197,6 +1197,109 @@ struct Acc {
     first_seen: Option<(Time, String)>,
 }
 
+fn track_events(
+    rp: &Repo,
+    p: &PrRecord,
+    author: &str,
+    mature: bool,
+    pending: bool,
+) -> (Vec<TrackEvent>, bool) {
+    let landed = landed_at(p);
+    let closed = p.state == PrState::Closed && landed.is_none();
+    let mut events: Vec<TrackEvent> = Vec::new();
+    let mut counted = false;
+    if landed.is_some() {
+        rp.reverts_of(p, &mut events);
+        rp.follow_ups(p, author, &mut events);
+        rp.checklist(p, &mut events);
+        counted = mature && !pending;
+    } else if closed {
+        let dup = rp.duplicate(p, author, &mut events);
+        let why = if dup {
+            None
+        } else {
+            rp.declined(p, author, &mut events)
+        };
+        counted = mature && (dup || why.is_none());
+        if !dup {
+            if let Some(why) = why {
+                let class = p
+                    .derived
+                    .state
+                    .as_ref()
+                    .map(|d| d.value.replace('_', " "))
+                    .unwrap_or_else(|| "closed".into());
+                events.push(rp.event(
+                    p,
+                    "close",
+                    false,
+                    p.closed_at,
+                    format!("Listed only, {class}: {why}"),
+                    None,
+                ));
+            }
+        }
+        rp.checklist(p, &mut events);
+    }
+    (events, counted)
+}
+
+fn apply_track_events(
+    row: &mut TrackRow,
+    rp: &Repo,
+    p: &PrRecord,
+    author: &str,
+    mature: bool,
+    pending: bool,
+    result: (Vec<TrackEvent>, bool),
+) {
+    let (mut events, counted) = result;
+    let newest = events.iter().filter(|e| e.fault).filter_map(|e| e.at).max();
+    let mut first = true;
+    events.sort_by_key(|e| (!e.fault, e.at));
+    for e in events.iter_mut().filter(|e| e.fault) {
+        if !counted {
+            e.fault = false;
+            e.rule = format!(
+                "{} (not counted: {})",
+                e.rule,
+                not_counted_why(mature, pending)
+            );
+        } else if !first {
+            e.fault = false;
+            e.rule = format!(
+                "{} (also matched; one fault per pull request counts)",
+                e.rule
+            );
+        }
+        first = false;
+    }
+    if counted {
+        row.counted += 1;
+        let fault = events.iter().find(|e| e.fault);
+        if fault.is_some() {
+            row.faults += 1;
+            row.last_fault = row.last_fault.max(newest);
+        }
+        if landed_at(p).is_some() {
+            row.landed += 1;
+            let mc = p
+                .contribution
+                .commits
+                .iter()
+                .filter(|c| !c.is_merge)
+                .filter_map(|c| c.author.as_deref().map(canonical))
+                .filter(|a| a.as_str() != author && rp.m.contains(a))
+                .count() as u64;
+            row.maintainer_commits += mc;
+            if fault.is_none() && mc == 0 {
+                row.clean += 1;
+            }
+        }
+    }
+    row.events.extend(events);
+}
+
 /// One repository's rows before levels.
 fn repo_rows(rp: &Repo, window_start: Time) -> Vec<TrackRow> {
     let mut acc: BTreeMap<String, Acc> = BTreeMap::new();
@@ -1223,7 +1326,6 @@ fn repo_rows(rp: &Repo, window_start: Time) -> Vec<TrackRow> {
         row.prs += 1;
         row.first_activity = Some(row.first_activity.map_or(created, |f| f.min(created)));
         let landed = landed_at(p);
-        let closed = p.state == PrState::Closed && landed.is_none();
         let mature = now - created >= chrono::Duration::days(MATURE_DAYS);
         if mature {
             row.mature += 1;
@@ -1250,87 +1352,8 @@ fn repo_rows(rp: &Repo, window_start: Time) -> Vec<TrackRow> {
                 row.ci_own += 1;
             }
         }
-        let mut events: Vec<TrackEvent> = Vec::new();
-        let mut counted = false;
-        if landed.is_some() {
-            rp.reverts_of(p, &mut events);
-            rp.follow_ups(p, &author, &mut events);
-            rp.checklist(p, &mut events);
-            counted = mature && !pending;
-        } else if closed {
-            let dup = rp.duplicate(p, &author, &mut events);
-            let why = if dup {
-                None
-            } else {
-                rp.declined(p, &author, &mut events)
-            };
-            counted = mature && (dup || why.is_none());
-            if !dup {
-                if let Some(why) = why {
-                    let class = p
-                        .derived
-                        .state
-                        .as_ref()
-                        .map(|d| d.value.replace('_', " "))
-                        .unwrap_or_else(|| "closed".into());
-                    events.push(rp.event(
-                        p,
-                        "close",
-                        false,
-                        p.closed_at,
-                        format!("Listed only, {class}: {why}"),
-                        None,
-                    ));
-                }
-            }
-            rp.checklist(p, &mut events);
-        }
-        // One fault per pull request: the earliest counts, the rest are listed.
-        // The newest of them still dates the person's last fault.
-        let newest = events.iter().filter(|e| e.fault).filter_map(|e| e.at).max();
-        let mut first = true;
-        events.sort_by_key(|e| (!e.fault, e.at));
-        for e in events.iter_mut().filter(|e| e.fault) {
-            if !counted {
-                e.fault = false;
-                e.rule = format!(
-                    "{} (not counted: {})",
-                    e.rule,
-                    not_counted_why(mature, pending)
-                );
-            } else if !first {
-                e.fault = false;
-                e.rule = format!(
-                    "{} (also matched; one fault per pull request counts)",
-                    e.rule
-                );
-            }
-            first = false;
-        }
-        if counted {
-            row.counted += 1;
-            let fault = events.iter().find(|e| e.fault);
-            if fault.is_some() {
-                row.faults += 1;
-                row.last_fault = row.last_fault.max(newest);
-            }
-            if landed.is_some() {
-                row.landed += 1;
-                let mc = p
-                    .contribution
-                    .commits
-                    .iter()
-                    .filter(|c| !c.is_merge)
-                    .filter_map(|c| c.author.as_deref().map(canonical))
-                    .filter(|a| *a != author && rp.m.contains(a))
-                    .count() as u64;
-                row.maintainer_commits += mc;
-                if fault.is_none() && mc == 0 {
-                    row.clean += 1;
-                }
-            }
-        }
-        row.events.extend(events);
+        let events = track_events(rp, p, &author, mature, pending);
+        apply_track_events(row, rp, p, &author, mature, pending, events);
     }
     acc.into_iter()
         .filter(|(_, a)| a.row.prs > 0)

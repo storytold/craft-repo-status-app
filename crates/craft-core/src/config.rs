@@ -169,15 +169,21 @@ impl Default for PeopleConfig {
             owner_logins: Vec::new(),
             repo_owners: BTreeMap::new(),
             maintainers: Vec::new(),
-            rebase_repos: DEFAULT_REBASE_REPOS.iter().map(|s| s.to_string()).collect(),
-            batch_repos: DEFAULT_BATCH_REPOS.iter().map(|s| s.to_string()).collect(),
+            rebase_repos: DEFAULT_REBASE_REPOS
+                .iter()
+                .map(ToString::to_string)
+                .collect(),
+            batch_repos: DEFAULT_BATCH_REPOS
+                .iter()
+                .map(ToString::to_string)
+                .collect(),
             my_login: String::new(),
             track_record: false,
             track_record_window_days: DEFAULT_TRACK_DAYS,
             flaky_checks: BTreeMap::new(),
             gate_excluded_terms: DEFAULT_GATE_EXCLUDED
                 .iter()
-                .map(|(r, t)| (r.to_string(), t.iter().map(|s| s.to_string()).collect()))
+                .map(|(r, t)| (r.to_string(), t.iter().map(ToString::to_string).collect()))
                 .collect(),
         }
     }

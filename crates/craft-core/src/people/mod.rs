@@ -276,27 +276,7 @@ pub fn directory(repos: &[RepoPeople], roster: &[RosterRow]) -> Directory {
     let mut dir = Directory::default();
     for rp in repos {
         for r in rp.cache.records.values() {
-            if let Some(a) = &r.author {
-                dir.see(a, r.author_bot);
-            }
-            for login in [&r.merged_by, &r.contribution.merger].into_iter().flatten() {
-                dir.see(login, false);
-            }
-            for t in &r.timeline {
-                if let Some(a) = &t.actor {
-                    dir.see(a, t.actor_bot);
-                }
-            }
-            for c in &r.contribution.commits {
-                if let Some(a) = &c.author {
-                    dir.see(a, false);
-                }
-                for co in &c.co_authors {
-                    if let Some(l) = &co.login {
-                        dir.see(l, false);
-                    }
-                }
-            }
+            dir.see_record(r);
         }
         for m in rp.maintainers {
             dir.see(m, false).maintainer_of.push(rp.repo.to_string());
@@ -325,6 +305,30 @@ pub fn directory(repos: &[RepoPeople], roster: &[RosterRow]) -> Directory {
 }
 
 impl Directory {
+    fn see_record(&mut self, r: &record::PrRecord) {
+        if let Some(a) = &r.author {
+            self.see(a, r.author_bot);
+        }
+        for login in [&r.merged_by, &r.contribution.merger].into_iter().flatten() {
+            self.see(login, false);
+        }
+        for t in &r.timeline {
+            if let Some(a) = &t.actor {
+                self.see(a, t.actor_bot);
+            }
+        }
+        for c in &r.contribution.commits {
+            if let Some(a) = &c.author {
+                self.see(a, false);
+            }
+            for co in &c.co_authors {
+                if let Some(l) = &co.login {
+                    self.see(l, false);
+                }
+            }
+        }
+    }
+
     /// The person `login` counts as, added when new.
     fn see(&mut self, login: &str, bot: bool) -> &mut Person {
         let p = self
