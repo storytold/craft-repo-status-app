@@ -13,6 +13,7 @@ use std::sync::{mpsc, Mutex};
 use std::time::{Duration, Instant, SystemTime};
 
 use chrono::{DateTime, Local, Timelike, Utc};
+use craft_core::config::TableHeadings;
 use craft_core::{
     Cache, Config, MainCi, RepoEntry, Schedule, SharedCache, Snapshot, TokenStatus, WindowState,
 };
@@ -99,6 +100,7 @@ struct Meta {
     shortcut: String,
     frequent_over: u64,
     high_quality: u8,
+    table_headings: TableHeadings,
 }
 
 fn meta(app: &AppHandle) -> Meta {
@@ -121,6 +123,7 @@ fn meta(app: &AppHandle) -> Meta {
         shortcut: cfg.shortcuts.toggle_window.clone(),
         frequent_over: pr_cfg.frequent_over,
         high_quality: pr_cfg.high_quality,
+        table_headings: cfg.table_headings,
     }
 }
 

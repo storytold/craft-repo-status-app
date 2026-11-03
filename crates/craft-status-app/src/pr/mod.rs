@@ -2,13 +2,13 @@
 //! `poller`), around `pr-core`, `pr-github` and `pr-claude`. Third-party repos stay
 //! out of all of this: see `pr_core::Config::watched`.
 
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, VecDeque};
 use std::path::PathBuf;
 use std::sync::{mpsc, Mutex};
 
 use craft_core::Snapshot;
 use poller::{ClaudeRequest, Status, Wake};
-use pr_core::views::{self, PrFull, PrRow, RepoRow, RepoView};
+use pr_core::views::{self, IssueRow, PrFull, PrRow, RepoRow, RepoView};
 use pr_core::{Config, DetailRef, StatusFacts, Store};
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, State};
@@ -88,6 +88,9 @@ pub fn spawn(app: AppHandle, threads: Threads) {
 #[derive(Serialize)]
 pub struct Overview {
     repos: Vec<RepoRow>,
+    /// Every repo's most urgent issues, third parties too, most urgent first.
+    issues: Vec<IssueRow>,
+    icons: BTreeMap<String, String>,
     status: Status,
 }
 
@@ -108,9 +111,14 @@ fn reading(app: &AppHandle) -> Reading {
 #[tauri::command(async)]
 pub fn get_pr_overview(app: AppHandle, state: State<PrReview>) -> Overview {
     let r = reading(&app);
-    let rows = views::overview(&state.store.lock().unwrap(), &r.repos, &r.cfg, &r.facts);
+    let store = state.store.lock().unwrap();
+    let rows = views::overview(&store, &r.repos, &r.cfg, &r.facts);
+    let issues = views::issues(&store, &r.repos, &r.cfg, &r.facts);
+    drop(store);
     Overview {
         repos: rows,
+        issues,
+        icons: views::icons(&r.facts),
         status: state.status.lock().unwrap().clone(),
     }
 }
@@ -130,7 +138,13 @@ pub fn get_pr_repo(app: AppHandle, state: State<PrReview>, repo: String) -> Opti
 #[tauri::command(async)]
 pub fn get_pr_queue(app: AppHandle, state: State<PrReview>) -> Vec<PrRow> {
     let r = reading(&app);
-    views::queue(&state.store.lock().unwrap(), &r.repos, &r.cfg, QUEUE_LIMIT)
+    views::queue(
+        &state.store.lock().unwrap(),
+        &r.repos,
+        &r.cfg,
+        &r.facts,
+        QUEUE_LIMIT,
+    )
 }
 
 #[tauri::command(async)]
@@ -152,7 +166,11 @@ pub fn refresh_prs(state: State<PrReview>) {
 }
 
 #[tauri::command]
-pub fn refresh_pr_repo(state: State<PrReview>, repo: String) {
+pub fn refresh_pr_repo(app: AppHandle, state: State<PrReview>, repo: String) {
+    // A third party's page can ask, but its PRs are never fetched.
+    if !reading(&app).repos.contains(&repo) {
+        return;
+    }
     let mut forced = state.forced_lists.lock().unwrap();
     if !forced.contains(&repo) {
         forced.push(repo);

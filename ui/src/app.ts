@@ -1,24 +1,24 @@
-// Craft Status UI: the window's chrome and tabs. Downloads and Fix first render the
-// snapshot pushed by the Rust status poller; the PR tab is pr-app.ts. main.ts picks
+// Craft Status UI: the window's chrome and tabs. Downloads renders the snapshot pushed
+// by the Rust status poller; the PR tab, with its issue lists, is pr-app.ts. main.ts picks
 // the Tauri API, or a browser stand-in, and calls `start`.
 
 import {
   ALL_TIME, COLUMNS, RECENT, WINDOWS, MANUAL, windowById, value, orderedEntries, nextSort, dropIndex,
-  freshness, ago, formatRate, totals, urgentAcross, tokenStatus, isRefreshing, isThirdParty,
+  freshness, ago, formatRate, totals, tokenStatus, isRefreshing, isThirdParty,
   mainCiFailing, mainCiText, mainCiTip, mainCiUrl,
   REPO_KINDS, isRepoHidden, toggleKind, manualOrder, reorderVisible,
 } from './model.ts';
 import type { Column, Meta, RepoEntry, Snapshot, Sort } from './model.ts';
 import { startPrs } from './pr-app.ts';
 import type { Route } from './pr-app.ts';
-import { $, DAY, classes, el, load, localTime, save } from './dom.ts';
+import { $, DAY, classes, el, headingLabel, load, localTime, save } from './dom.ts';
 import type { Api } from './dom.ts';
 
 export type { Api } from './dom.ts';
 
-type View = 'repos' | 'prs' | 'urgent';
+type View = 'repos' | 'prs';
 
-const asView = (v: string | null): View => (v === 'urgent' || v === 'prs' ? v : 'repos');
+const asView = (v: string | null): View => (v === 'prs' ? v : 'repos');
 
 interface State {
   snap: Snapshot | null;
@@ -27,8 +27,6 @@ interface State {
   sort: Sort;
   order: string[];
   window: string;
-  urgentRepo: string;
-  criticalOnly: boolean;
   /** The ids of the REPO_KINDS toggled off. */
   hiddenKinds: string[];
 }
@@ -64,8 +62,6 @@ export function start(api: Api, prRoute?: Route): () => void {
     sort: load<Sort>('sort', { key: 'urgency', dir: 'desc' }),
     order: load<string[]>('order', []),
     window: windowById(load('window', '')).id,
-    urgentRepo: '',
-    criticalOnly: load('criticalOnly', false),
     hiddenKinds: load<string[]>('hiddenKinds', []),
   };
 
@@ -200,18 +196,21 @@ export function start(api: Api, prRoute?: Route): () => void {
     }
     const picker = groupRow.querySelector<HTMLSelectElement>('.window-picker')!;
     if (picker.value !== state.window) picker.value = state.window;
+    const verticalHeadings = state.meta.table_headings?.downloads === 'vertical';
+    $('table').classList.toggle('vertical-headings', verticalHeadings);
     const cols = el('tr', { class: 'cols' });
     COLUMNS.forEach((c, i) => {
       const sorted = state.sort.key === c.key;
+      const vertical = verticalHeadings && c.kind !== 'text';
       cols.append(el('th', {
         title: c.title?.replace('{span}', windowById(state.window).span) ?? `Sort by ${c.label}`,
-        class: classes(sorted && 'sorted', sorted && state.sort.dir === 'asc' && 'asc', groupStart(i)),
+        class: classes(sorted && 'sorted', sorted && state.sort.dir === 'asc' && 'asc', groupStart(i), vertical && 'vertical'),
         onclick: () => {
           state.sort = nextSort(state.sort, c.key);
           save('sort', state.sort);
           render();
         },
-      }, c.label));
+      }, headingLabel(c.label, vertical)));
     });
     groupRow.nextSibling?.remove();
     $('thead').append(cols);
@@ -245,12 +244,12 @@ export function start(api: Api, prRoute?: Route): () => void {
       return el('tr', {
         class: classes(stale && 'stale', e.error && 'error'),
         dataset: { repo: e.repo },
-        title: 'Click for this repo’s most urgent issues · drag to reorder',
+        title: 'Click for this repo’s PRs and issues · drag to reorder',
         onpointerdown: startRowDrag,
         onclick: () => {
           if (justDragged) return;
-          state.urgentRepo = e.repo;
-          setView('urgent');
+          prs.openRepo(e.repo);
+          setView('prs');
         },
       }, COLUMNS.map((c, i) => el('td', { class: groupStart(i) }, cell(e, c))));
     }));
@@ -316,7 +315,7 @@ export function start(api: Api, prRoute?: Route): () => void {
 
   function endRowDrag(): void {
     if (!finishRowDrag()) return;
-    // The click that follows this pointerup must not open the urgent view.
+    // The click that follows this pointerup must not open the repo's page.
     justDragged = true;
     setTimeout(() => { justDragged = false; });
     const dragged = [...$('tbody').children].map((r) => (r as HTMLElement).dataset.repo ?? '');
@@ -329,32 +328,6 @@ export function start(api: Api, prRoute?: Route): () => void {
 
   function cancelRowDrag(): void {
     if (finishRowDrag()) render();
-  }
-
-  function renderUrgent(snap: Snapshot): void {
-    const shown = shownRepos(snap);
-    if (!shown.some((r) => r.repo === state.urgentRepo)) state.urgentRepo = '';
-    const sel = $<HTMLSelectElement>('urgent-repo');
-    sel.replaceChildren(el('option', { value: '' }, 'All repositories'),
-      ...shown.map((r) => el('option', { value: r.repo }, shortName(r.repo))));
-    sel.value = state.urgentRepo;
-    $<HTMLInputElement>('critical-only').checked = state.criticalOnly;
-    const items = urgentAcross(shown, { repo: state.urgentRepo, criticalOnly: state.criticalOnly });
-    const SEVERE = /crash|panic|freeze|hang|data loss|corruption|won't|blank|security/;
-    $('urgent-list').replaceChildren(...items.map((u) => {
-      const a = Math.min(1, u.score / 90) * 0.5;
-      return el('li', { class: `urgent-item${u.critical ? ' critical' : ''}`, onclick: () => openUrl(u.url), title: u.url },
-        el('span', { class: 'score', style: `background: rgb(var(--hot-rgb) / ${a.toFixed(2)})` }, String(u.score)),
-        el('span', { class: 'u-repo' }, appIcon(snap.repos.find((r) => r.repo === u.repo) ?? { repo: u.repo }), shortName(u.repo), thirdPartyTag(u.repo)),
-        el('div', { class: 'u-title' },
-          el('span', { class: 'num' }, `#${u.number}`), el('span', { class: 'text' }, u.title),
-          el('div', { class: 'reasons' }, u.reasons.map((r) => el('span', { class: `reason${SEVERE.test(r) ? ' sev' : ''}` }, r)),
-            u.labels.filter((l) => !u.reasons.includes(`${l} label`)).map((l) => el('span', { class: 'reason' }, l)))),
-        el('span', { class: 'u-age', title: `Opened ${localTime(u.created_at)}` }, ago(u.created_at)));
-    }));
-    if (!items.length) {
-      $('urgent-list').replaceChildren(el('li', { class: 'empty' }, snap.repos.some((r) => r.stats) ? 'Nothing urgent. 🎉' : 'Waiting for the first poll…'));
-    }
   }
 
   function renderStatus(snap: Snapshot): void {
@@ -396,11 +369,7 @@ export function start(api: Api, prRoute?: Route): () => void {
     $('token').textContent = token.text;
     $('token').title = token.title;
     $('token').classList.toggle('bad', token.bad);
-    const shown = shownRepos(snap);
-    const critical = shown.reduce((n, r) => n + (r.stats?.critical_issues ?? 0), 0);
-    $('urgent-count').textContent = critical ? String(critical) : '';
-    $('urgent-count').title = `${critical} critical open issues`;
-    $('repo-count').textContent = String(shown.length);
+    $('repo-count').textContent = String(shownRepos(snap).length);
   }
 
   function render(): void {
@@ -410,7 +379,6 @@ export function start(api: Api, prRoute?: Route): () => void {
     if (!snap || drag?.moved) return;
     renderStatus(snap);
     if (state.view === 'repos') renderTable(snap);
-    else if (state.view === 'urgent') renderUrgent(snap);
   }
 
   /** What's on screen for the current tab, whether or not there's data yet. */
@@ -418,7 +386,6 @@ export function start(api: Api, prRoute?: Route): () => void {
     const onPrs = state.view === 'prs';
     document.querySelectorAll<HTMLElement>('[data-view]').forEach((b) => b.setAttribute('aria-selected', String(b.dataset.view === state.view)));
     $('repos-view').hidden = state.view !== 'repos';
-    $('urgent-view').hidden = state.view !== 'urgent';
     $('prs-view').hidden = !onPrs;
     for (const id of ['pr-nav', 'crumbs', 'pr-pill', 'pr-foot']) $(id).hidden = !onPrs;
     for (const id of ['fresh-pill', 'refreshed', 'status-foot']) $(id).hidden = onPrs;
@@ -441,6 +408,8 @@ export function start(api: Api, prRoute?: Route): () => void {
     const mac = navigator.platform.toLowerCase().includes('mac');
     $('shortcut').textContent = (state.meta.shortcut ?? '').replace('CmdOrCtrl', mac ? '⌘' : 'Ctrl').replace('Shift', '⇧').replaceAll('+', '');
     prs.setHighQuality(state.meta.high_quality);
+    prs.setVerticalHeadings(state.meta.table_headings?.prs !== 'horizontal');
+    render();
   }
 
   // ───────────────────────────── wiring ─────────────────────────────
@@ -471,16 +440,8 @@ export function start(api: Api, prRoute?: Route): () => void {
   renderKinds();
 
   document.querySelectorAll<HTMLElement>('[data-view]').forEach((b) => b.addEventListener('click', () => {
-    const view = asView(b.dataset.view ?? null);
-    if (view === 'urgent' && state.view !== 'urgent') state.urgentRepo = '';
-    setView(view);
+    setView(asView(b.dataset.view ?? null));
   }));
-  $('urgent-repo').addEventListener('change', (e) => { state.urgentRepo = (e.target as HTMLSelectElement).value; render(); });
-  $('critical-only').addEventListener('change', (e) => {
-    state.criticalOnly = (e.target as HTMLInputElement).checked;
-    save('criticalOnly', state.criticalOnly);
-    render();
-  });
   const refresh = (): void => {
     if (state.view === 'prs') prs.refresh();
     else void api.invoke('refresh_now');
@@ -497,7 +458,6 @@ export function start(api: Api, prRoute?: Route): () => void {
     else if (mod && e.key.toLowerCase() === 'r') { e.preventDefault(); refresh(); }
     else if (mod && e.key === '1') { e.preventDefault(); setView('repos'); }
     else if (mod && e.key === '2') { e.preventDefault(); setView('prs'); }
-    else if (mod && e.key === '3') { e.preventDefault(); setView('urgent'); }
   });
 
   api.listen<Snapshot>('craft:snapshot', (s) => { state.snap = s; render(); });
