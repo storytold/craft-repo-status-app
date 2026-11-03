@@ -564,6 +564,21 @@ test('a repo\'s page switches between its PRs and its issues, and keeps the pane
   assert.deepEqual(prRows(h), [1, 2]);
 });
 
+test('an uncached reviewed repository keeps its PR pane and can request the first listing', async () => {
+  const h = await setup(undefined, { view: 'repo', repo: 'o/gamma' });
+  assert.ok(h.$('[data-pane="prs"]'));
+  assert.equal(h.$('[data-pane="prs"]')!.getAttribute('aria-pressed'), 'true');
+  assert.doesNotMatch(h.$('#prs-view')!.textContent!, /Third-party repo/);
+  (h.$('#refresh') as HTMLElement).click();
+  assert.deepEqual(h.calls.at(-1), { cmd: 'refresh_pr_repo', args: { repo: 'o/gamma' } });
+  (h.$('[data-pane="issues"]') as HTMLElement).click();
+  (h.$('#refresh') as HTMLElement).click();
+  assert.deepEqual(h.calls.at(-1), { cmd: 'refresh_repo', args: { repo: 'o/gamma' } });
+  (h.$('[data-pane="prs"]') as HTMLElement).click();
+  (h.$('#refresh') as HTMLElement).click();
+  assert.deepEqual(h.calls.at(-1), { cmd: 'refresh_pr_repo', args: { repo: 'o/gamma' } });
+});
+
 test('a third party\'s page has its issues only, and never asks for its PRs', async () => {
   const h = await setup(undefined, { view: 'repo', repo: 'tangency-labs/solidcraft' });
   await tick();
