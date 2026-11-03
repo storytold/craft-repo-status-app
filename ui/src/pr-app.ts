@@ -886,9 +886,14 @@ export function startPrs(api: Api, initial: Route = { view: 'apps' }): PrTab {
     },
   }, label, el('span', { class: 'badge' }, compact(n)));
 
+  /** GitHub repository names match without regard to letter case. */
+  const sameRepo = (a: string, b: string): boolean => a.toLowerCase() === b.toLowerCase();
+
+  const repoIssues = (repo: string): IssueRow[] => (state.overview?.issues ?? []).filter((i) => sameRepo(i.repo, repo));
+
   /** Switches a reviewed repo's page between its PRs and its issues. */
   function paneSwitch(repo: string): Node[] {
-    const issues = (state.overview?.issues ?? []).filter((i) => i.repo === repo);
+    const issues = repoIssues(repo);
     return [
       paneButton('prs', 'PRs', state.repoView?.prs.length ?? 0, repo),
       paneButton('issues', 'Issues', issues.length, repo),
@@ -897,10 +902,10 @@ export function startPrs(api: Api, initial: Route = { view: 'apps' }): PrTab {
   }
 
   const reviewedRepo = (repo: string): boolean =>
-    state.overview?.repos.some((r) => r.repo.toLowerCase() === repo.toLowerCase()) ?? false;
+    state.overview?.repos.some((r) => sameRepo(r.repo, repo)) ?? false;
 
   function renderRepoIssues(repo: string): void {
-    const rows = (state.overview?.issues ?? []).filter((i) => i.repo === repo);
+    const rows = repoIssues(repo);
     const controls: Node[] = reviewedRepo(repo)
       ? paneSwitch(repo)
       : [el('span', { class: 'hint' }, 'The app shows this repository\'s issues, but its PRs aren\'t fetched or reviewed.')];

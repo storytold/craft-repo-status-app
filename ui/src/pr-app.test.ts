@@ -579,6 +579,14 @@ test('an uncached reviewed repository keeps its PR pane and can request the firs
   assert.deepEqual(h.calls.at(-1), { cmd: 'refresh_pr_repo', args: { repo: 'o/gamma' } });
 });
 
+test('a repo\'s page lists its issues when the route names it in other letter case', async () => {
+  const h = await setup(undefined, { view: 'repo', repo: 'O/Alpha' });
+  await tick();
+  assert.match(h.$('[data-pane="issues"]')!.textContent!, /Issues.*3/);
+  (h.$('[data-pane="issues"]') as HTMLElement).click();
+  assert.deepEqual(issueNumbers(h), [50, 51, 52]);
+});
+
 test('a third party\'s page has its issues only, and never asks for its PRs', async () => {
   const h = await setup(undefined, { view: 'repo', repo: 'tangency-labs/solidcraft' });
   await tick();
