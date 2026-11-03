@@ -266,11 +266,12 @@ export function start(api: Api, prRoute?: Route): () => void {
 
   const FOCUSABLE = 'a[href], button, [tabindex="0"]';
 
-  /** Names a focusable element across rebuilds: its row and its place in the row. */
+  /** Names a focusable element across rebuilds: its row, its column and its place in the cell. */
   function focusKey(n: Element): string {
+    const cell = n.closest('td');
     const row = n.closest('tr');
-    if (row) return `${row.dataset.repo} ${[...row.querySelectorAll(FOCUSABLE)].indexOf(n)}`;
-    return n.getAttribute('title') ?? '';
+    if (!cell || !row) return '';
+    return `${row.dataset.repo} ${cell.cellIndex} ${[...cell.querySelectorAll(FOCUSABLE)].indexOf(n)}`;
   }
 
   /** Notes the focused element in `list`. The returned function, called after `list` is rebuilt,
