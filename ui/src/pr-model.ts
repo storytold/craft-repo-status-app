@@ -219,7 +219,7 @@ export interface PrDetail {
   human_threads_open: number;
   reviews: { author: string; state: string; at?: string | null }[];
   comments: { author: string; text: string; at?: string | null; url: string }[];
-  linked_issues: { number: number; title: string }[];
+  linked_issues: { repository?: string; number: number; title: string }[];
 }
 
 export interface Analysis {

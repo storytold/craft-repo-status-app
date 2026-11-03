@@ -108,7 +108,7 @@ afterEach(async () => { await teardown?.(); teardown = null; });
 
 const tick = (ms = 0) => new Promise((r) => setTimeout(r, ms));
 
-async function setup(overview?: Partial<Overview>, route: Route = { view: 'apps' }): Promise<Harness> {
+async function setup(overview?: Partial<Overview>, route: Route = { view: 'apps' }, full: PrFull = FULL): Promise<Harness> {
   const win = new Window({ url: 'http://localhost/index.html' });
   const doc = win.document as unknown as Document;
   doc.body.innerHTML = BODY;
@@ -126,7 +126,7 @@ async function setup(overview?: Partial<Overview>, route: Route = { view: 'apps'
         get_pr_overview: { repos: [row({}), row({ repo: 'o/beta', open: 9, landable: 0, reviewable: 4, listed: true }), row({ repo: 'o/gamma', listed: false, open: 0, open_hint: 77 })], issues: ISSUES, icons: {}, status: STATUS, ...overview },
         get_pr_repo: args?.repo === 'o/alpha' ? REPO : null,
         get_pr_queue: [pr({ repo: 'o/beta', number: 9, title: 'Queued', related: [rel(1)] })],
-        get_pr: args?.number === 1 ? FULL : null,
+        get_pr: args?.number === 1 ? full : null,
       };
       return answers[cmd] as T;
     },
@@ -375,6 +375,26 @@ test('links only open through the host, and asking Claude queues it', async () =
   (h.$('[data-ask="deep"]') as HTMLElement).click();
   assert.ok(h.calls.some((c) => c.cmd === 'analyze_pr' && c.args?.deep === true && c.args?.number === 1));
   assert.equal(h.$('[data-ask="deep"]')!.hasAttribute('disabled'), true, 'no double spending');
+});
+
+test('linked issues open in their repository and old cache entries have no guessed link', async () => {
+  const full: PrFull = {
+    ...FULL,
+    detail: {
+      ...FULL.detail!,
+      linked_issues: [
+        { repository: 'other/repo', number: 42, title: 'Foreign issue' },
+        { number: 42, title: 'Old cached issue' },
+      ],
+    },
+  };
+  const h = await setup(undefined, { view: 'pr', repo: 'o/alpha', number: 1, from: 'repo' }, full);
+  const link = h.$$('.link').find((a) => a.textContent === 'other/repo#42 Foreign issue')!;
+  assert.ok(link);
+  link.click();
+  assert.deepEqual(h.calls.at(-1), { cmd: 'open_url', args: { url: 'https://github.com/other/repo/issues/42' } });
+  assert.ok(h.$$('span').some((s) => s.textContent === '#42 Old cached issue'));
+  assert.equal(h.$$('.link').some((a) => a.textContent?.includes('Old cached issue')), false);
 });
 
 test('refresh targets what is on screen', async () => {

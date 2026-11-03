@@ -698,6 +698,7 @@ pub fn parse_detail(n: &Value, now: Time) -> DetailResult {
             .map(|is| {
                 is.iter()
                     .map(|i| LinkedIssue {
+                        repository: text(&i["repository"]["nameWithOwner"]),
                         number: i["number"].as_u64().unwrap_or(0),
                         title: text(&i["title"]),
                     })
@@ -776,7 +777,7 @@ query($ids: [ID!]!) {
   nodes(ids: $ids) {
     ... on PullRequest {
       updatedAt headRefOid body mergeable mergeStateStatus reviewDecision
-      closingIssuesReferences(first: 5) { nodes { number title } }
+      closingIssuesReferences(first: 5) { nodes { number title repository { nameWithOwner } } }
       latestOpinionatedReviews(first: 10) { nodes { state commit { oid } author { login } } }
       files(first: 100) { totalCount nodes { path additions deletions changeType } }
       reviewThreads(first: 40) {
@@ -854,7 +855,7 @@ mod tests {
             "updatedAt": "2026-10-31T00:00:00Z", "headRefOid": "abc", "mergeable": "MERGEABLE",
             "mergeStateStatus": "CLEAN", "reviewDecision": "APPROVED",
             "body": "<!-- template -->Real words.<!-- bot -->",
-            "closingIssuesReferences": {"nodes": [{"number": 7, "title": "Bug"}]},
+            "closingIssuesReferences": {"nodes": [{"number": 7, "title": "Bug", "repository": {"nameWithOwner": "other/repo"}}]},
             "files": {"totalCount": 1, "nodes": [{"path": "a.rs", "additions": 2, "deletions": 1, "changeType": "MODIFIED"}]},
             "reviewThreads": {"totalCount": 4, "nodes": [
                 {"isResolved": false, "isOutdated": false, "path": "a.rs", "line": 12, "comments": {"nodes": [
@@ -902,6 +903,7 @@ mod tests {
         assert_eq!(d.reviews.len(), 1);
         assert_eq!(d.comments[0].text, "Rebased");
         assert_eq!(d.linked_issues[0].number, 7);
+        assert_eq!(d.linked_issues[0].repository, "other/repo");
         let states: Vec<&str> = d.checks.iter().map(|c| c.state.as_str()).collect();
         assert_eq!(states, ["SUCCESS", "SUCCESS", "IN_PROGRESS", "FAILURE"]);
         assert_eq!(r.ci_rollup.as_deref(), Some("SUCCESS"));

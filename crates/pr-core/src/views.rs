@@ -203,10 +203,15 @@ pub struct IssueRow {
 }
 
 /// The issues `pr` names in its title or says it closes.
-fn issues_of(pr: &Pr) -> Vec<u64> {
+fn issues_of(pr: &Pr, repo: &str) -> Vec<u64> {
     let mut out = issues_in_title(&pr.title);
     if let Some(d) = &pr.detail {
-        out.extend(d.linked_issues.iter().map(|i| i.number));
+        out.extend(
+            d.linked_issues
+                .iter()
+                .filter(|i| i.repository.eq_ignore_ascii_case(repo))
+                .map(|i| i.number),
+        );
     }
     out.sort_unstable();
     out.dedup();
@@ -320,7 +325,7 @@ impl<'a> Ctx<'a> {
         let Some(facts) = self.facts.repos.get(repo) else {
             return vec![];
         };
-        let names = issues_of(pr);
+        let names = issues_of(pr, repo);
         facts
             .urgent
             .iter()
@@ -393,7 +398,7 @@ impl<'a> Ctx<'a> {
         let data = store.repos.get(repo).filter(|_| reviewed);
         let mut by_issue: HashMap<u64, Vec<&Pr>> = HashMap::new();
         for pr in data.iter().flat_map(|d| d.prs.values()) {
-            for n in issues_of(pr) {
+            for n in issues_of(pr, repo) {
                 by_issue.entry(n).or_default().push(pr);
             }
         }
@@ -449,7 +454,7 @@ impl<'a> Ctx<'a> {
         let mut states: HashMap<u64, Vec<PrState>> = HashMap::new();
         for pr in d.prs.values() {
             let (author, a) = self.judge(pr, d);
-            for n in issues_of(pr) {
+            for n in issues_of(pr, &d.repo) {
                 states.entry(n).or_default().push(a.state);
             }
             r.inspected += a.inspected as u64;
@@ -1001,5 +1006,30 @@ mod tests {
         assert_eq!(view.row.critical_issues, 2);
         assert_eq!(view.row.no_fix, 1);
         assert!(repo_view(&s, "third/party", &repos, &cfg, &facts).is_none());
+    }
+
+    #[test]
+    fn linked_issues_match_their_repository() {
+        let (mut s, repos) = store();
+        let facts = with_issues(&mut s, &repos);
+        let pr = s.repo_mut(&repos[0]).prs.get_mut(&1).unwrap();
+        pr.title = "Repair linked issues".into();
+        pr.detail.as_mut().unwrap().linked_issues = serde_json::from_value(serde_json::json!([
+            { "number": 701, "title": "Elsewhere", "repository": "other/repo" },
+            { "number": 700, "title": "Here", "repository": "O/R" },
+            { "number": 701, "title": "Cached without repository" }
+        ]))
+        .unwrap();
+        let cfg = Config::default();
+        let rows = issues(&s, &repos, &cfg, &facts);
+        let foreign = rows.iter().find(|r| r.issue.number == 701).unwrap();
+        assert_eq!(foreign.stage, IssueStage::NoFix);
+        assert!(foreign.fixes.is_empty());
+        let local = rows.iter().find(|r| r.issue.number == 700).unwrap();
+        assert_eq!(local.fixes.len(), 1);
+        let view = repo_view(&s, &repos[0], &repos, &cfg, &facts).unwrap();
+        assert_eq!(view.row.no_fix, 1);
+        let pr = view.prs.iter().find(|p| p.number == 1).unwrap();
+        assert_eq!(pr.fixes.iter().map(|i| i.number).collect::<Vec<_>>(), [700]);
     }
 }
