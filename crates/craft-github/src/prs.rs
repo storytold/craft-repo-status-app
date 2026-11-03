@@ -1378,7 +1378,12 @@ pub fn parse_pr(v: &Value) -> Option<PrRecord> {
     let resolved = (state == PrState::Merged)
         .then(|| merger(merge_commit.as_ref(), merged_by.as_deref()))
         .flatten();
-    let issues = v["closingIssuesReferences"]["nodes"].as_array();
+    let issues: Vec<_> = v["closingIssuesReferences"]["nodes"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|issue| Some((issue["number"].as_u64()?, issue)))
+        .collect();
     let mut rec = PrRecord {
         id: string(&v["id"]),
         number,
@@ -1407,20 +1412,14 @@ pub fn parse_pr(v: &Value) -> Option<PrRecord> {
             .flatten()
             .filter_map(login)
             .collect(),
-        closing_issues: issues
-            .into_iter()
-            .flatten()
-            .filter_map(|i| i["number"].as_u64())
-            .collect(),
+        closing_issues: issues.iter().map(|(number, _)| *number).collect(),
         closing_titles: issues
-            .into_iter()
-            .flatten()
-            .map(|i| string(&i["title"]))
+            .iter()
+            .map(|(_, issue)| string(&issue["title"]))
             .collect(),
         closing_repos: issues
-            .into_iter()
-            .flatten()
-            .map(|i| string(&i["repository"]["nameWithOwner"]))
+            .iter()
+            .map(|(_, issue)| string(&issue["repository"]["nameWithOwner"]))
             .collect(),
         timeline: parse_timeline(&v["timelineItems"]),
         timeline_total: count(&v["timelineItems"]),
@@ -1807,6 +1806,23 @@ mod tests {
         };
         cached.apply_light(&light, now);
         assert_eq!(cached.url, "https://github.com/o/r/pull/42");
+    }
+
+    #[test]
+    fn closing_issue_fields_stay_aligned_across_null_nodes() {
+        let record = parse_pr(&json!({
+            "id": "PR_1", "number": 1,
+            "closingIssuesReferences": {"nodes": [
+                null,
+                {"number": 7, "title": "First", "repository": {"nameWithOwner": "o/first"}},
+                {"title": "Missing number"},
+                {"number": 8, "title": "Second", "repository": {"nameWithOwner": "o/second"}}
+            ]}
+        }))
+        .unwrap();
+        assert_eq!(record.closing_issues, [7, 8]);
+        assert_eq!(record.closing_titles, ["First", "Second"]);
+        assert_eq!(record.closing_repos, ["o/first", "o/second"]);
     }
 
     #[test]
