@@ -964,6 +964,29 @@ test('a pull request by the login that the app has not read yet shows in My PRs 
   assert.equal(h.doc.getElementById('mine-count')!.textContent, '2', 'it does not count as waiting on Ann');
 });
 
+test('My PRs refreshes elapsed times on clock ticks while retaining rows and links', async (t) => {
+  t.mock.timers.enable({ apis: ['Date', 'setInterval'], now: Date.parse(NOW) });
+  const view = { ...people(), viewer: 'ann-example' };
+  const item = view.items[0]!;
+  const recent = hoursBack(1 / 60);
+  item.created_at = recent;
+  item.work.since = recent;
+  item.work.hold!.since = recent;
+  item.reply = { at: recent, by: 'maint-one', subtype: 'rebase', url: REQUEST_URL };
+  const h = await setup({ host: (cmd) => (cmd === 'get_people' ? view : undefined) });
+  keydown(h, '5', true);
+  const row = mineRow(h, 'o/alpha#1');
+  const link = row.cells[1]!.firstElementChild;
+  const reply = row.cells[4]!.firstElementChild as HTMLElement;
+  const held = row.cells[5]!.firstElementChild as HTMLElement;
+  const before = [reply.title, held.title, row.cells[7]!.textContent, row.cells[8]!.textContent];
+  t.mock.timers.tick(120_000);
+  const after = [reply.title, held.title, row.cells[7]!.textContent, row.cells[8]!.textContent];
+  assert.ok(mineRow(h, 'o/alpha#1') === row);
+  assert.ok(row.cells[1]!.firstElementChild === link);
+  for (let i = 0; i < before.length; i++) assert.notEqual(after[i], before[i]);
+});
+
 test('My PRs says when there are no records or no login yet, and redraws for a new view or repo list, not for every snapshot', async () => {
   const h = await setup({ host: (cmd) => (cmd === 'get_people' ? null : undefined) });
   keydown(h, '5', true);
