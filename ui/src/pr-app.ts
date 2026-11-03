@@ -128,15 +128,19 @@ function approvers(r: PrRow): HTMLElement {
   return el('span', { class: 'n-good' }, names);
 }
 
-function fixesChip(f: FixesIssue): HTMLElement {
-  return el('span', { class: `chip fixes${f.critical ? ' crit' : ''}`, title: `Names an urgent issue: ${f.title}` }, `Fixes #${f.number}`);
+function issueNumber(f: { repo?: string; number: number }, repo: string): string {
+  return f.repo && f.repo.toLowerCase() !== repo.toLowerCase() ? `${f.repo}#${f.number}` : `#${f.number}`;
+}
+
+function fixesChip(f: FixesIssue, repo: string): HTMLElement {
+  return el('span', { class: `chip fixes${f.critical ? ' crit' : ''}`, title: `Names an urgent issue: ${f.title}` }, `Fixes ${issueNumber(f, repo)}`);
 }
 
 function titleCell(r: PrRow): HTMLElement {
   const chips: Node[] = [];
   if (r.interesting) chips.push(el('span', { class: 'chip star' }, '★ interesting'));
   chips.push(...flagChips(r, r.related));
-  for (const f of r.fixes.slice(0, 2)) chips.push(fixesChip(f));
+  for (const f of r.fixes.slice(0, 2)) chips.push(fixesChip(f, r.repo));
   for (const l of r.labels.slice(0, 3)) chips.push(el('span', { class: 'chip' }, l));
   return el('div', {},
     el('span', { class: 'pr-num' }, `#${r.number}`),
@@ -820,9 +824,9 @@ export function startPrs(api: Api, initial: Route = { view: 'apps' }): PrTab {
       title: f.title,
       onclick: (e: Event) => {
         e.stopPropagation();
-        go({ view: 'pr', repo: u.repo, number: f.number, from });
+        go({ view: 'pr', repo: f.repo || u.repo, number: f.number, from });
       },
-    }, `PR #${f.number}`, stateBadge(f.state));
+    }, `PR ${issueNumber(f, u.repo)}`, stateBadge(f.state));
     return el('li', { class: classes('urgent-item', u.critical && 'critical'), 'data-issue': u.number, onclick: () => openUrl(u.url), title: u.url },
       el('span', { class: 'score', style: `background: rgb(var(--hot-rgb) / ${heat.toFixed(2)})` }, Math.round(u.score)),
       showRepo ? el('span', { class: 'u-repo' }, appIcon(u.repo, icon), shortName(u.repo), thirdParty) : null,
@@ -1019,7 +1023,7 @@ export function startPrs(api: Api, initial: Route = { view: 'apps' }): PrTab {
     if (!pr.fixes.length) return null;
     return el('section', { class: 'card', id: 'fixes' }, el('h2', {}, 'Fixes urgent issues'),
       el('ul', { class: 'rows' }, pr.fixes.map((f) => el('li', {},
-        ghLink(`#${f.number} ${f.title}`, f.url, classes('name', f.critical && 'n-bad')),
+        ghLink(`${issueNumber(f, pr.repo)} ${f.title}`, f.url, classes('name', f.critical && 'n-bad')),
         el('span', { class: 'fig muted', title: 'Urgency score' }, Math.round(f.score))))));
   }
 

@@ -531,6 +531,37 @@ test('Fix first groups every repo\'s issues by what they need next, third partie
   assert.deepEqual(h.calls.at(-1), { cmd: 'open_url', args: { url: 'https://github.com/o/alpha/issues/50' } }, 'a row opens on GitHub');
 });
 
+test('an issue fix opens the PR in its actual repository', async () => {
+  const h = await setup({ issues: [issue({
+    repo: 'o/beta',
+    fixes: [{ repo: 'o/alpha', number: 1, title: 'Foreign fix', state: 'promising' }],
+  })] });
+  (h.$('[data-pr-view="issues"]') as HTMLElement).click();
+  await tick();
+  assert.match(h.$('.issue-fix')!.textContent!, /PR o\/alpha#1/);
+  (h.$('.issue-fix') as HTMLElement).click();
+  await tick();
+  assert.deepEqual(h.calls.findLast((c) => c.cmd === 'get_pr'), { cmd: 'get_pr', args: { repo: 'o/alpha', number: 1 } });
+});
+
+test('foreign issue chips and cards show the repository', async () => {
+  const fixes = [{ repo: 'o/beta', number: 50, title: 'Foreign issue', url: 'https://github.com/o/beta/issues/50', score: 60, critical: false }];
+  const original = REPO.prs[0]!.fixes;
+  REPO.prs[0]!.fixes = fixes;
+  try {
+    const h = await setup(undefined, { view: 'repo', repo: 'o/alpha' }, { ...FULL, fixes });
+    assert.equal(h.$('tr[data-number="1"] .chip.fixes')!.textContent, 'Fixes o/beta#50');
+    (h.$('tr[data-number="1"]') as HTMLElement).click();
+    await tick();
+    const link = h.$$('#fixes .link')[0]!;
+    assert.equal(link.textContent, 'o/beta#50 Foreign issue');
+    link.click();
+    assert.deepEqual(h.calls.at(-1), { cmd: 'open_url', args: { url: 'https://github.com/o/beta/issues/50' } });
+  } finally {
+    REPO.prs[0]!.fixes = original;
+  }
+});
+
 test('an issue\'s PR opens here, and Esc comes back to the list', async () => {
   const h = await setup();
   (h.$('[data-pr-view="issues"]') as HTMLElement).click();
