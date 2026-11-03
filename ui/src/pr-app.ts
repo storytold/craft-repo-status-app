@@ -1089,7 +1089,7 @@ export function startPrs(api: Api, initial: Route = { view: 'apps' }): PrTab {
     const typing = (e.target as HTMLElement | null)?.tagName === 'INPUT';
     if (e.key === 'Escape') {
       if (closeHelp()) return true;
-      if (typing && state.query) {
+      if (typing && (e.target as HTMLInputElement).type === 'search' && state.query) {
         state.query = '';
         (e.target as HTMLInputElement).value = '';
         renderPrPage(state.route.view === 'queue' ? 'queue' : 'repo');

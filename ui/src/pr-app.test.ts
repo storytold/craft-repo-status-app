@@ -234,6 +234,36 @@ test('PR tables filter, search, sort and group', async () => {
   assert.match(h.$('.group-head')!.textContent!, /Land one first/);
 });
 
+test('Escape from the Issues checkbox navigates back without rendering the PR table', async () => {
+  const h = await setup();
+  (h.$('tr[data-repo="o/alpha"]') as HTMLElement).click();
+  await tick();
+  const search = h.$('input[type="search"]') as HTMLInputElement;
+  search.value = 'Blocked one';
+  search.dispatchEvent(new h.win.Event('input') as unknown as Event);
+  (h.$('[data-pane="issues"]') as HTMLElement).click();
+  const checkbox = h.$('#critical-only')!;
+  checkbox.focus();
+  checkbox.dispatchEvent(new h.win.KeyboardEvent('keydown', { key: 'Escape', bubbles: true }) as unknown as Event);
+  await tick();
+  assert.equal(appRows(h).length, 3);
+  assert.equal(h.$('.pr-table'), null);
+});
+
+test('Escape in the search input clears the query and keeps the PR table', async () => {
+  const h = await setup();
+  (h.$('tr[data-repo="o/alpha"]') as HTMLElement).click();
+  await tick();
+  const search = h.$('input[type="search"]') as HTMLInputElement;
+  search.value = 'Blocked one';
+  search.dispatchEvent(new h.win.Event('input') as unknown as Event);
+  search.focus();
+  search.dispatchEvent(new h.win.KeyboardEvent('keydown', { key: 'Escape', bubbles: true }) as unknown as Event);
+  await tick();
+  assert.equal((h.$('input[type="search"]') as HTMLInputElement).value, '');
+  assert.deepEqual(prRows(h), [1, 2]);
+});
+
 test('approval is a flag beside the status, naming who', async () => {
   const h = await setup();
   const row2 = REPO.prs[1]!;
