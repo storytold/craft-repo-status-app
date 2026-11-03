@@ -917,7 +917,9 @@ fn viewer_for_token(
 
 fn clear_viewer_for_token(dir: &Path, viewer: &mut Viewer, token: Option<&str>) {
     let fingerprint = token.map(viewer::fingerprint);
-    if viewer::load(dir).is_some_and(|kept| kept.token_fingerprint != fingerprint) {
+    if token.is_none()
+        || viewer::load(dir).is_some_and(|kept| kept.token_fingerprint != fingerprint)
+    {
         if let Err(e) = viewer::forget(dir) {
             eprintln!("people: removing the earlier token's login: {e}");
         }
@@ -1701,6 +1703,13 @@ mod tests {
         clear_viewer_for_token(&dir, &mut v, Some("t3"));
         assert_eq!(v.login, None, "config reload clears the old login");
         assert_eq!(viewer::load(&dir), None, "config reload clears the file");
+        viewer::keep(&dir, "Legacy-Example", at).unwrap();
+        clear_viewer_for_token(&dir, &mut v, None);
+        assert_eq!(
+            viewer::load(&dir),
+            None,
+            "missing token clears legacy files"
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 
