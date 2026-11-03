@@ -880,7 +880,7 @@ export function hoursText(h: Pick<Hours, 'lo' | 'hi'> | null | undefined): strin
 
 /** The hours of a sum of gaps, saying how many of them have no estimate. */
 export function sumText(s: HoursSum): string {
-  if (s.unknown >= s.count) return 'hours unknown';
+  if (s.count > 0 && s.unknown >= s.count) return 'hours unknown';
   return s.unknown ? `${hoursText(s)} + ${s.unknown} unestimated` : hoursText(s);
 }
 

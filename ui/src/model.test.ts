@@ -457,6 +457,8 @@ test('gap sums leave out closed gaps and add no hours twice for a gap counted in
   assert.equal(hoursText(hours(3, 3)), '3 h');
   assert.equal(hoursText(null), '—');
   assert.equal(sumText({ count: 3, lo: 10, hi: 20, unknown: 1 }), '10–20 h + 1 unestimated');
+  assert.equal(sumText({ count: 2, lo: 0, hi: 0, unknown: 2 }), 'hours unknown');
+  assert.equal(sumText({ count: 0, lo: 0, hi: 0, unknown: 0 }), '0 h', 'no gaps add no hours');
   assert.equal(partText({ count: 3, lo: 10, hi: 1200, unknown: 1 }), 'part of 3 gaps (up to 1,200 h, 1 unestimated)');
   assert.equal(partText({ count: 2, lo: 4, hi: 8, unknown: 0 }), 'part of 2 gaps (up to 8 h)');
   assert.equal(partText({ count: 2, lo: 0, hi: 0, unknown: 2 }), 'part of 2 gaps (hours unknown)');
