@@ -4,7 +4,7 @@
 
 use std::collections::BTreeMap;
 
-use craft_core::Snapshot;
+use craft_core::{Snapshot, UrgentIssue};
 use serde::Serialize;
 
 use crate::model::Time;
@@ -18,6 +18,10 @@ pub struct StatusRepo {
     pub open_prs: Option<u64>,
     pub newest_pr_at: Option<Time>,
     pub fetched_at: Option<Time>,
+    /// The issues most worth fixing, best first.
+    pub urgent: Vec<UrgentIssue>,
+    pub urgency: f64,
+    pub critical_issues: u64,
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -42,6 +46,13 @@ impl StatusFacts {
                         open_prs: e.stats.as_ref().map(|s| s.open_prs),
                         newest_pr_at: e.stats.as_ref().and_then(|s| s.newest_pr_at),
                         fetched_at: e.fetched_at,
+                        urgent: e
+                            .stats
+                            .as_ref()
+                            .map(|s| s.urgent.clone())
+                            .unwrap_or_default(),
+                        urgency: e.stats.as_ref().map_or(0.0, |s| s.urgency),
+                        critical_issues: e.stats.as_ref().map_or(0, |s| s.critical_issues),
                     };
                     (e.repo.clone(), info)
                 })
