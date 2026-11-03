@@ -188,6 +188,11 @@ fn main() {
     } else {
         args
     };
+    let repos = if people_only.is_some() || states_only.is_some() {
+        pr_core::Config::load().unwrap_or_default().watched(&repos)
+    } else {
+        repos
+    };
     if states_only.is_some() {
         let source = roster_source.unwrap_or_else(|| cfg.people.roster.clone());
         states_offline(&repos, &cfg, &source);
