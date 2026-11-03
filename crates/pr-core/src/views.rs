@@ -2,7 +2,7 @@
 //! tables and everything about one PR. Computed on demand from the store, so the
 //! heuristics are always applied as currently written.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap};
 
 use craft_core::{category_of, needs_info, RepoCategory, UrgentIssue};
 use serde::{Deserialize, Serialize};
@@ -293,7 +293,6 @@ struct Ctx<'a> {
     complete: bool,
     /// Per repo: each author's merged PRs. Counting per PR would be quadratic.
     here: HashMap<String, HashMap<String, u64>>,
-    reviewed: HashSet<String>,
     fixes_by_issue: HashMap<(String, u64), Vec<FixRef>>,
 }
 
@@ -308,16 +307,15 @@ impl<'a> Ctx<'a> {
                 .iter()
                 .filter_map(|r| store.repos.get(r).map(|d| (r.clone(), landed_counts(d))))
                 .collect(),
-            reviewed: repos.iter().map(|r| r.to_ascii_lowercase()).collect(),
             fixes_by_issue: HashMap::new(),
         };
+        if facts.repos.is_empty() {
+            return ctx;
+        }
         let mut ranked: HashMap<(String, u64), Vec<(i32, FixRef)>> = HashMap::new();
         for data in repos.iter().filter_map(|r| store.repos.get(r)) {
             for pr in data.prs.values() {
-                let references: Vec<_> = issues_of(pr, &data.repo)
-                    .into_iter()
-                    .filter(|issue| ctx.reviewed.contains(&issue.0))
-                    .collect();
+                let references = issues_of(pr, &data.repo);
                 if references.is_empty() {
                     continue;
                 }
@@ -360,9 +358,8 @@ impl<'a> Ctx<'a> {
     }
 
     fn fixes(&self, pr: &Pr, repo: &str) -> Vec<FixesIssue> {
-        issues_of(pr, repo)
+        let mut fixes: Vec<_> = issues_of(pr, repo)
             .into_iter()
-            .filter(|(r, _)| self.reviewed.contains(r))
             .filter_map(|(repo, number)| {
                 let (repo, facts) = self
                     .facts
@@ -379,7 +376,14 @@ impl<'a> Ctx<'a> {
                     critical: u.critical,
                 })
             })
-            .collect()
+            .collect();
+        fixes.sort_by(|a, b| {
+            b.score
+                .total_cmp(&a.score)
+                .then(a.repo.cmp(&b.repo))
+                .then(a.number.cmp(&b.number))
+        });
+        fixes
     }
 
     fn issue_states(&self, repo: &str, number: u64) -> Vec<PrState> {
@@ -983,6 +987,49 @@ mod tests {
         );
     }
 
+    #[test]
+    fn pr_issue_chips_show_the_most_urgent_references_first() {
+        let (mut s, repos) = store();
+        let mut facts = with_issues(&mut s, &repos);
+        s.repo_mut(&repos[0]).prs.get_mut(&1).unwrap().title =
+            "Fix #700/#701/#702 and o/other#9".into();
+        let urgent = &mut facts.repos.get_mut(&repos[0]).unwrap().urgent;
+        urgent[0].score = 10.0;
+        urgent[1].score = 30.0;
+        urgent.push(UrgentIssue {
+            number: 702,
+            score: 100.0,
+            ..Default::default()
+        });
+        facts.repos.insert(
+            "o/other".into(),
+            StatusRepo {
+                urgent: vec![UrgentIssue {
+                    number: 9,
+                    score: 80.0,
+                    ..Default::default()
+                }],
+                ..Default::default()
+            },
+        );
+        let mut reviewed = repos.clone();
+        reviewed.push("o/other".into());
+        let view = repo_view(&s, &repos[0], &reviewed, &Config::default(), &facts).unwrap();
+        let pr = view.prs.iter().find(|pr| pr.number == 1).unwrap();
+        assert_eq!(
+            pr.fixes
+                .iter()
+                .map(|i| (i.repo.as_str(), i.number))
+                .collect::<Vec<_>>(),
+            [
+                (repos[0].as_str(), 702),
+                ("o/other", 9),
+                (repos[0].as_str(), 701),
+                (repos[0].as_str(), 700)
+            ]
+        );
+    }
+
     fn with_issues(s: &mut Store, repos: &[String]) -> StatusFacts {
         let d = s.repo_mut(&repos[0]);
         let pr = d.prs.values_mut().next().unwrap();
@@ -1061,6 +1108,24 @@ mod tests {
         assert_eq!(view.row.no_fix, 1);
         let pr = view.prs.iter().find(|p| p.number == 1).unwrap();
         assert_eq!(pr.fixes.iter().map(|i| i.number).collect::<Vec<_>>(), [700]);
+    }
+
+    #[test]
+    fn reviewed_prs_can_fix_issues_in_third_party_repositories() {
+        let (mut s, repos) = store();
+        let facts = with_issues(&mut s, &repos);
+        s.repo_mut(&repos[0]).prs.get_mut(&1).unwrap().title = "Fix THIRD/PARTY#5".into();
+        let cfg = Config::default();
+        let rows = issues(&s, &repos, &cfg, &facts);
+        let issue = rows.iter().find(|r| r.repo == "third/party").unwrap();
+        assert_eq!(issue.fixes.len(), 1);
+        assert_eq!(issue.fixes[0].repo, repos[0]);
+        assert_ne!(issue.stage, IssueStage::NoFix);
+        let view = repo_view(&s, &repos[0], &repos, &cfg, &facts).unwrap();
+        let pr = view.prs.iter().find(|r| r.number == 1).unwrap();
+        assert_eq!(pr.fixes.len(), 1);
+        assert_eq!(pr.fixes[0].repo, "third/party");
+        assert!(repo_view(&s, "third/party", &repos, &cfg, &facts).is_none());
     }
 
     #[test]

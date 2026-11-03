@@ -73,12 +73,19 @@ impl Links {
 /// Issue references in a title, with unqualified numbers scoped to `repo`.
 pub(crate) fn issues_in_title(title: &str, repo: &str) -> Vec<(String, u64)> {
     let mut out = vec![];
+    let mut previous_end: Option<usize> = None;
     for (hash, _) in title.match_indices('#') {
         let prefix = title[..hash]
             .rsplit(|c: char| !c.is_ascii_alphanumeric() && !matches!(c, '_' | '-' | '.' | '/'))
             .next()
             .unwrap_or("");
-        let issue_repo = if prefix.contains('/') {
+        let compact = previous_end.is_some_and(|end| {
+            end.checked_add(1) == Some(hash) && title.as_bytes().get(end) == Some(&b'/')
+        });
+        previous_end = None;
+        let issue_repo = if compact {
+            repo
+        } else if prefix.contains('/') {
             let mut parts = prefix.split('/');
             match (parts.next(), parts.next(), parts.next()) {
                 (Some(owner), Some(name), None) if !owner.is_empty() && !name.is_empty() => prefix,
@@ -90,6 +97,7 @@ pub(crate) fn issues_in_title(title: &str, repo: &str) -> Vec<(String, u64)> {
         let part = &title[hash + 1..];
         let digits: String = part.chars().take_while(char::is_ascii_digit).collect();
         if let Ok(n) = digits.parse::<u64>() {
+            previous_end = Some(hash + 1 + digits.len());
             out.push((issue_repo.to_ascii_lowercase(), n));
         }
     }
@@ -416,6 +424,23 @@ mod tests {
         let mut stale = linked(3, "other/repo");
         stale.head_oid = "new".into();
         assert!(groups(&[linked(2, "other/repo"), stale]).is_empty());
+    }
+
+    #[test]
+    fn compact_title_lists_keep_adjacent_issue_references() {
+        assert_eq!(
+            issues_in_title("Fix #42/#43/#44", "o/r"),
+            [("o/r".into(), 42), ("o/r".into(), 43), ("o/r".into(), 44)]
+        );
+        assert_eq!(
+            issues_in_title("Fix OTHER/repo#42/#43", "o/r"),
+            [("other/repo".into(), 42), ("o/r".into(), 43)]
+        );
+        assert!(issues_in_title(
+            "Malformed a/b/c#42/#43, o/#7/#8 and #999999999999999999999999/#9",
+            "o/r"
+        )
+        .is_empty());
     }
 
     #[test]
