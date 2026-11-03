@@ -4,7 +4,7 @@
 
 import {
   ALL_TIME, COLUMNS, RECENT, WINDOWS, MANUAL, windowById, value, orderedEntries, nextSort, dropIndex,
-  freshness, ago, totals, tokenStatus, isRefreshing, isThirdParty, formatNum, displayValue, changedCells,
+  freshness, ago, formatRatio, totals, tokenStatus, isRefreshing, isThirdParty, formatNum, displayValue, changedCells,
   REPO_KINDS, isRepoHidden, toggleKind, manualOrder, reorderVisible,
 } from './model.ts';
 import type { Column, Meta, RepoEntry, RepoStats, Snapshot, Sort, Value } from './model.ts';
@@ -74,10 +74,11 @@ function dateCell(key: string, v: Value, text: string, now: number): HTMLElement
   return el('span', { title: localTime(String(v)), class: old ? 'old' : '' }, text);
 }
 
-/** A footer cell's text: the repo count under the first column, totals under count columns (all-time-only ones in the All time window). */
+/** A footer cell's text: the repo count under the first column, totals under count columns (all-time-only ones in the All time window), and the ratio of the totals under a ratio column. */
 function footText(c: Column, i: number, repos: number, t: Record<string, number>, window: string): string {
   if (i === 0) return `${repos} repos`;
-  if (c.kind !== 'num' || (c.allTimeOnly === true && window !== ALL_TIME)) return '';
+  if ((c.kind !== 'num' && c.kind !== 'ratio') || (c.allTimeOnly === true && window !== ALL_TIME)) return '';
+  if (c.kind === 'ratio') return formatRatio(t[c.key] ?? 0);
   return num(Math.round(t[c.key] ?? 0));
 }
 
@@ -151,6 +152,12 @@ export function start(api: Api, prRoute?: Route): () => void {
       case 'recent_commits': case 'recent_prs': case 'recent_merged': case 'recent_issues': case 'recent_people':
         return recentCell(s, v, text, now);
       case 'commits_since_build': return sinceBuildCell(entry.repo, s, v, text);
+      case 'pr_backlog':
+        if (v === null) return el('span', { class: 'muted' }, text);
+        return el('span', {
+          class: v ? '' : 'zero',
+          title: `${num(s.open_prs)} open PRs, ${num(s.since_build?.commits ?? 0)} unreleased commits`,
+        }, text);
       case 'latest_build_rate':
         if (v === null) return el('span', { class: 'muted' }, text);
         return el('span', {
