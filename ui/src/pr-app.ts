@@ -1080,7 +1080,7 @@ export function startPrs(api: Api, initial: Route = { view: 'apps' }): PrTab {
     if (r.view === 'issues') void api.invoke('refresh_now');
     else if (r.view === 'repo') {
       // A third party's page only has what the status poller fetches.
-      void api.invoke(state.repoView ? 'refresh_pr_repo' : 'refresh_repo', { repo: r.repo });
+      void api.invoke(state.repoView && state.repoPane === 'prs' ? 'refresh_pr_repo' : 'refresh_repo', { repo: r.repo });
     } else if (r.view === 'pr') void api.invoke('refresh_pr', { repo: r.repo, number: r.number });
     else void api.invoke('refresh_prs');
   };
