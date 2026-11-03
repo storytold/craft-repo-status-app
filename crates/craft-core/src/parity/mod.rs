@@ -24,7 +24,7 @@ pub use checklist::linked_paths;
 
 /// Changes whenever the parser reads a file differently, so that text read
 /// by an older parser is read again.
-pub const PARSER_VERSION: u32 = 2;
+pub const PARSER_VERSION: u32 = 3;
 
 /// The file the headline numbers come from.
 pub const ROADMAP: &str = "ROADMAP.md";

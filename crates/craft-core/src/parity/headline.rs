@@ -13,7 +13,7 @@ use super::{
 };
 
 static STAGE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"^\*\*Stage:\s*([a-z-]+)\.?\*\*(?:\s*·\s*next:\s*(.+))?").unwrap()
+    Regex::new(r"^\*\*Stage:\s*(early alpha|[a-z-]+)\.?\*\*(?:\s*·\s*next:\s*(.+))?").unwrap()
 });
 static POINTS: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"~\s?(\d+(?:\.\d+)?)\s?(?:points?\b|%)").unwrap());
@@ -1054,6 +1054,16 @@ mod tests {
                 line: 4,
             }
         );
+    }
+
+    #[test]
+    fn roadmap_stage_accepts_early_alpha() {
+        let p = rm("**Stage: early alpha**\n");
+        assert_eq!(p.stage.get().map(|s| s.name.as_str()), Some("early alpha"));
+        let p = rm("**Stage: early alpha.** · next: alpha, ~5 points and ~10–20 h away\n");
+        let s = p.stage.get().unwrap();
+        assert_eq!(s.name, "early alpha");
+        assert_eq!(s.steps[0].stage, "alpha");
     }
 
     #[test]
