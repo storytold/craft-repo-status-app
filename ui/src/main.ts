@@ -9,6 +9,8 @@ import type { Route } from './pr-app.ts';
 interface DevData {
   overview: unknown[];
   queue: unknown[];
+  issues: unknown[];
+  icons: Record<string, string>;
   repos: Record<string, unknown>;
   prs: Record<string, unknown>;
 }
@@ -18,7 +20,7 @@ const TAURI = window.__TAURI__;
 let dev: Promise<DevData> | null = null;
 const devData = (): Promise<DevData> => (dev ??= fetch('dev-data.json')
   .then((r) => r.json() as Promise<DevData>)
-  .catch(() => ({ overview: [], queue: [], repos: {}, prs: {} })));
+  .catch(() => ({ overview: [], queue: [], issues: [], icons: {}, repos: {}, prs: {} })));
 
 const api: Api = TAURI
   ? {
@@ -37,6 +39,8 @@ const api: Api = TAURI
         if (cmd === 'get_pr_overview') {
           return answer({
             repos: d.overview,
+            issues: d.issues,
+            icons: d.icons,
             status: {
               points_last_hour: 0, max_points_per_hour: 2500, backlog: 0, histories_pending: 0, poll_secs: 1800,
               stale_after_secs: 0, token_rejected: false,
@@ -52,14 +56,15 @@ const api: Api = TAURI
       startResize() {},
     };
 
-/** In a browser, `?repo=o/r&pr=1`, `?repo=o/r` or `?pr-view=queue` opens the PR tab there. */
+/** In a browser, `?repo=o/r&pr=1`, `?repo=o/r`, `?pr-view=queue` or `?pr-view=issues` opens the PR tab there. */
 function prRouteFromUrl(): Route | undefined {
   const q = new URLSearchParams(location.search);
   const repo = q.get('repo');
   const pr = Number(q.get('pr'));
   if (repo && pr) return { view: 'pr', repo, number: pr, from: 'repo' };
   if (repo) return { view: 'repo', repo };
-  return q.get('pr-view') === 'queue' ? { view: 'queue' } : undefined;
+  const view = q.get('pr-view');
+  return view === 'queue' || view === 'issues' ? { view } : undefined;
 }
 
 start(api, TAURI ? undefined : prRouteFromUrl());

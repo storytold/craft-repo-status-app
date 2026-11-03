@@ -115,7 +115,10 @@ export interface Meta {
   shortcut?: string;
   frequent_over?: number;
   high_quality?: number;
+  table_headings?: { downloads: HeadingDirection; prs: HeadingDirection };
 }
+
+export type HeadingDirection = 'horizontal' | 'vertical';
 
 // ───────────────────────────── windows ─────────────────────────────
 
@@ -442,25 +445,6 @@ export function totals(entries: readonly RepoEntry[], window: string = DEFAULT_W
     out[c.key] = entries.reduce((sum, e) => sum + Number(value(e, c.key, window) ?? 0), 0);
   }
   return out;
-}
-
-export type RepoUrgentIssue = UrgentIssue & { repo: string };
-
-/** Every repo's urgent issues merged, best first. */
-export function urgentAcross(
-  entries: readonly RepoEntry[],
-  { repo = '', criticalOnly = false, limit = 60 }: { repo?: string; criticalOnly?: boolean; limit?: number } = {},
-): RepoUrgentIssue[] {
-  const all: RepoUrgentIssue[] = [];
-  for (const e of entries) {
-    if (repo && e.repo !== repo) continue;
-    for (const u of e.stats?.urgent ?? []) {
-      if (criticalOnly && !u.critical) continue;
-      all.push({ ...u, repo: e.repo });
-    }
-  }
-  all.sort((a, b) => b.score - a.score || Date.parse(b.created_at ?? '0') - Date.parse(a.created_at ?? '0'));
-  return all.slice(0, limit);
 }
 
 // ───────────────────────────── people tab ─────────────────────────────

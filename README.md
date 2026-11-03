@@ -31,9 +31,8 @@ CodeRabbit's findings and Claude's summaries. Everything runs locally: no server
 | Tab | Key | What it's for | Third-party repos |
 | --- | --- | --- | --- |
 | **Downloads** | `⌘1` | Download counts and rates, builds, issues and activity for every repo | shown, tagged `3P` |
-| **PRs** | `⌘2` | Reviewing open PRs: grades, CodeRabbit findings, Claude's summaries | left out |
-| **Fix first** | `⌘3` | Open issues most worth fixing | shown, tagged `3P` |
-| **People** | `⌘4` | Open pull requests by work state, and rankings of the people behind them | shown |
+| **PRs** | `⌘2` | Reviewing open PRs, and the issues most worth fixing | issues only, tagged `3P` |
+| **People** | `⌘3` | Open pull requests by work state, and rankings of the people behind them | shown |
 
 The chips beside the tabs show or hide kinds of repo on every tab: **3rd party**, **Apps**,
 **Libraries**, **Assets**, **CI** and **Tooling**. A repo hides if any kind it is has been
@@ -82,12 +81,10 @@ sort by a column again.
   rpm, flatpak, zips and tarballs. Checksum lists, signatures, `.zsync` delta
   files and updater manifests are left out, because machines fetch them, not
   people.
-- **Fix first** (`⌘2`) ranks open issues across every repo. Each issue shows
-  the reasons behind its score. Click a row in the Repos table to filter the
-  list to that repo. Click an issue to open it on GitHub. The caret on a
-  Repos row shows the repo's people and open work under the row instead (see
+- **Clicking a row** opens that repo on the PRs tab. The caret on a Repos
+  row shows the repo's people and open work under the row instead (see
   [The People tab](#the-people-tab)).
-- **People** (`⌘4`) shows one row per person with their open pull requests
+- **People** (`⌘3`) shows one row per person with their open pull requests
   by work state, who each one waits on, and their flow and reviews in a
   window, or the rankings. The tab's badge counts the open pull requests held
   for the owner. See [The People tab](#the-people-tab).
@@ -112,8 +109,16 @@ The score is deterministic and simple to read (`crates/craft-core/src/urgency.rs
 | Names the latest build's version | +10 |
 | Opened in the last 24 h | +8 |
 | Opened in the last 72 h | +4 |
+| Triaged `priority: critical` or `P0` | +25 |
+| Triaged `priority: high` or `P1` | +10 |
+| Triaged `priority: low`, `P3` or `P4` | −15 |
+| Labeled `needs info` | −15 |
 | Feature request, question or docs nit | −25 |
 | Untouched for 30 days | −5 |
+
+An issue is **critical** if its text names something in the first row and it isn't a
+request. A triage label overrides that: `priority: critical` or `P0` makes it critical
+whatever it says, and `priority: low`, `P3` or `P4` means it isn't.
 
 Issues labelled `wontfix`, `duplicate` or `invalid` are dropped. For each
 repo, the 100 newest open issues and the 30 most-commented open issues are
@@ -234,22 +239,30 @@ stale counts, and pull requests that wait on or compete with another.
 
 The PR tab covers every watched repo except third-party ones: a repo counts as
 first party if its owner is in `first_party_owners`, and `exclude_repos` leaves out
-more. Solidcraft's PRs aren't fetched, graded or sent to Claude.
+more. Solidcraft's PRs aren't fetched, graded or sent to Claude, but clicking it on
+Downloads opens a page with its issues.
 
 **Repos** has one row per repo, and every column sorts: open PRs, how many have been
 inspected, landable, promising, reviewable, CI not run, approved, high quality,
 easy/medium/hard, needs work, conflicts, failing CI, CodeRabbit flags and nits,
 security flags and nits, PRs by core, frequent and new authors, interesting PRs,
-possibly related groups and ages. Its **Type** column says which are apps, libraries,
+possibly related groups, critical issues, issues with a fix ready, issues with no fix and ages. Its **Type** column says which are apps, libraries,
 assets, CI or tooling.
 
-**A repo** (click its row) lists its PRs, best first, with sortable columns (including
+**Fix first** is the issues most worth fixing across every repo, third parties included,
+grouped by what each needs next: **Land a fix** (a PR for it can be reviewed or landed),
+**Fix under way** (a PR exists, but something's in its way), **No fix yet** and **Waiting on
+the reporter** (labeled `needs info`, no PR). A PR counts if it closes the issue or names it
+in its title. Only each repo's 20 most urgent issues are kept. Click an issue to open it on
+GitHub, or its PR to open that here.
+
+**A repo** (click its row) has two panes: **Issues**, grouped the same way, and PRs. It lists its PRs, best first, with sortable columns (including
 who approved each one and what it's possibly related to), filters, search and **Group
 possibly related**. Drafts are hidden unless asked for.
 
 **A PR** (click its row) has the verdict and the reasons behind it, Claude's
 assessment, CodeRabbit findings worst first, security flags, the author's standing,
-the PRs it's possibly related to, checks, reviews, files and the description. **Read
+the urgent issues it fixes, the PRs it's possibly related to, checks, reviews, files and the description. **Read
 the diff** asks Claude for a closer look.
 
 **Review queue** is what someone can act on across every repo: Landable, Promising,
@@ -427,14 +440,16 @@ The app behaves like the Todo app:
 - The window is chrome-less and semi-transparent, and it appears on every
   Space. It remembers its position and size in `~/.craft_status_state.toml`.
 - `Esc` hides the window (on the PRs tab, once it's back at the top).
-- `⌘1` to `⌘4` switch to Downloads, PRs, Fix first and People.
+- `⌘1` to `⌘3` switch to Downloads, PRs and People.
 
 ## Configuration: `~/.craft_status_config.toml`
 
 The app creates this file from
 [`craft_status_config.template.toml`](craft_status_config.template.toml) the
 first time it launches. It re-reads the file before each poll, so edits to the
-repo list or the intervals take effect without a restart. PR review's settings are
+repo list or the intervals take effect without a restart. `[table_headings]` sets each
+tab's main table to `"horizontal"` or `"vertical"` column headings independently: `downloads`
+(horizontal by default) and `prs` (vertical by default). PR review's settings are
 its `[pr_review]` section, and all of them are optional: a file from before PR review
 moved in just gets the defaults. `~/.craft_pr_review_config.toml` is no longer read,
 so copy any changes you made there into that section (minus `[window]`, `[tray]` and

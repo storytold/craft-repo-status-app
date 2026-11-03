@@ -108,7 +108,7 @@ async function setup({ snap = snapshot(), storage = {} as Record<string, unknown
     emit: (event, payload) => listeners.get(event)?.(payload),
     rows: () => [...tbody().querySelectorAll('tr')].map((r) => r.dataset.repo?.slice(2) ?? ''),
     row: (name) => tbody().querySelector<HTMLTableRowElement>(`tr[data-repo="o/${name}"]`)!,
-    view: () => (['repos', 'prs', 'urgent', 'people'].find((v) => !doc.getElementById(`${v}-view`)!.hidden) ?? ''),
+    view: () => (['repos', 'prs', 'people'].find((v) => !doc.getElementById(`${v}-view`)!.hidden) ?? ''),
   };
 }
 
@@ -143,7 +143,6 @@ test('renders a row per repo, sorted by urgency by default', async () => {
   assert.equal(sortedHeader(h), 'Urgency');
   assert.equal(h.doc.querySelector('tfoot td')!.textContent, '3 repos');
   assert.equal(h.doc.getElementById('repo-count')!.textContent, '3');
-  assert.equal(h.doc.getElementById('urgent-count')!.textContent, '1');
   assert.ok(h.calls.some((c) => c.cmd === 'window_ready'));
 });
 
@@ -164,7 +163,7 @@ test('dragging a row reorders the table and switches it to manual order', async 
   assert.equal(sortedHeader(h), null, 'no column is sorted');
   assert.deepEqual(stored(h, 'sort'), { key: 'manual' });
   assert.deepEqual(stored(h, 'order'), ['o/gamma', 'o/alpha', 'o/beta']);
-  assert.equal(h.view(), 'repos', 'the click ending a drag does not open the urgent view');
+  assert.equal(h.view(), 'repos', 'the click ending a drag does not open the repo');
   assert.ok(!h.doc.body.classList.contains('reordering'));
 });
 
@@ -222,7 +221,7 @@ test('the Type column names what each repo is, even before its first fetch', asy
   assert.equal(type('someone/mine'), '—');
 });
 
-test('third-party repos are tagged 3P in the table and the urgent list', async () => {
+test('third-party repos are tagged 3P in the table', async () => {
   const h = await setup({ snap: snapshot([
     repo('ours', { urgency: 10, urgent: [issue(1, 10, false)] }, { repo: 'storytold/ours' }),
     repo('theirs', { urgency: 20, urgent: [issue(2, 20, false)] }, { repo: 'tangency-labs/theirs' }),
@@ -231,11 +230,9 @@ test('third-party repos are tagged 3P in the table and the urgent list', async (
   assert.equal(tag('storytold/ours'), null);
   assert.equal(tag('tangency-labs/theirs')?.textContent, '3P');
   assert.equal(tag('tangency-labs/theirs')?.getAttribute('title'), 'Third-party app (tangency-labs)');
-  h.doc.querySelector<HTMLElement>('[data-view="urgent"]')!.click();
-  assert.equal(h.doc.querySelectorAll('.urgent-item .third-party').length, 1);
 });
 
-test('clicking a row, or barely moving it, opens its urgent issues', async () => {
+test('clicking a row, or barely moving it, opens its repo on the PR tab', async () => {
   const h = await setup();
   const row = h.row('alpha');
   const y = row.getBoundingClientRect().top + 5;
@@ -243,9 +240,8 @@ test('clicking a row, or barely moving it, opens its urgent issues', async () =>
   pointer(h, h.win as unknown as EventTarget, 'pointermove', y + 3);
   pointer(h, h.win as unknown as EventTarget, 'pointerup', y + 3);
   row.click();
-  assert.equal(h.view(), 'urgent');
-  assert.equal(h.doc.querySelector<HTMLSelectElement>('#urgent-repo')!.value, 'o/alpha');
-  assert.deepEqual([...h.doc.querySelectorAll('.urgent-item .num')].map((n) => n.textContent), ['#1', '#2']);
+  assert.equal(h.view(), 'prs');
+  assert.match(h.doc.getElementById('crumbs')!.textContent!, /alpha/);
   assert.equal(stored(h, 'order'), null, 'a click is not a reorder');
 });
 
@@ -376,22 +372,6 @@ test('status pill, failures banner and budget', async () => {
   assert.equal(h.doc.getElementById('fresh-pill')!.textContent, 'FRESH');
 });
 
-// ───────────────────────────── urgent view ─────────────────────────────
-
-test('urgent view lists every repo’s issues, filters to critical, and opens them', async () => {
-  const h = await setup();
-  h.doc.querySelector<HTMLElement>('[data-view="urgent"]')!.click();
-  const nums = () => [...h.doc.querySelectorAll('.urgent-item .num')].map((n) => n.textContent);
-  assert.deepEqual(nums(), ['#1', '#3', '#2']);
-  const only = h.doc.querySelector<HTMLInputElement>('#critical-only')!;
-  only.checked = true;
-  only.dispatchEvent(new h.win.Event('change') as unknown as Event);
-  assert.deepEqual(nums(), ['#1']);
-  assert.equal(stored(h, 'criticalOnly'), true);
-  h.doc.querySelector<HTMLElement>('.urgent-item')!.click();
-  assert.equal(h.calls.at(-1)?.args?.url, 'https://github.com/o/x/issues/1');
-});
-
 // ───────────────────────────── host ─────────────────────────────
 
 test('keyboard shortcuts and buttons call the host', async () => {
@@ -400,8 +380,8 @@ test('keyboard shortcuts and buttons call the host', async () => {
     h.doc.dispatchEvent(new h.win.KeyboardEvent('keydown', { key, metaKey: mod, bubbles: true }) as unknown as Event);
   key('r', true);
   key('Escape');
-  key('3', true);
-  assert.equal(h.view(), 'urgent');
+  key('2', true);
+  assert.equal(h.view(), 'prs');
   key('1', true);
   assert.equal(h.view(), 'repos');
   h.doc.getElementById('pin')!.click();
@@ -494,7 +474,7 @@ const people = (): PeopleView => ({
 /** A harness whose host answers get_people with `view`, opened on the People tab. */
 async function peopleSetup(view: PeopleView | null = people()): Promise<Harness> {
   const h = await setup({ storage: { peopleWindow: '7d' }, host: (cmd) => (cmd === 'get_people' ? view : undefined) });
-  keydown(h, '4', true);
+  keydown(h, '3', true);
   return h;
 }
 const personRows = (h: Harness) => [...h.doc.querySelectorAll<HTMLElement>('#people-table tr.person-row')].map((r) => r.dataset.key);
@@ -503,7 +483,7 @@ const personCell = (h: Harness, key: string, col: number) =>
 const caret = (h: Harness, key: string) => h.doc.querySelector<HTMLButtonElement>(`#people-table tr.person-row[data-key="${key}"] .caret`)!;
 const peopleShown = (h: Harness) => !h.doc.getElementById('people-view')!.hidden;
 
-test('Cmd+4 and the tab open People, which says it has no records until a view arrives', async () => {
+test('Cmd+3 and the tab open People, which says it has no records until a view arrives', async () => {
   const h = await peopleSetup(null);
   assert.ok(peopleShown(h));
   assert.equal(h.doc.getElementById('repos-view')!.hidden, true);
@@ -660,7 +640,7 @@ async function rankSetup(view: PeopleView = people()): Promise<Harness> {
     storage: { peopleWindow: '7d', peopleMode: 'rankings' },
     host: (cmd, args) => (cmd === 'get_people' ? view : cmd === 'person_detail' ? annDetail(String(args?.window)) : undefined),
   });
-  keydown(h, '4', true);
+  keydown(h, '3', true);
   return h;
 }
 const rankKeys = (h: Harness) => [...h.doc.querySelectorAll<HTMLElement>('#rank-table tr.rank-row')].map((r) => r.dataset.key);
@@ -807,7 +787,7 @@ test('an answer asked for before a new People view is dropped, and the caret ask
     storage: { peopleWindow: '7d', peopleMode: 'rankings' },
     host: (cmd) => (cmd === 'get_people' ? people() : cmd === 'person_detail' ? new Promise<PersonDetail>((r) => answers.push(r)) : undefined),
   });
-  keydown(h, '4', true);
+  keydown(h, '3', true);
   h.doc.querySelector<HTMLButtonElement>('#rank-table tr.rank-row[data-key="ann-example"] .caret')!.click();
   assert.equal(answers.length, 1);
   h.emit('craft:people', people());
@@ -826,7 +806,7 @@ test('the work view’s caret shows where the person’s work went, in the picke
     storage: { peopleWindow: '7d' },
     host: (cmd, args) => (cmd === 'get_people' ? people() : cmd === 'person_detail' ? annDetail(String(args?.window)) : undefined),
   });
-  keydown(h, '4', true);
+  keydown(h, '3', true);
   caret(h, 'ann-example').click();
   assert.deepEqual(hostCalls(h).at(-1), { cmd: 'person_detail', args: { login: 'ann-example', window: '7d' } });
   await tick();
@@ -906,9 +886,9 @@ test('a repo caret keeps the keyboard focus when its row is drawn again', async 
 
 // ───────────────────────────── tabs ─────────────────────────────
 
-test('the tabs are Downloads, PRs, Fix first and People, in that order, opening on Downloads', async () => {
+test('the tabs are Downloads, PRs and People, in that order, opening on Downloads', async () => {
   const h = await setup();
-  assert.deepEqual([...h.doc.querySelectorAll<HTMLElement>('[data-view]')].map((b) => b.dataset.view), ['repos', 'prs', 'urgent', 'people']);
+  assert.deepEqual([...h.doc.querySelectorAll<HTMLElement>('[data-view]')].map((b) => b.dataset.view), ['repos', 'prs', 'people']);
   assert.match(h.doc.querySelector('[data-view="repos"]')!.textContent!, /Downloads/);
   assert.equal(h.view(), 'repos');
   assert.equal(h.doc.querySelector('[data-view="repos"]')!.getAttribute('aria-selected'), 'true');
@@ -924,13 +904,11 @@ test('Downloads leads with the build, then its download columns', async () => {
   assert.equal(groups.includes('Downloads'), true);
 });
 
-test('third-party repos stay on Downloads and Fix first, tagged', async () => {
+test('third-party repos stay on Downloads, tagged', async () => {
   const third = { repo: 'tangency-labs/solidcraft', stats: stats({ urgent: [issue(9, 70, false)] }), fetched_at: NOW };
   const h = await setup({ snap: snapshot([repo('alpha', {}), third]) });
   const row = h.doc.querySelector('tr[data-repo="tangency-labs/solidcraft"]')!;
   assert.equal(row.querySelector('.third-party')!.textContent, '3P');
-  h.doc.querySelector<HTMLElement>('[data-view="urgent"]')!.click();
-  assert.match(h.doc.getElementById('urgent-list')!.textContent!, /Issue 9/);
 });
 
 test('keys move between the tabs and refresh follows the tab', async () => {
@@ -940,12 +918,10 @@ test('keys move between the tabs and refresh follows the tab', async () => {
   assert.equal(h.view(), 'prs');
   key('r');
   assert.equal(h.calls.at(-1)!.cmd, 'refresh_prs');
-  key('3');
-  assert.equal(h.view(), 'urgent');
-  key('r');
-  assert.equal(h.calls.at(-1)!.cmd, 'refresh_now');
   key('1');
   assert.equal(h.view(), 'repos');
+  key('r');
+  assert.equal(h.calls.at(-1)!.cmd, 'refresh_now');
 });
 
 test('a config problem shows on the PR tab as well', async () => {
@@ -956,9 +932,9 @@ test('a config problem shows on the PR tab as well', async () => {
 
 // ───────────────────────────── repo toggles ─────────────────────────────
 
-test('the toggles sit beside the tabs, hide repos on Downloads and Fix first, and are remembered', async () => {
+test('the toggles sit beside the tabs, hide repos on Downloads, and are remembered', async () => {
   const fonts = repo('fonts', { urgency: 1, urgent: [issue(7, 30, false)], critical_issues: 2 }, { category: 'assets' });
-  const third = { repo: 'tangency-labs/solidcraft', category: 'app' as const, stats: stats({ urgent: [issue(9, 70, false)] }), fetched_at: NOW };
+  const third = { repo: 'tangency-labs/solidcraft', category: 'app' as const, stats: stats({}), fetched_at: NOW };
   const alpha = { ...repo('alpha', { open_prs: 3 }, { category: 'app' }), repo: 'storytold/alpha' };
   const h = await setup({ snap: snapshot([alpha, { ...fonts, repo: 'storytold/fonts' }, third]) });
   const toggle = (id: string) => h.doc.querySelector<HTMLElement>(`[data-kind="${id}"]`)!;
@@ -975,11 +951,6 @@ test('the toggles sit beside the tabs, hide repos on Downloads and Fix first, an
 
   toggle('third_party').click();
   assert.equal(h.rows().length, 1, 'only the first party app is left');
-  h.doc.querySelector<HTMLElement>('[data-view="urgent"]')!.click();
-  assert.doesNotMatch(h.doc.getElementById('urgent-list')!.textContent!, /Issue (7|9)/);
-  assert.equal(h.doc.getElementById('urgent-count')!.textContent, '');
-  toggle('assets').click();
-  assert.match(h.doc.getElementById('urgent-list')!.textContent!, /Issue 7/);
 });
 
 test('hiding everything says why, and saved toggles apply from the start', async () => {
@@ -1003,4 +974,17 @@ test('Total DLs sits with the activity columns and only counts under All time', 
   picker.dispatchEvent(new h.win.Event('change') as unknown as Event);
   assert.equal(cell(), '1,234');
   assert.equal(foot(), '1,234');
+});
+
+test('the config can turn the Downloads headings vertical, live, and it leaves text columns level', async () => {
+  const h = await setup();
+  const th = (label: string) => [...h.doc.querySelectorAll<HTMLElement>('thead tr.cols th')].find((n) => n.textContent === label)!;
+  assert.equal(th('Build').classList.contains('vertical'), false, 'level by default');
+  h.emit('craft:meta', { table_headings: { downloads: 'vertical', prs: 'horizontal' } });
+  assert.ok(th('Build').classList.contains('vertical'));
+  assert.ok(th('Build').querySelector('.vertical-label'));
+  assert.equal(th('Repo').classList.contains('vertical'), false);
+  assert.ok(h.doc.getElementById('table')!.classList.contains('vertical-headings'));
+  h.emit('craft:meta', { table_headings: { downloads: 'horizontal', prs: 'vertical' } });
+  assert.equal(th('Build').classList.contains('vertical'), false);
 });
