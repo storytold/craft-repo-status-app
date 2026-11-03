@@ -56,7 +56,8 @@ sort by a column again.
 | Open | open PRs · open issues · oldest open PR |
 | Latest | last commit to `main` · newest issue · newest PR |
 | Activity (dropdown) | commits to `main` · PRs opened · PRs merged · issues opened · people committing to `main` · **Total DLs** (downloads across all releases; only under All time) |
-| Downloads | the latest release's tag · its publish date · its download rate and downloads · **Unreleased** (commits on `main` since it) |
+| Downloads | the latest release's tag · its publish date · its download rate and downloads |
+| Pipeline | **Unreleased** (commits on `main` since the latest release) · **PR Backlog** (open PRs per unreleased commit) |
 
 - **Activity** covers the window picked in that group's header: the last
   10 min, 30 min, hour, 4 h (the default), 12 h, day or week, since the last
@@ -76,6 +77,10 @@ sort by a column again.
   since the two split. When they share no history, it counts the `main`
   commits newer than the tag's commit. Both estimates show a `~`. Click the
   number to open the comparison on GitHub.
+- **PR Backlog** is open PRs divided by unreleased commits: how much work is
+  still waiting in PRs rather than on its way into the next release. High
+  means a repo needs work landed; with nothing unreleased it is just the open
+  PR count. The footer divides the column totals.
 - **Downloads** add up every OS and package type: dmg, msi, AppImage, deb,
   rpm, flatpak, zips and tarballs. Checksum lists, signatures, `.zsync` delta
   files and updater manifests are left out, because machines fetch them, not

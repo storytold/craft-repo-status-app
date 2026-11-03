@@ -4,7 +4,7 @@
 
 import {
   ALL_TIME, COLUMNS, RECENT, WINDOWS, MANUAL, windowById, value, orderedEntries, nextSort, dropIndex,
-  freshness, ago, formatRate, totals, tokenStatus, isRefreshing, isThirdParty,
+  freshness, ago, formatRate, formatRatio, totals, tokenStatus, isRefreshing, isThirdParty,
   REPO_KINDS, isRepoHidden, toggleKind, manualOrder, reorderVisible, checkedAfterFetch, isStale,
 } from './model.ts';
 import type { Column, Meta, RepoEntry, Snapshot, Sort } from './model.ts';
@@ -136,6 +136,12 @@ export function start(api: Api, prRoute?: Route): () => void {
         const text = `${lag.basis === 'exact' ? '' : '~'}${num(v)}`;
         return el('span', { title: tip }, from ? link(text, gh(entry.repo, `/compare/${encodeURIComponent(from)}...HEAD`), v ? '' : 'zero') : text);
       }
+      case 'pr_backlog':
+        if (v === null) return el('span', { class: 'muted' }, '—');
+        return el('span', {
+          class: v ? '' : 'zero',
+          title: `${num(s.open_prs)} open PRs, ${num(s.since_build?.commits ?? 0)} unreleased commits`,
+        }, formatRatio(Number(v)));
       case 'latest_build_rate':
         if (v === null) return el('span', { class: 'muted' }, '—');
         return el('span', {
@@ -252,8 +258,8 @@ export function start(api: Api, prRoute?: Route): () => void {
       $('tbody').replaceChildren(el('tr', {}, el('td', { colspan: COLUMNS.length, class: 'empty' }, why)));
     }
     const t = totals(shown, state.window);
-    const noTotal = (c: Column): boolean => c.kind !== 'num' || (c.allTimeOnly === true && state.window !== ALL_TIME);
-    const total = (c: Column): string => (noTotal(c) ? '' : num(Math.round(t[c.key] ?? 0)));
+    const noTotal = (c: Column): boolean => (c.kind !== 'num' && c.kind !== 'ratio') || (c.allTimeOnly === true && state.window !== ALL_TIME);
+    const total = (c: Column): string => (noTotal(c) ? '' : c.kind === 'ratio' ? formatRatio(t[c.key] ?? 0) : num(Math.round(t[c.key] ?? 0)));
     $('tfoot').replaceChildren(el('tr', {}, COLUMNS.map((c, i) =>
       el('td', { class: groupStart(i) }, i === 0 ? `${shown.length} repos` : total(c)))));
   }
