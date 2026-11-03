@@ -132,6 +132,36 @@ const FEATURE_PREFIXES: &[&str] = &[
     "[question",
 ];
 
+/// Labels saying the reporter owes more detail before anyone can act.
+const NEEDS_INFO_LABELS: &[&str] = &["needs info", "needs-info", "need info", "needs more info"];
+
+/// Whether an issue is waiting on its reporter, going by its labels.
+pub fn needs_info(labels: &[String]) -> bool {
+    labels
+        .iter()
+        .any(|l| NEEDS_INFO_LABELS.contains(&l.to_lowercase().as_str()))
+}
+
+/// What a person triaging the issue said about it, where labels say so.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Triage {
+    Critical,
+    High,
+    Low,
+}
+
+/// Reads labels such as `priority: critical` and `priority:P1`.
+fn triage(labels: &[String]) -> Option<Triage> {
+    labels
+        .iter()
+        .find_map(|l| match l.strip_prefix("priority:")?.trim() {
+            "critical" | "p0" => Some(Triage::Critical),
+            "high" | "p1" => Some(Triage::High),
+            "low" | "p3" | "p4" => Some(Triage::Low),
+            _ => None,
+        })
+}
+
 /// Lowercase, normalize apostrophes, and turn punctuation into spaces, padded
 /// so `" phrase "` matches whole words only.
 fn normalize(s: &str) -> String {
@@ -214,7 +244,13 @@ pub fn score_issue(
             critical_hits.push(why);
         }
     }
-    let critical = !critical_hits.is_empty() && !feature_like;
+    let triaged = triage(&labels);
+    // Someone who triaged it knows better than a word in its title.
+    let critical = match triaged {
+        Some(Triage::Critical) => true,
+        Some(Triage::Low) => false,
+        _ => !critical_hits.is_empty() && !feature_like,
+    };
     if !critical_hits.is_empty() {
         score += 40.0;
         reasons.push(critical_hits.join(", "));
@@ -232,6 +268,25 @@ pub fn score_issue(
         .any(|l| l == "reliability" || l == "file-compat" || l == "performance")
     {
         score += 6.0;
+    }
+    match triaged {
+        Some(Triage::Critical) => {
+            score += 25.0;
+            reasons.push("priority: critical".into());
+        }
+        Some(Triage::High) => {
+            score += 10.0;
+            reasons.push("priority: high".into());
+        }
+        Some(Triage::Low) => {
+            score -= 15.0;
+            reasons.push("priority: low".into());
+        }
+        None => {}
+    }
+    if needs_info(&labels) {
+        score -= 15.0;
+        reasons.push("needs info".into());
     }
     if feature_like {
         score -= 25.0;
@@ -286,8 +341,9 @@ pub fn score_issue(
     })
 }
 
-/// Returns the top `keep` issues (score > 0, best first, ties → newest), the
-/// repo urgency (sum of the top five scores) and the count of critical issues.
+/// The ranked list contains up to `keep` issues with positive scores or critical priority.
+/// Higher scores come first, followed by newer issues when scores tie.
+/// The other outputs are the sum of the top five scores and the total count of critical issues.
 pub fn rank_issues(
     issues: &[IssueInput],
     now: DateTime<Utc>,
@@ -316,7 +372,7 @@ pub fn rank_issues(
         })
         .collect();
     let critical = ranked.iter().filter(|u| u.critical).count() as u64;
-    ranked.retain(|u| u.score > 0.0);
+    ranked.retain(|u| u.score > 0.0 || u.critical);
     ranked.sort_by(|a, b| {
         b.score
             .total_cmp(&a.score)
@@ -436,5 +492,77 @@ mod tests {
             4.0 * 50.0,
             "4 crashes at 50 (40 + user 10), features score 0"
         );
+    }
+
+    fn labelled(labels: &[&str], title: &str) -> Scored {
+        let issue = IssueInput {
+            title: title.into(),
+            labels: labels.iter().map(|l| l.to_string()).collect(),
+            ..Default::default()
+        };
+        score_issue(&issue, Utc::now(), None).unwrap()
+    }
+
+    #[test]
+    fn triage_labels_outrank_words_in_the_title() {
+        let plain = labelled(&[], "Sony ARW files unreadable");
+        let urgent = labelled(&["priority: critical"], "Sony ARW files unreadable");
+        assert!(!plain.critical);
+        assert!(urgent.critical);
+        assert_eq!(urgent.score, plain.score + 25.0);
+        assert!(labelled(&["priority:P0"], "Odd").critical);
+
+        let crash = labelled(&[], "Crash on export");
+        let low = labelled(&["priority: low"], "Crash on export");
+        assert!(crash.critical);
+        assert!(!low.critical);
+        assert_eq!(low.score, crash.score - 15.0);
+
+        let high = labelled(&["priority: high"], "Crash on export");
+        assert!(high.critical, "high doesn't change what the words said");
+        assert_eq!(high.score, crash.score + 10.0);
+    }
+
+    #[test]
+    fn issues_waiting_on_the_reporter_rank_lower() {
+        let crash = labelled(&[], "Crash on export");
+        let waiting = labelled(&["Needs Info"], "Crash on export");
+        assert_eq!(waiting.score, crash.score - 15.0);
+        assert!(waiting.reasons.iter().any(|r| r == "needs info"));
+        assert!(waiting.critical, "still critical if the report is right");
+        assert!(needs_info(&["needs-info".to_string()]));
+        assert!(!needs_info(&["bug".to_string()]));
+    }
+
+    #[test]
+    fn explicitly_critical_zero_score_issues_remain_ranked() {
+        let now = Utc::now();
+        for label in ["priority: critical", "priority:P0"] {
+            let critical = IssueInput {
+                number: 1,
+                title: "Add an option".into(),
+                labels: vec![label.into(), "enhancement".into()],
+                author_association: "MEMBER".into(),
+                created_at: Some(now - Duration::days(4)),
+                updated_at: Some(now - Duration::days(4)),
+                ..Default::default()
+            };
+            let scored = score_issue(&critical, now, None).unwrap();
+            assert!(scored.critical);
+            assert_eq!(scored.score, 0.0);
+            let plain = IssueInput {
+                number: 2,
+                labels: vec!["enhancement".into()],
+                ..critical.clone()
+            };
+            let (ranked, urgency, count) = rank_issues(&[critical, plain], now, None, 10);
+            assert_eq!(
+                ranked.iter().map(|i| i.number).collect::<Vec<_>>(),
+                [1],
+                "{label}"
+            );
+            assert_eq!(urgency, 0.0);
+            assert_eq!(count, 1);
+        }
     }
 }

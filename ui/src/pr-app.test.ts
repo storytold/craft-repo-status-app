@@ -7,9 +7,12 @@ import { readFileSync } from 'node:fs';
 import { Window } from 'happy-dom';
 import { start } from './app.ts';
 import type { Api } from './app.ts';
+import type { Route } from './pr-app.ts';
 import { REPO_COLUMNS } from './pr-model.ts';
-import type { Overview, PrFull, PrRow, RelatedRef, RepoRow, RepoView, Status } from './pr-model.ts';
+import type { IssueRow, Overview, PrFull, PrRow, RelatedRef, RepoRow, RepoView, Status } from './pr-model.ts';
 
+const XSS = '<img src=x onerror="window.pwned=1"> Fix';
+const XSS_ISSUE = '<img src=x onerror="window.pwned=3"> Crash';
 const HTML = readFileSync(new URL('../index.html', import.meta.url), 'utf8');
 const BODY = HTML.match(/<body>([\s\S]*)<\/body>/)![1]!.replace(/<script[\s\S]*?<\/script>/g, '');
 const NOW = new Date().toISOString();
@@ -17,7 +20,7 @@ const NOW = new Date().toISOString();
 const row = (o: Partial<RepoRow>): RepoRow => ({
   repo: 'o/alpha', open: 3, listed: true, inspected: 2, analysed: 0, approved: 0, landable: 1, promising: 0, reviewable: 1, ci_not_run: 0, checking: 0, not_inspected: 0, high_quality: 1, easy: 1, medium: 1, hard: 1,
   needs_work: 1, conflicted: 0, draft: 0, conflicts: 0, ci_failing: 0, rabbit_flagged: 1, rabbit_nits: 0, security: 0, security_nits: 0,
-  core: 1, frequent: 0, new: 0, bots: 0, interesting: 0, groups: 1, grouped_prs: 2, list_at: NOW, inaccessible: false, ...o,
+  core: 1, frequent: 0, new: 0, bots: 0, interesting: 0, groups: 1, grouped_prs: 2, critical_issues: 1, fix_ready: 1, no_fix: 1, list_at: NOW, inaccessible: false, ...o,
 });
 
 const pr = (o: Partial<PrRow>): PrRow => ({
@@ -25,15 +28,27 @@ const pr = (o: Partial<PrRow>): PrRow => ({
   landed_total: 40, approved_by: [], approved: false, approval_stale: false, conflicted: false, created_at: NOW, updated_at: NOW, is_draft: false, additions: 10, deletions: 2, changed_files: 1, labels: [],
   mergeable: 'MERGEABLE', comments_total: 0, reactions: 0, state: 'landable', ease: 'easy', quality: 85, high_quality: true,
   inspected: true, ci: 'success', rabbit_flags: 0, rabbit_nits: 0, security_flags: 0, security_nits: 0, sensitive: 0, interesting: false,
-  summary: '', analysed: false, related: [], focus: 8000, ...o,
+  summary: '', analysed: false, related: [], focus: 8000, fixes: [], ...o,
 });
+
+const issue = (o: Partial<IssueRow>): IssueRow => ({
+  repo: 'o/alpha', number: 50, title: 'A crash', url: 'https://github.com/o/alpha/issues/50', created_at: NOW, updated_at: NOW, comments: 0, reactions: 0, labels: [],
+  score: 60, critical: false, reasons: ['broken'], stage: 'no_fix', fixes: [], ...o,
+});
+
+const ISSUES: IssueRow[] = [
+  issue({ number: 50, title: XSS_ISSUE, critical: true, score: 90, reasons: ['crash'], stage: 'fix_ready', fixes: [{ number: 1, title: 'Change', state: 'promising' }] }),
+  issue({ number: 51, title: 'No PR yet', score: 70 }),
+  issue({ number: 52, title: 'Who knows', score: 50, labels: ['needs info'], reasons: ['needs info'], stage: 'needs_info' }),
+  issue({ repo: 'o/beta', number: 53, title: 'Library bug', category: 'library', score: 40 }),
+  issue({ repo: 'tangency-labs/solidcraft', number: 54, title: 'Third-party crash', category: 'app', critical: true, score: 30, reasons: ['crash'] }),
+];
 
 const STATUS: Status = {
   token_rejected: false, points_last_hour: 16, max_points_per_hour: 2500, backlog: 12, histories_pending: 0, poll_secs: 1800, stale_after_secs: 5400,
   claude: { enabled: true, available: true, model: 'm', spent_today: 0.5, max_usd_per_day: 5, runs_last_hour: 1, max_runs_per_hour: 12 },
 };
 
-const XSS = '<img src=x onerror="window.pwned=1"> Fix';
 
 const FULL: PrFull = {
   repo: 'o/alpha', number: 1, title: XSS, url: 'https://github.com/o/alpha/pull/1',
@@ -59,6 +74,7 @@ const FULL: PrFull = {
   detail_current: true,
   analysis: { model: 'm', at: NOW, deep: false, diff_truncated: false, summary: 'Stops a crash.', ease: 'medium', interesting: true, why_interesting: 'Touches core', review_focus: 'The parser', risk: '', security_note: '' },
   analysis_current: true,
+  fixes: [{ number: 50, title: 'A crash', url: 'https://github.com/o/alpha/issues/50', score: 90, critical: true }],
   groups: [{ id: 'c0', title: 'Tab fixes', relation: 'overlap', note: 'Land one first', numbers: [1, 2], source: 'claude' }],
   related_refs: [{ number: 2, relation: 'overlap', group: 'Tab fixes', note: 'Land one first', source: 'claude' }],
   related: [pr({ number: 2, title: 'Other tab fix', state: 'checking' })],
@@ -84,6 +100,7 @@ interface Harness {
   $(sel: string): HTMLElement | null;
   $$(sel: string): HTMLElement[];
   key(key: string, opts?: Record<string, unknown>): void;
+  emitMeta(m: unknown): void;
 }
 
 let teardown: (() => Promise<void>) | null = null;
@@ -91,7 +108,7 @@ afterEach(async () => { await teardown?.(); teardown = null; });
 
 const tick = (ms = 0) => new Promise((r) => setTimeout(r, ms));
 
-async function setup(overview?: Partial<Overview>): Promise<Harness> {
+async function setup(overview?: Partial<Overview>, route: Route = { view: 'apps' }, full: PrFull = FULL): Promise<Harness> {
   const win = new Window({ url: 'http://localhost/index.html' });
   const doc = win.document as unknown as Document;
   doc.body.innerHTML = BODY;
@@ -100,23 +117,23 @@ async function setup(overview?: Partial<Overview>): Promise<Harness> {
   const saved = Object.fromEntries(Object.keys(globals).map((k) => [k, Object.getOwnPropertyDescriptor(g, k)]));
   for (const [k, v] of Object.entries(globals)) Object.defineProperty(g, k, { value: v, configurable: true, writable: true });
   const calls: Harness['calls'] = [];
-  const listeners = new Map<string, () => void>();
+  const listeners = new Map<string, (p?: unknown) => void>();
   const api: Api = {
     async invoke<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
       calls.push({ cmd, args });
       const answers: Record<string, unknown> = {
         get_meta: { shortcut: 'CmdOrCtrl+Shift+Y', high_quality: 75 },
-        get_pr_overview: { repos: [row({}), row({ repo: 'o/beta', open: 9, landable: 0, reviewable: 4, listed: true }), row({ repo: 'o/gamma', listed: false, open: 0, open_hint: 77 })], status: STATUS, ...overview },
+        get_pr_overview: { repos: [row({}), row({ repo: 'o/beta', open: 9, landable: 0, reviewable: 4, listed: true }), row({ repo: 'o/gamma', listed: false, open: 0, open_hint: 77 })], issues: ISSUES, icons: {}, status: STATUS, ...overview },
         get_pr_repo: args?.repo === 'o/alpha' ? REPO : null,
         get_pr_queue: [pr({ repo: 'o/beta', number: 9, title: 'Queued', related: [rel(1)] })],
-        get_pr: args?.number === 1 ? FULL : null,
+        get_pr: args?.number === 1 ? full : null,
       };
       return answers[cmd] as T;
     },
-    listen(event, fn) { listeners.set(event, fn as () => void); },
+    listen(event, fn) { listeners.set(event, fn as (p?: unknown) => void); },
     startResize() {},
   };
-  const stop = start(api, { view: 'apps' });
+  const stop = start(api, route);
   await tick();
   await tick();
   teardown = async () => {
@@ -129,6 +146,7 @@ async function setup(overview?: Partial<Overview>): Promise<Harness> {
   return {
     win, doc, calls,
     emit: (e) => listeners.get(e)?.(),
+    emitMeta: (m) => listeners.get('craft:meta')?.(m),
     $: (s) => doc.querySelector(s),
     $$: (s) => [...doc.querySelectorAll<HTMLElement>(s)],
     key: (key, opts = {}) => { doc.dispatchEvent(new win.KeyboardEvent('keydown', { key, bubbles: true, ...opts }) as unknown as Event); },
@@ -214,6 +232,36 @@ test('PR tables filter, search, sort and group', async () => {
   (h.$('#group-toggle') as HTMLInputElement).click();
   assert.match(h.$('.group-head')!.textContent!, /Tab fixes/);
   assert.match(h.$('.group-head')!.textContent!, /Land one first/);
+});
+
+test('Escape from the Issues checkbox navigates back without rendering the PR table', async () => {
+  const h = await setup();
+  (h.$('tr[data-repo="o/alpha"]') as HTMLElement).click();
+  await tick();
+  const search = h.$('input[type="search"]') as HTMLInputElement;
+  search.value = 'Blocked one';
+  search.dispatchEvent(new h.win.Event('input') as unknown as Event);
+  (h.$('[data-pane="issues"]') as HTMLElement).click();
+  const checkbox = h.$('#critical-only')!;
+  checkbox.focus();
+  checkbox.dispatchEvent(new h.win.KeyboardEvent('keydown', { key: 'Escape', bubbles: true }) as unknown as Event);
+  await tick();
+  assert.equal(appRows(h).length, 3);
+  assert.equal(h.$('.pr-table'), null);
+});
+
+test('Escape in the search input clears the query and keeps the PR table', async () => {
+  const h = await setup();
+  (h.$('tr[data-repo="o/alpha"]') as HTMLElement).click();
+  await tick();
+  const search = h.$('input[type="search"]') as HTMLInputElement;
+  search.value = 'Blocked one';
+  search.dispatchEvent(new h.win.Event('input') as unknown as Event);
+  search.focus();
+  search.dispatchEvent(new h.win.KeyboardEvent('keydown', { key: 'Escape', bubbles: true }) as unknown as Event);
+  await tick();
+  assert.equal((h.$('input[type="search"]') as HTMLInputElement).value, '');
+  assert.deepEqual(prRows(h), [1, 2]);
 });
 
 test('approval is a flag beside the status, naming who', async () => {
@@ -359,12 +407,40 @@ test('links only open through the host, and asking Claude queues it', async () =
   assert.equal(h.$('[data-ask="deep"]')!.hasAttribute('disabled'), true, 'no double spending');
 });
 
+test('linked issues open in their repository and old cache entries have no guessed link', async () => {
+  const full: PrFull = {
+    ...FULL,
+    detail: {
+      ...FULL.detail!,
+      linked_issues: [
+        { repository: 'other/repo', number: 42, title: 'Foreign issue' },
+        { number: 42, title: 'Old cached issue' },
+      ],
+    },
+  };
+  const h = await setup(undefined, { view: 'pr', repo: 'o/alpha', number: 1, from: 'repo' }, full);
+  const link = h.$$('.link').find((a) => a.textContent === 'other/repo#42 Foreign issue')!;
+  assert.ok(link);
+  link.click();
+  assert.deepEqual(h.calls.at(-1), { cmd: 'open_url', args: { url: 'https://github.com/other/repo/issues/42' } });
+  assert.ok(h.$$('span').some((s) => s.textContent === '#42 Old cached issue'));
+  assert.equal(h.$$('.link').some((a) => a.textContent?.includes('Old cached issue')), false);
+});
+
 test('refresh targets what is on screen', async () => {
   const h = await setup();
   (h.$('#refresh') as HTMLElement).click();
   assert.equal(h.calls.at(-1)!.cmd, 'refresh_prs');
   (h.$('tr[data-repo="o/alpha"]') as HTMLElement).click();
   await tick();
+  (h.$('#refresh') as HTMLElement).click();
+  assert.deepEqual(h.calls.at(-1), { cmd: 'refresh_pr_repo', args: { repo: 'o/alpha' } });
+  (h.$('[data-pane="issues"]') as HTMLElement).click();
+  (h.$('#refresh') as HTMLElement).click();
+  assert.deepEqual(h.calls.at(-1), { cmd: 'refresh_repo', args: { repo: 'o/alpha' } });
+  h.key('r', { ctrlKey: true });
+  assert.deepEqual(h.calls.at(-1), { cmd: 'refresh_repo', args: { repo: 'o/alpha' } });
+  (h.$('[data-pane="prs"]') as HTMLElement).click();
   (h.$('#refresh') as HTMLElement).click();
   assert.deepEqual(h.calls.at(-1), { cmd: 'refresh_pr_repo', args: { repo: 'o/alpha' } });
   (h.$('tr[data-number="1"]') as HTMLElement).click();
@@ -468,4 +544,133 @@ test('the toggles hide repos and their PRs from the tables, tab count and queue'
   assert.deepEqual(prRows(h), [], 'the queued PR is in the hidden repo');
   (h.$('[data-kind="library"]') as HTMLElement).click();
   assert.deepEqual(prRows(h), [9]);
+});
+
+const issueNumbers = (h: Harness) => h.$$('.urgent-item').map((n) => Number(n.dataset.issue));
+const stages = (h: Harness) => h.$$('.issue-stage').map((n) => n.dataset.stage);
+
+test('Fix first groups every repo\'s issues by what they need next, third parties included', async () => {
+  const h = await setup();
+  (h.$('[data-pr-view="issues"]') as HTMLElement).click();
+  await tick();
+  assert.deepEqual(stages(h), ['fix_ready', 'no_fix', 'needs_info']);
+  assert.deepEqual(issueNumbers(h), [50, 51, 53, 54, 52]);
+  assert.equal(h.$('[data-pr-view="issues"]')!.getAttribute('aria-selected'), 'true');
+  assert.equal(h.$('#fix-count')!.textContent, '2');
+  assert.equal(h.$('.urgent-item[data-issue="54"] .third-party')!.textContent, '3P');
+  assert.equal(h.$('.urgent-item img'), null, 'titles stay text');
+  assert.match(h.$('.urgent-item[data-issue="50"] .text')!.textContent!, /<img src=x/);
+
+  (h.$('#critical-only') as HTMLInputElement).click();
+  assert.deepEqual(issueNumbers(h), [50, 54]);
+  (h.$('#critical-only') as HTMLInputElement).click();
+
+  (h.$('.urgent-item[data-issue="51"]') as HTMLElement).click();
+  assert.deepEqual(h.calls.at(-1), { cmd: 'open_url', args: { url: 'https://github.com/o/alpha/issues/50' } }, 'a row opens on GitHub');
+});
+
+test('an issue\'s PR opens here, and Esc comes back to the list', async () => {
+  const h = await setup();
+  (h.$('[data-pr-view="issues"]') as HTMLElement).click();
+  await tick();
+  const fix = h.$('.issue-fix[data-fix="1"]')!;
+  assert.match(fix.textContent!, /PR #1/);
+  assert.match(fix.textContent!, /Promising/);
+  fix.click();
+  await tick();
+  assert.ok(h.$('#verdict'));
+  assert.equal(h.calls.some((c) => c.cmd === 'open_url'), false, 'not the issue on GitHub');
+  h.key('Escape');
+  await tick();
+  assert.deepEqual(stages(h), ['fix_ready', 'no_fix', 'needs_info']);
+});
+
+test('the toggles hide issues in Fix first, and its count', async () => {
+  const h = await setup();
+  (h.$('[data-pr-view="issues"]') as HTMLElement).click();
+  await tick();
+  (h.$('[data-kind="app"]') as HTMLElement).click();
+  assert.equal(issueNumbers(h).includes(54), false);
+  assert.equal(h.$('#fix-count')!.textContent, '1');
+});
+
+test('a repo\'s page switches between its PRs and its issues, and keeps the pane on the way back', async () => {
+  const h = await setup();
+  (h.$('tr[data-repo="o/alpha"]') as HTMLElement).click();
+  await tick();
+  assert.deepEqual(prRows(h), [1, 2], 'PRs first');
+  assert.equal(h.$('[data-pane="prs"]')!.getAttribute('aria-pressed'), 'true');
+  assert.match(h.$('[data-pane="issues"]')!.textContent!, /Issues.*3/);
+  (h.$('[data-pane="issues"]') as HTMLElement).click();
+  assert.deepEqual(issueNumbers(h), [50, 51, 52], 'only this repo');
+  assert.equal(h.$('.urgent-list.one-repo .u-repo'), null, 'no need to name the repo');
+  (h.$('.issue-fix') as HTMLElement).click();
+  await tick();
+  assert.ok(h.$('#verdict'));
+  h.key('Escape');
+  await tick();
+  assert.deepEqual(issueNumbers(h), [50, 51, 52], 'still on the issues');
+  (h.$('[data-pane="prs"]') as HTMLElement).click();
+  assert.deepEqual(prRows(h), [1, 2]);
+});
+
+test('a third party\'s page has its issues only, and never asks for its PRs', async () => {
+  const h = await setup(undefined, { view: 'repo', repo: 'tangency-labs/solidcraft' });
+  await tick();
+  assert.deepEqual(issueNumbers(h), [54]);
+  assert.equal(h.$('[data-pane="prs"]'), null);
+  assert.match(h.$('#prs-view .controls')!.textContent!, /aren't fetched or reviewed/);
+  (h.$('#refresh') as HTMLElement).click();
+  assert.deepEqual(h.calls.at(-1), { cmd: 'refresh_repo', args: { repo: 'tangency-labs/solidcraft' } });
+});
+
+test('a PR says which urgent issues it fixes, in its row and on its page', async () => {
+  const fixes = [{ number: 50, title: 'A crash', url: 'https://github.com/o/alpha/issues/50', score: 90, critical: true }];
+  const row1 = REPO.prs[0]!;
+  row1.fixes = fixes;
+  try {
+    const h = await setup();
+    (h.$('tr[data-repo="o/alpha"]') as HTMLElement).click();
+    await tick();
+    assert.equal(h.$('tr[data-number="1"] .chip.fixes.crit')!.textContent, 'Fixes #50');
+    (h.$('[data-filter="fixes"]') as HTMLElement).click();
+    assert.deepEqual(prRows(h), [1]);
+    (h.$('tr[data-number="1"]') as HTMLElement).click();
+    await tick();
+    assert.match(h.$('#fixes')!.textContent!, /#50 A crash/);
+  } finally {
+    row1.fixes = [];
+  }
+});
+
+test('the repos table counts each repo\'s issues', async () => {
+  const h = await setup({ repos: [row({ critical_issues: 4, fix_ready: 2, no_fix: 9 })] });
+  const cell = (key: string) => (h.$('#apps-table tbody tr') as HTMLTableRowElement).cells[REPO_COLUMNS.findIndex((c) => c.key === key)]!.textContent;
+  assert.equal(cell('critical_issues'), '4');
+  assert.equal(cell('fix_ready'), '2');
+  assert.equal(cell('no_fix'), '9');
+});
+
+test('the repos table turns its numeric headings vertical, and they still sort', async () => {
+  const h = await setup();
+  assert.equal(h.$('th[data-key="name"]')!.classList.contains('vertical'), false);
+  assert.equal(h.$('th[data-key="category"]')!.classList.contains('vertical'), false);
+  const landable = h.$('th[data-key="landable"]')!;
+  assert.ok(landable.classList.contains('vertical'));
+  assert.equal(landable.querySelector('.vertical-label')!.textContent, 'Landable');
+  (h.$('th[data-key="open"] .vertical-label') as HTMLElement).click();
+  assert.ok(h.$('th[data-key="open"]')!.classList.contains('sorted'));
+  (h.$('tr[data-repo="o/alpha"]') as HTMLElement).click();
+  await tick();
+  assert.equal(h.$('.pr-table .vertical'), null, 'PR tables keep theirs level');
+});
+
+test('the config can set the repos table headings level, independently of Downloads', async () => {
+  const h = await setup();
+  h.emitMeta({ table_headings: { downloads: 'vertical', prs: 'horizontal' } });
+  assert.equal(h.$('th[data-key="open"]')!.classList.contains('vertical'), false);
+  assert.equal(h.$('th[data-key="open"]')!.textContent, 'Open');
+  assert.equal(h.$('#apps-table')!.classList.contains('vertical-headings'), false);
+  h.emitMeta({ table_headings: { downloads: 'horizontal', prs: 'vertical' } });
+  assert.ok(h.$('th[data-key="open"]')!.classList.contains('vertical'));
 });

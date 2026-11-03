@@ -2,7 +2,7 @@
 // and crates/craft-status-app/src/pr/poller.rs: change both together.
 
 import { CATEGORY_LABEL } from './model.ts';
-import type { RepoCategory } from './model.ts';
+import type { RepoCategory, UrgentIssue } from './model.ts';
 
 export type PrState = 'draft' | 'needs_work' | 'conflicted' | 'not_inspected' | 'checking' | 'ci_not_run' | 'landable' | 'promising' | 'reviewable';
 export type Ease = 'easy' | 'medium' | 'hard';
@@ -47,6 +47,9 @@ export interface RepoRow {
   interesting: number;
   groups: number;
   grouped_prs: number;
+  critical_issues: number;
+  fix_ready: number;
+  no_fix: number;
   oldest_at?: string | null;
   newest_at?: string | null;
   list_at?: string | null;
@@ -102,6 +105,47 @@ export interface PrRow {
   analysed: boolean;
   related: RelatedRef[];
   focus: number;
+  fixes: FixesIssue[];
+}
+
+/** An urgent issue a PR names or closes. */
+export interface FixesIssue {
+  number: number;
+  title: string;
+  url: string;
+  score: number;
+  critical: boolean;
+}
+
+export type IssueStage = 'fix_ready' | 'fix_in_progress' | 'no_fix' | 'needs_info';
+
+/** A PR that names or closes an issue. */
+export interface FixRef {
+  number: number;
+  title: string;
+  state: PrState;
+}
+
+export interface IssueRow extends UrgentIssue {
+  repo: string;
+  category?: RepoCategory;
+  stage: IssueStage;
+  fixes: FixRef[];
+}
+
+/** The groups an issue list is split into, in the order they're worth doing. */
+export const ISSUE_STAGES: readonly { id: IssueStage; label: string; hint: string }[] = [
+  { id: 'fix_ready', label: 'Land a fix', hint: 'A PR for it can be reviewed or landed now.' },
+  { id: 'fix_in_progress', label: 'Fix under way', hint: 'A PR for it exists, but something is in its way.' },
+  { id: 'no_fix', label: 'No fix yet', hint: 'No open PR names it.' },
+  { id: 'needs_info', label: 'Waiting on the reporter', hint: 'Labeled as needing more information, and no PR yet.' },
+];
+
+/** `rows` split by stage, in `ISSUE_STAGES` order and keeping their order, without empty groups. */
+export function issuesByStage(rows: readonly IssueRow[]): { id: IssueStage; label: string; hint: string; rows: IssueRow[] }[] {
+  return ISSUE_STAGES
+    .map((s) => ({ ...s, rows: rows.filter((r) => r.stage === s.id) }))
+    .filter((s) => s.rows.length > 0);
 }
 
 export interface Group {
@@ -175,7 +219,7 @@ export interface PrDetail {
   human_threads_open: number;
   reviews: { author: string; state: string; at?: string | null }[];
   comments: { author: string; text: string; at?: string | null; url: string }[];
-  linked_issues: { number: number; title: string }[];
+  linked_issues: { repository?: string; number: number; title: string }[];
 }
 
 export interface Analysis {
@@ -235,6 +279,7 @@ export interface PrFull {
   groups: Group[];
   related_refs: RelatedRef[];
   related: PrRow[];
+  fixes: FixesIssue[];
 }
 
 export interface ClaudeStatus {
@@ -266,7 +311,13 @@ export interface Status {
   claude: ClaudeStatus;
 }
 
-export interface Overview { repos: RepoRow[]; status: Status }
+export interface Overview {
+  repos: RepoRow[];
+  /** Every repo's most urgent issues, third parties too, most urgent first. */
+  issues: IssueRow[];
+  icons: Record<string, string>;
+  status: Status;
+}
 
 export interface Sort { key: string; dir: 'asc' | 'desc' }
 
@@ -386,6 +437,9 @@ export const REPO_COLUMNS: Column<RepoRow>[] = [
   { key: 'new', label: 'New', group: 'Authors', title: 'First-time contributors', value: (r) => (r.listed ? r.new : null) },
   { key: 'interesting', label: 'Interesting', group: 'Notable', title: 'Flagged by Claude, or drawing a lot of discussion', value: (r) => (r.listed ? r.interesting : null) },
   { key: 'groups', label: 'Possibly related', group: 'Notable', title: 'Groups of PRs that may be related', value: (r) => (r.listed ? r.groups : null) },
+  { key: 'critical_issues', label: 'Critical', group: 'Issues', title: 'Open issues naming a crash, hang, data loss or similar, or triaged as critical', value: (r) => r.critical_issues },
+  { key: 'fix_ready', label: 'Fix ready', group: 'Issues', title: 'Most urgent issues with a PR that can be reviewed or landed now', value: (r) => r.fix_ready },
+  { key: 'no_fix', label: 'No fix yet', group: 'Issues', title: 'Most urgent issues no open PR names, and that aren\'t waiting on their reporter', value: (r) => r.no_fix },
   { key: 'oldest_at', label: 'Oldest', group: 'Age', value: (r) => time(r.oldest_at) },
   { key: 'newest_at', label: 'Newest', group: 'Age', value: (r) => time(r.newest_at) },
   { key: 'list_at', label: 'Fetched', group: 'Age', value: (r) => time(r.list_at) },
@@ -454,6 +508,7 @@ export const FILTERS: Filter[] = [
   { id: 'frequent', label: 'Frequent', test: (r) => r.tier === 'frequent' },
   { id: 'new', label: 'New', test: (r) => r.tier === 'new' },
   { id: 'draft', label: 'Drafts', test: (r) => r.is_draft },
+  { id: 'fixes', label: 'Fixes an urgent issue', test: (r) => r.fixes.length > 0 },
 ];
 
 /** Whether `row` matches every word of `query`, by title, number, author, label or summary. */

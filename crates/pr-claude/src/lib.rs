@@ -248,7 +248,7 @@ pub fn pr_block(pr: &Pr, diff: Option<(&str, bool)>) -> String {
             let issues: Vec<String> = d
                 .linked_issues
                 .iter()
-                .map(|i| format!("#{} {}", i.number, i.title))
+                .map(|i| format!("{}#{} {}", i.repository, i.number, i.title))
                 .collect();
             s += &format!("closes: {}\n", issues.join("; "));
         }
@@ -574,6 +574,7 @@ mod tests {
                     ..Default::default()
                 }],
                 linked_issues: vec![LinkedIssue {
+                    repository: "o/r".into(),
                     number: 5,
                     title: "Tabs".into(),
                 }],
@@ -604,7 +605,7 @@ mod tests {
         for want in [
             "<pr number=\"7\">",
             "Fix tabs",
-            "closes: #5 Tabs",
+            "closes: o/r#5 Tabs",
             "a.rs +3 -1",
             "[Major, Functional Correctness] a.rs: Guard it",
             "</pr>",
