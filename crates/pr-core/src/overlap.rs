@@ -71,7 +71,7 @@ impl Links {
 }
 
 /// Issue numbers named as `#123` in a title.
-fn issues_in_title(title: &str) -> Vec<u64> {
+pub(crate) fn issues_in_title(title: &str) -> Vec<u64> {
     let mut out = vec![];
     for part in title.split('#').skip(1) {
         let digits: String = part.chars().take_while(char::is_ascii_digit).collect();
