@@ -745,6 +745,8 @@ test('Downloads leads with the build, then its download columns', async () => {
   const h = await setup();
   const groups = [...h.doc.querySelectorAll('thead tr.groups th')].map((th) => th.textContent);
   assert.equal(groups.includes('Downloads'), true);
+  assert.equal(groups[groups.indexOf('Downloads') + 1], 'Pipeline', 'unreleased work sits right after Downloads');
+  assert.deepEqual(COLUMNS.filter((c) => c.group === 'Pipeline').map((c) => c.key), ['commits_since_build', 'pr_backlog']);
 });
 
 test('third-party repos stay on Downloads, tagged', async () => {
