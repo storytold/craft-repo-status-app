@@ -295,6 +295,7 @@ pub struct Decision {
 pub struct Light {
     pub id: String,
     pub number: u64,
+    pub url: String,
     pub title: String,
     /// The author's login; `None` for a deleted account.
     pub author: Option<String>,
@@ -330,15 +331,17 @@ impl PrRecord {
         self.fetched_at.is_none() || self.stale
     }
 
-    /// Takes the light sweep's fields. A newer `updatedAt` than the deep
-    /// fetch saw marks the record stale; `updated_at` itself stays, so the
-    /// next deep fetch is still due. The sweep does not read the names of
-    /// failing checks: a new head drops the old head's names, and a rollup
-    /// that turns to `FAILURE` or `ERROR` on a fetched record marks it stale,
-    /// so the next deep fetch reads them. A check finishing does not change
-    /// `updatedAt`. The title and the author fill a record that no deep
-    /// fetch has read yet.
+    /// The method applies the light sweep's fields and any nonempty URL. A newer
+    /// `updatedAt` than the deep fetch saw marks the record stale; `updated_at`
+    /// stays unchanged until the deep fetch.
+    /// The sweep does not read failing check names. A new head clears the old
+    /// head's names. A `FAILURE` or `ERROR` rollup marks a fetched record stale
+    /// on each sweep. A check finishing does not change `updatedAt`.
+    /// An unread record also receives its title and author from the sweep.
     pub fn apply_light(&mut self, light: &Light, now: Time) {
+        if !light.url.is_empty() {
+            self.url.clone_from(&light.url);
+        }
         if self.fetched_at.is_none() {
             self.title = light.title.clone();
             self.author = light.author.clone();
@@ -352,11 +355,7 @@ impl PrRecord {
             // The old head's commit pages are not read on.
             self.contribution.commits_cursor = None;
         }
-        // A check suite that failed, recovered or ran again changes the
-        // failing names, though the rollup may stay failed.
-        let moved =
-            new_head || light.rollup != self.checks.rollup || light.suites != self.checks.suites;
-        if self.fetched_at.is_some() && failed && moved {
+        if self.fetched_at.is_some() && failed {
             self.stale = true;
         }
         self.state = PrState::Open;
@@ -740,6 +739,39 @@ mod tests {
     }
 
     #[test]
+    fn unchanged_failed_sweeps_refresh_failing_names() {
+        let now = t("2026-10-05T00:00:00Z");
+        for rollup in ["FAILURE", "ERROR"] {
+            for suites in [vec![], vec![Suite::default(); 8]] {
+                let light = Light {
+                    number: 1,
+                    head_ref_oid: "head".into(),
+                    rollup: Some(rollup.into()),
+                    suites: suites.clone(),
+                    ..Default::default()
+                };
+                let mut record = PrRecord {
+                    number: 1,
+                    head_ref_oid: "head".into(),
+                    fetched_at: Some(now),
+                    checks: Checks {
+                        rollup: Some(rollup.into()),
+                        suites,
+                        failing: vec!["old-check".into()],
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                };
+                record.apply_light(&light, now);
+                assert!(
+                    record.needs_fetch(),
+                    "{rollup}: unchanged summaries must refresh failure details"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn a_failure_the_sweep_sees_is_fetched_again_for_its_check_names() {
         let now = t("2026-10-05T00:00:00Z");
         let updated = Some(t("2026-10-04T00:00:00Z"));
@@ -772,11 +804,11 @@ mod tests {
         r.apply_light(&failed, now);
         assert!(r.stale && r.needs_fetch());
         assert_eq!(r.checks.rollup.as_deref(), Some("FAILURE"));
-        // The deep fetch read the names; the next sweep leaves the record alone.
+        // Each sweep refreshes failing names even when the summary is unchanged.
         r.checks.failing = vec!["test".into()];
         r.stale = false;
         r.apply_light(&failed, now);
-        assert!(!r.needs_fetch());
+        assert!(r.needs_fetch());
         assert_eq!(r.checks.failing, ["test"]);
         // Another suite fails too: the rollup stays FAILURE, the suites move.
         let suite = |conclusion: &str| Suite {
@@ -793,7 +825,10 @@ mod tests {
         assert!(r.needs_fetch(), "the failing names are read again");
         r.stale = false;
         r.apply_light(&both, now);
-        assert!(!r.needs_fetch(), "nothing moved since");
+        assert!(
+            r.needs_fetch(),
+            "unchanged summaries still refresh failing names"
+        );
         // A new head drops the old head's names and is fetched again.
         let pushed = Light {
             head_ref_oid: "h2".into(),
