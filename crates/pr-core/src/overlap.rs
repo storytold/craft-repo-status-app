@@ -153,7 +153,7 @@ fn link_by_issue(repo: &str, prs: &[&Pr], links: &mut Links) -> HashMap<u64, Str
     let mut by_issue: BTreeMap<(String, u64), Vec<u64>> = BTreeMap::new();
     for p in prs {
         let mut issues = issues_in_title(&p.title, repo);
-        if let Some(d) = &p.detail {
+        if let Some(d) = p.current_detail() {
             issues.extend(
                 d.linked_issues
                     .iter()
@@ -413,6 +413,9 @@ mod tests {
         let g = groups(&[pr(1, "Foreign other/repo#42", &[]), linked(2, "OTHER/REPO")]);
         assert_eq!(g.len(), 1);
         assert_eq!(g[0].numbers, [1, 2]);
+        let mut stale = linked(3, "other/repo");
+        stale.head_oid = "new".into();
+        assert!(groups(&[linked(2, "other/repo"), stale]).is_empty());
     }
 
     #[test]

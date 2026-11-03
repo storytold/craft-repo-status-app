@@ -209,7 +209,7 @@ fn issues_of(pr: &Pr, repo: &str) -> Vec<u64> {
         .filter(|(r, _)| r.eq_ignore_ascii_case(repo))
         .map(|(_, n)| n)
         .collect();
-    if let Some(d) = &pr.detail {
+    if let Some(d) = pr.current_detail() {
         out.extend(
             d.linked_issues
                 .iter()
@@ -1020,8 +1020,7 @@ mod tests {
         pr.title = "Repair other/repo#701".into();
         pr.detail.as_mut().unwrap().linked_issues = serde_json::from_value(serde_json::json!([
             { "number": 701, "title": "Elsewhere", "repository": "other/repo" },
-            { "number": 700, "title": "Here", "repository": "O/R" },
-            { "number": 701, "title": "Cached without repository" }
+            { "number": 700, "title": "Here", "repository": "O/R" }
         ]))
         .unwrap();
         let cfg = Config::default();
@@ -1035,5 +1034,37 @@ mod tests {
         assert_eq!(view.row.no_fix, 1);
         let pr = view.prs.iter().find(|p| p.number == 1).unwrap();
         assert_eq!(pr.fixes.iter().map(|i| i.number).collect::<Vec<_>>(), [700]);
+    }
+
+    #[test]
+    fn stale_closing_references_do_not_classify_fixes() {
+        let (mut s, repos) = store();
+        let facts = with_issues(&mut s, &repos);
+        let pr = s.repo_mut(&repos[0]).prs.get_mut(&1).unwrap();
+        pr.title = "Repair a problem".into();
+        pr.detail.as_mut().unwrap().linked_issues = vec![crate::model::LinkedIssue {
+            repository: repos[0].clone(),
+            number: 700,
+            ..Default::default()
+        }];
+        assert_eq!(issues_of(pr, &repos[0]), [700]);
+        pr.absorb_listing(Pr {
+            updated_at: Some(chrono::Utc::now()),
+            ..pr.clone()
+        });
+        let cfg = Config::default();
+        let rows = issues(&s, &repos, &cfg, &facts);
+        let issue = rows.iter().find(|r| r.issue.number == 700).unwrap();
+        assert_eq!(issue.stage, IssueStage::NoFix);
+        assert!(issue.fixes.is_empty());
+        let view = repo_view(&s, &repos[0], &repos, &cfg, &facts).unwrap();
+        assert_eq!(view.row.no_fix, 2);
+        assert!(view
+            .prs
+            .iter()
+            .find(|p| p.number == 1)
+            .unwrap()
+            .fixes
+            .is_empty());
     }
 }
