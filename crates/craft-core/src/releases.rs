@@ -1,6 +1,6 @@
 //! "Builds" are GitHub releases. Downloads are summed over the assets people
 //! actually install (installers, archives, packages), not over checksum lists,
-//! signatures, AppImage delta files or updater manifests, which are fetched by
+//! signatures, `AppImage` delta files or updater manifests, which are fetched by
 //! machines and would inflate the numbers.
 
 use chrono::{DateTime, Utc};
@@ -63,7 +63,6 @@ pub struct BuildLag {
 
 /// Assets that are not something a person downloads to run the app.
 pub fn is_counted_asset(name: &str) -> bool {
-    let n = name.to_ascii_lowercase();
     const SKIP_SUFFIXES: &[&str] = &[
         ".zsync",
         ".sha256",
@@ -79,6 +78,7 @@ pub fn is_counted_asset(name: &str) -> bool {
         ".txt",
         ".intoto.jsonl",
     ];
+    let n = name.to_ascii_lowercase();
     !(n.starts_with("sha256sums")
         || n.starts_with("checksums")
         || SKIP_SUFFIXES.iter().any(|s| n.ends_with(s)))

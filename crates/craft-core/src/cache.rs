@@ -12,6 +12,10 @@ pub struct Cache {
 
 impl Cache {
     /// `~/Library/Caches/craft-status/snapshot.json` (or the platform equivalent).
+    ///
+    /// # Errors
+    ///
+    /// Returns `Error::NoHome` when no cache or home directory can be determined.
     pub fn default_location() -> Result<Cache> {
         let dir = dirs::cache_dir()
             .or_else(|| dirs::home_dir().map(|h| h.join(".cache")))
@@ -39,6 +43,10 @@ impl Cache {
         Some(s)
     }
 
+    /// # Errors
+    ///
+    /// Returns `Error::Json` when serialization fails or an I/O error when the snapshot cannot
+    /// be written atomically.
     pub fn save(&self, s: &Snapshot) -> Result<()> {
         atomic_write(&self.path, &serde_json::to_string(s)?)
     }

@@ -291,12 +291,14 @@ impl Snapshot {
             .map(|w| {
                 old.iter()
                     .position(|e| e.repo.eq_ignore_ascii_case(w))
-                    .map(|i| {
-                        let mut entry = old.swap_remove(i);
-                        entry.category = category_of(&entry.repo);
-                        entry
-                    })
-                    .unwrap_or_else(|| RepoEntry::new(w))
+                    .map_or_else(
+                        || RepoEntry::new(w),
+                        |i| {
+                            let mut entry = old.swap_remove(i);
+                            entry.category = category_of(&entry.repo);
+                            entry
+                        },
+                    )
             })
             .collect();
     }
@@ -307,8 +309,8 @@ mod tests {
     use super::*;
     use chrono::Duration;
 
-    fn at(mins_ago: i64, now: Time) -> Option<Time> {
-        Some(now - Duration::minutes(mins_ago))
+    fn at(mins_ago: i64, now: Time) -> Time {
+        now - Duration::minutes(mins_ago)
     }
 
     #[test]
@@ -321,11 +323,11 @@ mod tests {
         assert!(s.is_stale(now), "nothing configured counts as stale");
         s.sync_repos(&["a/x".into(), "a/y".into()]);
         assert!(s.is_stale(now), "never fetched");
-        s.repos[0].fetched_at = at(2, now);
-        s.repos[1].fetched_at = at(5, now);
+        s.repos[0].fetched_at = Some(at(2, now));
+        s.repos[1].fetched_at = Some(at(5, now));
         assert!(!s.is_stale(now));
-        assert_eq!(s.oldest_data_at(), at(5, now));
-        s.repos[1].fetched_at = at(16, now);
+        assert_eq!(s.oldest_data_at(), Some(at(5, now)));
+        s.repos[1].fetched_at = Some(at(16, now));
         assert!(s.is_stale(now));
         assert!(!s.repos[0].is_stale(now, s.stale_after_secs));
         s.repos[1].fetched_at = None;
@@ -372,9 +374,9 @@ mod tests {
         };
         let mut s = Snapshot::default();
         s.sync_repos(&["o/fresh".into(), "o/old".into(), "o/older".into()]);
-        s.repos[0].fetched_at = at(5, now);
-        s.repos[1].fetched_at = at(40, now);
-        s.repos[2].fetched_at = at(50, now);
+        s.repos[0].fetched_at = Some(at(5, now));
+        s.repos[1].fetched_at = Some(at(40, now));
+        s.repos[2].fetched_at = Some(at(50, now));
         let next =
             |s: &Snapshot, sched: &Schedule| s.next_due(now, sched).map(|e| e.name().to_string());
         assert_eq!(next(&s, &sched).as_deref(), Some("older"));
@@ -390,11 +392,11 @@ mod tests {
         s.repos[3].fetched_at = Some(now);
         s.repos[2].fetched_at = Some(now);
         s.repos[1].error = Some("network".into());
-        s.repos[1].last_attempt_at = at(1, now);
+        s.repos[1].last_attempt_at = Some(at(1, now));
         assert_eq!(next(&s, &sched), None, "a failed repo waits out its retry");
         assert_eq!(
             s.next_due_at(&sched),
-            at(1, now).map(|t| t + Duration::minutes(10))
+            Some(at(1, now) + Duration::minutes(10))
         );
 
         let forced = Schedule {

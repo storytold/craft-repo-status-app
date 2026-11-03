@@ -133,7 +133,10 @@ pub struct Shortcuts {
 impl Default for Config {
     fn default() -> Self {
         Config {
-            repos: DEFAULT_REPOS.iter().map(|(r, _)| r.to_string()).collect(),
+            repos: DEFAULT_REPOS
+                .iter()
+                .map(|(r, _)| ToString::to_string(r))
+                .collect(),
             poll_minutes: 30.0,
             stale_minutes: 60.0,
             github_token: String::new(),
@@ -195,12 +198,18 @@ pub fn normalize_repo(s: &str) -> Option<String> {
 }
 
 impl Config {
+    /// # Errors
+    ///
+    /// Returns `Error::NoHome` when no home directory can be determined.
     pub fn path() -> Result<PathBuf> {
         Ok(dirs::home_dir()
             .ok_or(Error::NoHome)?
             .join(CONFIG_FILE_NAME))
     }
 
+    /// # Errors
+    ///
+    /// Returns `Error::Toml` when the input is not a valid configuration document.
     pub fn parse(text: &str) -> Result<Config> {
         let mut c: Config = toml::from_str(text)?;
         c.poll_minutes = c.poll_minutes.clamp(1.0, 24.0 * 60.0);
@@ -216,6 +225,9 @@ impl Config {
         Ok(c)
     }
 
+    /// # Errors
+    ///
+    /// Returns `Error::Io` when the file cannot be read or `Error::Toml` when parsing fails.
     pub fn load_from(path: &Path) -> Result<Config> {
         let text = std::fs::read_to_string(path).map_err(|source| Error::Io {
             path: path.display().to_string(),
@@ -225,6 +237,11 @@ impl Config {
     }
 
     /// Load the config, writing the template first if there is none.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Error::NoHome`, `Error::Io`, or `Error::Toml` when the path cannot be found,
+    /// the template cannot be written, the file cannot be read, or parsing fails.
     pub fn load_or_create() -> Result<Config> {
         let path = Self::path()?;
         if !path.exists() {
@@ -233,10 +250,18 @@ impl Config {
         Self::load_from(&path)
     }
 
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "Minute values are converted to whole seconds with the existing saturating f64-to-i64 cast"
+    )]
     pub fn poll_secs(&self) -> i64 {
         (self.poll_minutes * 60.0) as i64
     }
 
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "Minute values are converted to whole seconds with the existing saturating f64-to-i64 cast"
+    )]
     pub fn stale_secs(&self) -> i64 {
         (self.stale_minutes * 60.0) as i64
     }
@@ -257,6 +282,9 @@ struct StateFile {
 }
 
 impl WindowState {
+    /// # Errors
+    ///
+    /// Returns `Error::NoHome` when no home directory can be determined.
     pub fn path() -> Result<PathBuf> {
         Ok(dirs::home_dir().ok_or(Error::NoHome)?.join(STATE_FILE_NAME))
     }
@@ -267,6 +295,9 @@ impl WindowState {
         f.window.filter(|w| w.width > 0 && w.height > 0)
     }
 
+    /// # Errors
+    ///
+    /// Returns `Error::NoHome` or an I/O error when the state cannot be written atomically.
     pub fn save(&self) -> Result<()> {
         let text = format!(
             "# Remembered by Craft Status (window position and size). Safe to delete.\n{}",
@@ -279,6 +310,10 @@ impl WindowState {
     }
 
     /// Whether enough of the window to grab is on one of the monitors `(x, y, w, h)`.
+    #[expect(
+        clippy::cast_possible_wrap,
+        reason = "Preserve the existing two's-complement coordinate arithmetic for out-of-range window values"
+    )]
     pub fn visible_on(&self, monitors: &[(i32, i32, u32, u32)]) -> bool {
         const GRAB: i32 = 40;
         monitors.iter().any(|&(mx, my, mw, mh)| {
@@ -348,9 +383,9 @@ mod tests {
     #[test]
     fn intervals_are_clamped() {
         let c = Config::parse("poll_minutes = 0.1\nstale_minutes = 0.5").unwrap();
-        assert_eq!(c.poll_minutes, 1.0);
-        assert_eq!(
-            c.stale_minutes, 1.0,
+        assert!((c.poll_minutes - 1.0).abs() < f64::EPSILON);
+        assert!(
+            (c.stale_minutes - 1.0).abs() < f64::EPSILON,
             "never stale before the next poll is due"
         );
         assert_eq!(c.poll_secs(), 60);
