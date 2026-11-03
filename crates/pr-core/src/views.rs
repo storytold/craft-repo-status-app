@@ -308,7 +308,11 @@ impl<'a> Ctx<'a> {
                 .iter()
                 .filter_map(|r| store.repos.get(r).map(|d| (r.clone(), landed_counts(d))))
                 .collect(),
-            reviewed: repos.iter().map(|r| r.to_ascii_lowercase()).collect(),
+            reviewed: repos
+                .iter()
+                .chain(facts.repos.keys())
+                .map(|r| r.to_ascii_lowercase())
+                .collect(),
             fixes_by_issue: HashMap::new(),
         };
         let mut ranked: HashMap<(String, u64), Vec<(i32, FixRef)>> = HashMap::new();
@@ -1132,6 +1136,13 @@ mod tests {
         assert_eq!(row.fix_ready, 1);
         assert_eq!(row.no_fix, 0);
         assert!(!s.repos.contains_key("o/unlisted"));
+        let watched = vec!["o/r".to_string()];
+        let issue = issues(&s, &watched, &cfg, &facts)
+            .into_iter()
+            .find(|row| row.repo == "o/unlisted")
+            .unwrap();
+        assert_eq!(issue.fixes.len(), 1);
+        assert_eq!(issue.stage, IssueStage::FixReady);
     }
 
     #[test]
