@@ -75,6 +75,8 @@ export interface RepoEntry {
   fetched_at: Time | null;
   last_attempt_at?: Time | null;
   error?: string | null;
+  /** The poller added the row: the token's user has an open pull request there (absent from older builds). */
+  auto?: boolean;
   inaccessible?: boolean;
   icon?: string | null;
   icon_oid?: string | null;
