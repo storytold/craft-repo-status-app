@@ -606,11 +606,6 @@ fn toml_checklist(out: &mut Parity, f: &Input, docs: &[&Doc]) -> Option<Checklis
             "na" => Some(Status::Excluded),
             other => status(other),
         };
-        if r.status != "na" {
-            scope += 1;
-        }
-        shipped += u32::from(r.status == "shipped");
-        partial += u32::from(r.status == "partial");
         let tier = if TIER.is_match(&r.tier) {
             r.tier.clone()
         } else {
@@ -619,6 +614,11 @@ fn toml_checklist(out: &mut Parity, f: &Input, docs: &[&Doc]) -> Option<Checklis
         if r.tier == "N/A" {
             continue;
         }
+        if s != Some(Status::Excluded) {
+            scope += 1;
+        }
+        shipped += u32::from(s == Some(Status::Done));
+        partial += u32::from(s == Some(Status::Partial));
         let idx = match tiers.iter().position(|t| t.name == tier) {
             Some(i) => i,
             None => {
@@ -967,7 +967,9 @@ mod tests {
         let toml = "[schema]\nversion = 1\n\n[[feature]]\nid = \"a\"\ntitle = \"A\"\narea = \"A\"\ntier = \"P0\"\nstatus = \"shipped\"\n\n\
             [[feature]]\nid = \"b\"\ntitle = \"B\"\narea = \"A\"\ntier = \"P0\"\nstatus = \"partial\"\nnotes = \"lacks x\"\n\n\
             [[feature]]\nid = \"c\"\ntitle = \"C\"\narea = \"B\"\ntier = \"P1\"\nstatus = \"planned\"\n\n\
-            [[feature]]\nid = \"d\"\ntitle = \"D\"\narea = \"B\"\ntier = \"N/A\"\nstatus = \"na\"\n";
+            [[feature]]\nid = \"d\"\ntitle = \"D\"\narea = \"B\"\ntier = \"N/A\"\nstatus = \"na\"\n\n\
+            [[feature]]\nid = \"e\"\ntitle = \"E\"\narea = \"B\"\ntier = \"N/A\"\nstatus = \"shipped\"\n\n\
+            [[feature]]\nid = \"f\"\ntitle = \"F\"\narea = \"B\"\ntier = \"P1\"\nstatus = \"out of scope\"\n";
         let rm = "# R\n## Headline numbers\n| | Value | Kind |\n|---|---|---|\n| Feature breadth | 50% (1 shipped + 1 partial of 4) | measured |\n";
         let p = read_all(&[
             Input {
