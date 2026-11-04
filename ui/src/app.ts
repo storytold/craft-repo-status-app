@@ -71,11 +71,13 @@ export function start(api: Api, prRoute?: Route): () => void {
   }
 
   // A real anchor, so Tab reaches it and Enter opens it; the host opens the URL and the webview stays put.
+  // A right click shows no webview menu, so its Open Link item cannot load the page in the app window.
   const link = (text: string, url: string, cls = ''): HTMLElement =>
     el('a', {
       class: `link ${cls}`, href: url, draggable: 'false',
       onclick: (e: Event) => openUrl(url, e),
       onauxclick: (e: Event) => e.preventDefault(),
+      oncontextmenu: (e: Event) => e.preventDefault(),
     }, text);
 
   /** The repo's app icon; repos without one (libraries) get a lettered tile, unfetched ones a blank. */
@@ -274,16 +276,28 @@ export function start(api: Api, prRoute?: Route): () => void {
     return `${row.dataset.repo} ${cell.cellIndex} ${[...cell.querySelectorAll(FOCUSABLE)].indexOf(n)}`;
   }
 
+  /** Whether any of `n` shows inside the scrolling `main` that holds it. */
+  function inView(n: Element): boolean {
+    const box = n.closest('main')?.getBoundingClientRect();
+    const r = n.getBoundingClientRect();
+    return !!box && r.bottom > box.top && r.top < box.bottom && r.right > box.left && r.left < box.right;
+  }
+
   /** Notes the focused element in `list`. The returned function, called after `list` is rebuilt,
-   * focuses the same element again, or the one now at its position, or the last one. */
+   * focuses the same element again, or the one now at its position, or the last one, or the
+   * refresh button when `list` has none left. When the focused element was in view, the new one
+   * is scrolled into view as far as needed; otherwise the scroll position stays. */
   function holdFocus(list: HTMLElement): () => void {
     const active = document.activeElement;
     if (!active || !list.contains(active)) return () => {};
     const index = [...list.querySelectorAll(FOCUSABLE)].indexOf(active);
     const key = focusKey(active);
+    const shown = inView(active);
     return () => {
       const after = [...list.querySelectorAll<HTMLElement>(FOCUSABLE)];
-      (after.find((n) => focusKey(n) === key) ?? after[Math.min(index, after.length - 1)])?.focus({ preventScroll: true });
+      const next = after.find((n) => focusKey(n) === key) ?? after[Math.min(index, after.length - 1)] ?? $('refresh');
+      next.focus({ preventScroll: true });
+      if (shown) next.scrollIntoView?.({ block: 'nearest', inline: 'nearest' });
     };
   }
 
