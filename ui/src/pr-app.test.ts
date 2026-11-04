@@ -108,7 +108,7 @@ afterEach(async () => { await teardown?.(); teardown = null; });
 
 const tick = (ms = 0) => new Promise((r) => setTimeout(r, ms));
 
-async function setup(overview?: Partial<Overview>, route: Route = { view: 'apps' }): Promise<Harness> {
+async function setup(overview?: Partial<Overview>, route: Route = { view: 'apps' }, full: PrFull = FULL): Promise<Harness> {
   const win = new Window({ url: 'http://localhost/index.html' });
   const doc = win.document as unknown as Document;
   doc.body.innerHTML = BODY;
@@ -126,7 +126,7 @@ async function setup(overview?: Partial<Overview>, route: Route = { view: 'apps'
         get_pr_overview: { repos: [row({}), row({ repo: 'o/beta', open: 9, landable: 0, reviewable: 4, listed: true }), row({ repo: 'o/gamma', listed: false, open: 0, open_hint: 77 })], issues: ISSUES, icons: {}, status: STATUS, ...overview },
         get_pr_repo: args?.repo === 'o/alpha' ? REPO : null,
         get_pr_queue: [pr({ repo: 'o/beta', number: 9, title: 'Queued', related: [rel(1)] })],
-        get_pr: args?.number === 1 ? FULL : null,
+        get_pr: args?.number === 1 ? full : null,
       };
       return answers[cmd] as T;
     },
@@ -377,6 +377,26 @@ test('links only open through the host, and asking Claude queues it', async () =
   assert.equal(h.$('[data-ask="deep"]')!.hasAttribute('disabled'), true, 'no double spending');
 });
 
+test('linked issues open in their repository and old cache entries have no guessed link', async () => {
+  const full: PrFull = {
+    ...FULL,
+    detail: {
+      ...FULL.detail!,
+      linked_issues: [
+        { repository: 'other/repo', number: 42, title: 'Foreign issue' },
+        { number: 42, title: 'Old cached issue' },
+      ],
+    },
+  };
+  const h = await setup(undefined, { view: 'pr', repo: 'o/alpha', number: 1, from: 'repo' }, full);
+  const link = h.$$('.link').find((a) => a.textContent === 'other/repo#42 Foreign issue')!;
+  assert.ok(link);
+  link.click();
+  assert.deepEqual(h.calls.at(-1), { cmd: 'open_url', args: { url: 'https://github.com/other/repo/issues/42' } });
+  assert.ok(h.$$('span').some((s) => s.textContent === '#42 Old cached issue'));
+  assert.equal(h.$$('.link').some((a) => a.textContent?.includes('Old cached issue')), false);
+});
+
 test('refresh targets what is on screen', async () => {
   const h = await setup();
   (h.$('#refresh') as HTMLElement).click();
@@ -509,6 +529,61 @@ test('Fix first groups every repo\'s issues by what they need next, third partie
 
   (h.$('.urgent-item[data-issue="51"]') as HTMLElement).click();
   assert.deepEqual(h.calls.at(-1), { cmd: 'open_url', args: { url: 'https://github.com/o/alpha/issues/50' } }, 'a row opens on GitHub');
+});
+
+test('an issue fix opens the PR in its actual repository', async () => {
+  const h = await setup({ issues: [issue({
+    repo: 'o/beta',
+    fixes: [{ repo: 'o/alpha', number: 1, title: 'Foreign fix', state: 'promising' }],
+  })] });
+  (h.$('[data-pr-view="issues"]') as HTMLElement).click();
+  await tick();
+  assert.match(h.$('.issue-fix')!.textContent!, /PR o\/alpha#1/);
+  (h.$('.issue-fix') as HTMLElement).click();
+  await tick();
+  assert.deepEqual(h.calls.findLast((c) => c.cmd === 'get_pr'), { cmd: 'get_pr', args: { repo: 'o/alpha', number: 1 } });
+});
+
+test('Escape from a foreign fixing PR returns to the original repository Issues pane', async () => {
+  const h = await setup({ issues: [issue({
+    fixes: [{ repo: 'o/beta', number: 1, title: 'Foreign fix', state: 'promising' }],
+  })] }, { view: 'repo', repo: 'o/alpha' }, { ...FULL, repo: 'o/beta', related: [pr({ repo: 'o/gamma', number: 2 })] });
+  (h.$('[data-pane="issues"]') as HTMLElement).click();
+  (h.$('.issue-fix') as HTMLElement).click();
+  await tick();
+  assert.deepEqual(h.calls.findLast((c) => c.cmd === 'get_pr'), { cmd: 'get_pr', args: { repo: 'o/beta', number: 1 } });
+  h.key('Escape');
+  await tick();
+  assert.deepEqual(h.calls.findLast((c) => c.cmd === 'get_pr_repo'), { cmd: 'get_pr_repo', args: { repo: 'o/alpha' } });
+  assert.equal(h.$('[data-pane="issues"]')!.getAttribute('aria-pressed'), 'true');
+  assert.deepEqual(issueNumbers(h), [50]);
+  (h.$('.issue-fix') as HTMLElement).click();
+  await tick();
+  (h.$('[data-rel="2"]') as HTMLElement).click();
+  await tick();
+  h.key('Escape');
+  await tick();
+  assert.deepEqual(h.calls.findLast((c) => c.cmd === 'get_pr_repo'), { cmd: 'get_pr_repo', args: { repo: 'o/alpha' } });
+  assert.equal(h.$('[data-pane="issues"]')!.getAttribute('aria-pressed'), 'true');
+  assert.deepEqual(issueNumbers(h), [50]);
+});
+
+test('foreign issue chips and cards show the repository', async () => {
+  const fixes = [{ repo: 'o/beta', number: 50, title: 'Foreign issue', url: 'https://github.com/o/beta/issues/50', score: 60, critical: false }];
+  const original = REPO.prs[0]!.fixes;
+  REPO.prs[0]!.fixes = fixes;
+  try {
+    const h = await setup(undefined, { view: 'repo', repo: 'o/alpha' }, { ...FULL, fixes });
+    assert.equal(h.$('tr[data-number="1"] .chip.fixes')!.textContent, 'Fixes o/beta#50');
+    (h.$('tr[data-number="1"]') as HTMLElement).click();
+    await tick();
+    const link = h.$$('#fixes .link')[0]!;
+    assert.equal(link.textContent, 'o/beta#50 Foreign issue');
+    link.click();
+    assert.deepEqual(h.calls.at(-1), { cmd: 'open_url', args: { url: 'https://github.com/o/beta/issues/50' } });
+  } finally {
+    REPO.prs[0]!.fixes = original;
+  }
 });
 
 test('an issue\'s PR opens here, and Esc comes back to the list', async () => {
