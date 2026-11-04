@@ -528,6 +528,43 @@ test('Fix first issues can be reached with Tab and opened with Enter', async () 
   assert.equal(h.calls.filter((c) => c.cmd === 'open_url').length, 1);
 });
 
+test('a focused Fix first issue keeps the focus when the list is rebuilt', async () => {
+  const h = await setup();
+  (h.$('[data-pr-view="issues"]') as HTMLElement).click();
+  await tick();
+  let itemTop = 10;
+  h.$('#prs-view')!.getBoundingClientRect = () => ({ top: 0, bottom: 100 }) as DOMRect;
+  const proto = h.win.HTMLLIElement.prototype as unknown as HTMLElement;
+  proto.getBoundingClientRect = () => ({ top: itemTop, bottom: itemTop + 10 }) as DOMRect;
+  let scrolled = 0;
+  proto.scrollIntoView = () => { scrolled += 1; };
+  const item = h.$('.urgent-item[data-issue="50"]') as HTMLElement;
+  item.focus();
+  (h.$('#critical-only') as HTMLInputElement).click();
+  const now = h.$('.urgent-item[data-issue="50"]') as HTMLElement;
+  const rebuilt = now !== item;
+  const kept = h.doc.activeElement === now;
+  itemTop = 500;
+  (h.$('#critical-only') as HTMLInputElement).click();
+  assert.ok(rebuilt, 'the list was rebuilt');
+  assert.ok(kept);
+  assert.equal(h.doc.activeElement, h.$('.urgent-item[data-issue="50"]'));
+  assert.equal(scrolled, 1, 'scrolled back into view only while it was in view');
+});
+
+test('when the focused Fix first issue leaves the list, the focus stays in it', async () => {
+  const h = await setup();
+  (h.$('[data-pr-view="issues"]') as HTMLElement).click();
+  await tick();
+  (h.$('.urgent-item[data-issue="51"]') as HTMLElement).focus();
+  (h.$('#critical-only') as HTMLInputElement).click();
+  const hidden = h.$('.urgent-item[data-issue="51"]') === null;
+  const focused = h.doc.activeElement as HTMLElement | null;
+  (h.$('#critical-only') as HTMLInputElement).click();
+  assert.ok(hidden, 'not critical, so hidden');
+  assert.ok(focused?.classList.contains('urgent-item'), 'another issue has the focus');
+});
+
 test('an issue\'s PR opens here, and Esc comes back to the list', async () => {
   const h = await setup();
   (h.$('[data-pr-view="issues"]') as HTMLElement).click();

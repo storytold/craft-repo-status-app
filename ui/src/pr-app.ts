@@ -866,11 +866,31 @@ export function startPrs(api: Api, initial: Route = { view: 'apps' }): PrTab {
 
   function renderIssueList(controls: Node[], rows: IssueRow[], showRepo: boolean, from: PrOrigin, none: string): void {
     const scroll = main.scrollTop;
+    const active = document.activeElement as HTMLElement | null;
+    const focused = active && main.contains(active) && active.classList.contains('urgent-item') ? active : null;
+    const wasInView = focused !== null && inView(focused);
+    const index = focused ? [...main.querySelectorAll('.urgent-item')].indexOf(focused) : -1;
     const shown = issueRowsShown(rows);
     const sections = issueSections(shown, showRepo, from);
     main.replaceChildren(el('div', { class: 'controls' }, controls),
       ...(sections.length ? sections : [el('div', { class: 'empty' }, none)]));
     main.scrollTop = scroll;
+    // The issue that had the keyboard focus keeps it when the list is rebuilt, and stays in view if it was.
+    // When it is gone, the issue now at its place, or the last one, or the first control takes the focus.
+    if (!focused) return;
+    const after = [...main.querySelectorAll<HTMLElement>('.urgent-item')];
+    const next = after.find((n) => n.title === focused.title) ?? after[Math.min(index, after.length - 1)]
+      ?? main.querySelector<HTMLElement>('.controls input, .controls button');
+    if (!next) return;
+    next.focus({ preventScroll: true });
+    if (wasInView) next.scrollIntoView?.({ block: 'nearest' });
+  }
+
+  /** Whether any of `n` shows inside `main`'s visible area. */
+  function inView(n: Element): boolean {
+    const box = main.getBoundingClientRect();
+    const r = n.getBoundingClientRect();
+    return r.bottom > box.top && r.top < box.bottom;
   }
 
   /** Fix first: the most urgent issues across every repo the toggles leave showing. */
