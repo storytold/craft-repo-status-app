@@ -89,7 +89,8 @@ sort by a column again.
   documents the Feature breadth rows link to) and every `docs/*-parity.md`.
   The **Apps** view leaves out library, assets, CI and tooling repos, and
   repos that have neither `ROADMAP.md` nor `docs/target-app-parity.md`. Its
-  count and its means do not include them.
+  count and its means do not include them, and neither do All gaps and the
+  tab's badge.
   It has a row per app: its stage; Ready, for the full target,
   mainstream users or essentials (picked in the header), with its range and a
   tick at Breadth; the hours to beta and to full parity; the dimension that

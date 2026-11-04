@@ -482,7 +482,8 @@ test('the Apps table leaves out repos with no parity documents, and says so when
   assert.equal(h.doc.querySelector('#parity-table tfoot td')!.textContent, '0 of 0 apps');
 });
 
-test('the Apps table leaves out library, assets, CI and tooling repos even when they have parity documents', async () => {
+/** paritySnapshot plus library, assets, CI and tooling repos, and one added by hand, each with alpha's parity documents. */
+function nonAppSnapshot(): Snapshot {
   const snap = paritySnapshot();
   const alpha = snap.repos.find((e) => e.repo === 'o/alpha')!.parity;
   snap.repos.push(
@@ -492,6 +493,11 @@ test('the Apps table leaves out library, assets, CI and tooling repos even when 
     repo('skills', {}, { category: 'tooling', parity: alpha }),
     repo('added', {}, { category: 'other', parity: alpha }),
   );
+  return snap;
+}
+
+test('the Apps table leaves out library, assets, CI and tooling repos even when they have parity documents', async () => {
+  const snap = nonAppSnapshot();
   const h = await setup({ snap, storage: { view: 'parity', paritySort: { key: 'app', dir: 'asc' } } });
   assert.deepEqual(parityRows(h), ['added', 'alpha', 'gamma', 'gone'], 'a repo added by hand keeps its row');
   assert.equal(h.doc.querySelector('#parity-table tfoot td')!.textContent, '3 of 4 apps');
@@ -499,6 +505,14 @@ test('the Apps table leaves out library, assets, CI and tooling repos even when 
   h.doc.querySelector<HTMLElement>('#parity-rows tr[data-repo="o/gamma"]')!.click();
   press(h, 'ArrowDown');
   assert.equal(h.doc.getElementById('parity-detail')!.querySelector('h2')!.textContent, 'gone', 'the arrows skip the library');
+  assert.equal(h.doc.getElementById('parity-count')!.textContent, '5', 'G1, G2 and H1, and added’s G1 and G2');
+});
+
+test('All gaps leaves out the gaps of library, assets, CI and tooling repos', async () => {
+  const gaps = await setup({ snap: nonAppSnapshot(), storage: { view: 'parity', parityView: 'gaps' } });
+  assert.equal(gaps.doc.querySelectorAll('#gaps-table tbody tr').length, 7, 'alpha’s and added’s three gaps and gamma’s one');
+  const options = [...gaps.doc.querySelectorAll<HTMLOptionElement>('#gap-repo option')].map((o) => o.value);
+  assert.deepEqual(options, ['', 'o/alpha', 'o/gamma', 'o/added']);
 });
 
 test('the detail pane keeps an expanded section through a snapshot, and explains apps without numbers', async () => {
@@ -620,8 +634,8 @@ test('All gaps drops a saved app filter for a repo no longer configured', async 
 
 test('All gaps keeps a saved app filter while a kind toggle hides that app', async () => {
   const snap = paritySnapshot();
-  snap.repos.find((e) => e.repo === 'o/gamma')!.category = 'library';
-  const h = await setup({ snap, storage: { view: 'parity', parityView: 'gaps', hiddenKinds: ['library'], gapFilter: { repo: 'o/gamma' } } });
+  snap.repos.find((e) => e.repo === 'o/gamma')!.category = 'app';
+  const h = await setup({ snap, storage: { view: 'parity', parityView: 'gaps', hiddenKinds: ['app'], gapFilter: { repo: 'o/gamma' } } });
   assert.equal((stored(h, 'gapFilter') as { repo: string }).repo, 'o/gamma');
   assert.equal(h.doc.querySelector<HTMLSelectElement>('#gap-repo')!.value, 'o/gamma', 'the dropdown still names the hidden app');
 });

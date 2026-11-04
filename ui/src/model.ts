@@ -952,7 +952,7 @@ export const isBlocker = (g: Gap): boolean => !g.closed && (g.alpha === 'yes' ||
 
 /** The Parity tab's badge: open gaps that block alpha or beta, each counted once, summed across apps. */
 export function parityBadge(entries: readonly RepoEntry[]): number {
-  return entries.reduce((n, e) => n + (hasParity(e) ? e.parity!.gaps.filter(isBlocker).length : 0), 0);
+  return entries.reduce((n, e) => n + (isParityApp(e) && hasParity(e) ? e.parity!.gaps.filter(isBlocker).length : 0), 0);
 }
 
 /** How many days old a review date may be before the Parity tab marks it, when the snapshot does not say. */
@@ -1170,7 +1170,7 @@ export function allGaps(entries: readonly RepoEntry[], f: GapFilter = NO_GAP_FIL
   const text = f.text.trim().toLowerCase();
   const out: AppGap[] = [];
   for (const e of entries) {
-    if (!hasParity(e) || (f.repo && e.repo !== f.repo)) continue;
+    if (!isParityApp(e) || !hasParity(e) || (f.repo && e.repo !== f.repo)) continue;
     const p = e.parity!;
     const reviewed = p.files.find((x) => x.path === 'docs/gaps.md')?.reviewed ?? null;
     for (const g of p.gaps) {

@@ -692,7 +692,7 @@ export function start(api: Api, prRoute?: Route): () => void {
     }
     const f = state.gapFilter;
     const repoSel = gapControls.querySelector<HTMLSelectElement>('#gap-repo')!;
-    const repos = snap.repos.filter((e) => hasParity(e) || e.repo === f.repo).map((e) => e.repo);
+    const repos = snap.repos.filter((e) => (isParityApp(e) && hasParity(e)) || e.repo === f.repo).map((e) => e.repo);
     if (f.repo && !repos.includes(f.repo)) repos.push(f.repo);
     if (repoSel.dataset.repos !== repos.join('\n')) {
       repoSel.replaceChildren(el('option', { value: '' }, 'All apps'), ...repos.map((r) => el('option', { value: r }, shortName(r))));
