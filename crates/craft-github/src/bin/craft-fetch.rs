@@ -127,11 +127,14 @@ fn main() {
                 }
                 if parity {
                     match gh.parity(repo, s.head_oid.as_deref(), &s.parity_oids) {
-                        Ok(p) => {
+                        Ok((p, left)) => {
                             println!("    breadth  {}", figure(&p.breadth));
                             println!("    ready    {}", figure(&p.ready));
                             println!("    reviewed {}", p.last_reviewed.as_deref().unwrap_or("-"));
                             entry.parity = Some(p);
+                            if left.graphql_remaining.is_some() {
+                                snap.rate_limit_remaining = left.graphql_remaining;
+                            }
                         }
                         Err(e) => eprintln!("{repo}: parity: {e}"),
                     }

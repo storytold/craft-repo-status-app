@@ -15,7 +15,7 @@ use std::time::{Duration, Instant, SystemTime};
 use chrono::{DateTime, Local, Timelike, Utc};
 use craft_core::config::TableHeadings;
 use craft_core::{Cache, Config, Schedule, SharedCache, Snapshot, TokenStatus, WindowState};
-use craft_github::{resolve_token, Error as GhError, GitHub, RawActivity};
+use craft_github::{resolve_token, Budget, Error as GhError, GitHub, RawActivity};
 use serde::Serialize;
 use tauri::menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
@@ -310,12 +310,25 @@ fn parity_step(
     }
 }
 
+/// A fetch's parity request, when it made one: the numbers and the points
+/// its requests left.
+type ParityFetch = Option<Result<(craft_core::Parity, Budget), GhError>>;
+
 /// The retry time (as in `RateLimited`) when GitHub rate-limited a fetch's
 /// parity request.
-fn parity_rate_limit(parity: &Option<Result<craft_core::Parity, GhError>>) -> Option<String> {
+fn parity_rate_limit(parity: &ParityFetch) -> Option<String> {
     match parity {
         Some(Err(GhError::RateLimited(until))) => Some(until.clone()),
         _ => None,
+    }
+}
+
+/// The GraphQL points left after a fetch that left `fetched` points and
+/// its parity request: the parity request's count when it reported one.
+fn points_left(fetched: Option<u64>, parity: &ParityFetch) -> Option<u64> {
+    match parity {
+        Some(Ok((_, budget))) => budget.graphql_remaining.or(fetched),
+        _ => fetched,
     }
 }
 
@@ -423,12 +436,13 @@ fn fetch_into_snapshot(app: &AppHandle, cfg: &Config, repo: &str) -> Result<(), 
                 entry.fetched_at = Some(now);
                 entry.error = None;
                 entry.inaccessible = false;
+                let left = points_left(budget.graphql_remaining, &parity);
                 match parity {
-                    Some(Ok(p)) => entry.parity = Some(p),
+                    Some(Ok((p, _))) => entry.parity = Some(p),
                     Some(Err(e)) => eprintln!("{repo}: parity: {e}"),
                     None => {}
                 }
-                Ok(budget.graphql_remaining)
+                Ok(left)
             }
             Err(GhError::NotFound) => {
                 entry.stats = None;
@@ -1254,7 +1268,10 @@ mod tests {
         );
         assert_eq!(parity_rate_limit(&Some(Err(GhError::NotFound))), None);
         assert_eq!(
-            parity_rate_limit(&Some(Ok(craft_core::Parity::default()))),
+            parity_rate_limit(&Some(Ok((
+                craft_core::Parity::default(),
+                Budget::default()
+            )))),
             None
         );
         assert_eq!(parity_rate_limit(&None), None);
@@ -1279,5 +1296,28 @@ mod tests {
             with_parity_limit(Err(GhError::Http(502, "bad gateway".into())), None),
             Err(GhError::Http(502, _))
         ));
+    }
+
+    #[test]
+    fn the_parity_request_leaves_the_points_count() {
+        let read = |left| {
+            Some(Ok((
+                craft_core::Parity::default(),
+                Budget {
+                    graphql_remaining: left,
+                },
+            )))
+        };
+        assert_eq!(points_left(Some(4_000), &read(Some(3_990))), Some(3_990));
+        assert_eq!(
+            points_left(Some(4_000), &read(None)),
+            Some(4_000),
+            "a parity read without a request leaves the fetch's count"
+        );
+        assert_eq!(points_left(Some(4_000), &None), Some(4_000));
+        assert_eq!(
+            points_left(Some(4_000), &Some(Err(GhError::NotFound))),
+            Some(4_000)
+        );
     }
 }

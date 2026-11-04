@@ -109,9 +109,10 @@ pub fn read(out: &mut Parity, d: Option<&Doc>) {
                     .is_some_and(|x| impact_beta(&x.text) == Some(true))
             })
         });
-        // A prose sentence names the gaps that block beta; it says nothing
+        // Blocker markers on the gaps mark every gap that blocks beta. A
+        // prose sentence names the gaps that block beta; it says nothing
         // about the others, which stay unknown.
-        let markers = BETA.is_match(&all_text);
+        let markers = gap_markers(d, &blocks, &tables);
         let rank_b = t0.rows.iter().any(|r| {
             r.cells
                 .first()
@@ -152,6 +153,37 @@ pub fn read(out: &mut Parity, d: Option<&Doc>) {
     keys(&mut gaps, out, d);
     totals(out, d, &tables, &gaps);
     out.gaps = gaps;
+}
+
+/// Whether a beta blocker marker sits on a gap: in a gap table's cell, in an
+/// H3 or deeper heading or its section, or in a bold-lead list item. A
+/// paragraph under an H1 or H2 is prose and does not count.
+fn gap_markers(d: &Doc, blocks: &[md::Block], tables: &[&Table]) -> bool {
+    let deep = |section: Option<usize>| {
+        section
+            .and_then(|s| d.headings.get(s))
+            .is_some_and(|h| h.level >= 3)
+    };
+    let marker = |c: char| c.is_ascii_digit() || matches!(c, '-' | '*' | '+' | '.' | ')');
+    let bold_lead = |b: &md::Block| {
+        b.item
+            && b.text
+                .trim_start_matches(marker)
+                .trim_start()
+                .starts_with("**")
+    };
+    let in_cell = tables
+        .iter()
+        .flat_map(|t| &t.rows)
+        .any(|r| r.cells.iter().any(|c| BETA.is_match(&c.raw)));
+    let in_heading = d
+        .headings
+        .iter()
+        .any(|h| !h.excluded && h.level >= 3 && BETA.is_match(&h.text));
+    let in_entry = blocks
+        .iter()
+        .any(|b| !b.excluded && (deep(b.section) || bold_lead(b)) && BETA.is_match(&b.text));
+    in_cell || in_heading || in_entry
 }
 
 /// `(title, alpha, beta, scope)` from a gap cell, with blocker markers
@@ -1248,6 +1280,17 @@ mod tests {
         assert!(p.gap_totals.beta_unknown);
         assert_eq!(p.gap_totals.beta, None);
         assert_eq!(p.gap_totals.alpha, 1);
+    }
+
+    #[test]
+    fn a_beta_blocker_in_prose_leaves_unmarked_rows_unknown() {
+        let p = gaps("Beta blockers are listed in the plan.\n\n| # | Gap | Est. (h) |\n|---|---|---|\n| G-01 | No device | 25–40 |\n| G-02 | Plugins | 5 |\n");
+        assert_eq!(p.gaps[0].beta, Flag::Unknown);
+        assert_eq!(p.gaps[1].beta, Flag::Unknown);
+        assert!(p.gap_totals.beta_unknown);
+        let p = gaps("Beta blockers are listed in the plan.\n\n| # | Gap | Est. (h) |\n|---|---|---|\n| G-01 | No device (**beta blocker**) | 25–40 |\n| G-02 | Plugins | 5 |\n");
+        assert_eq!(p.gaps[0].beta, Flag::Yes);
+        assert_eq!(p.gaps[1].beta, Flag::No);
     }
 
     #[test]

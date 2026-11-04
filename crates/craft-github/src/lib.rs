@@ -362,13 +362,20 @@ impl GitHub {
     /// no request. A document GraphQL sends truncated comes from the REST
     /// raw blob instead. The documents the breadth row links to outside
     /// `files` take one more request, by path at `head`, and the last commit
-    /// to each document read takes one more.
+    /// to each document read takes one more. The [`Budget`] holds the GraphQL
+    /// points left after the last of these requests, and none without one.
     pub fn parity(
         &self,
         repo: &str,
         head: Option<&str>,
         files: &BTreeMap<String, String>,
-    ) -> Result<Parity> {
+    ) -> Result<(Parity, Budget)> {
+        let mut budget = Budget::default();
+        let mut note = |v: &Value| {
+            if let Some(left) = v["rateLimit"]["remaining"].as_u64() {
+                budget.graphql_remaining = Some(left);
+            }
+        };
         let (owner, name) = repo
             .split_once('/')
             .ok_or_else(|| Error::GraphQl(format!("bad repo {repo:?}")))?;
@@ -386,6 +393,7 @@ impl GitHub {
                 vars.insert(format!("b{i}"), json!(oid));
             }
             let v = self.graphql(&blob_query(files.len()), Value::Object(vars))?;
+            note(&v);
             for (text, (path, oid)) in parse_blobs(&v, files.len()).into_iter().zip(files) {
                 let text = match text {
                     Some(t) => t,
@@ -409,6 +417,7 @@ impl GitHub {
                 vars.insert(format!("e{i}"), json!(at_commit(head, path)));
             }
             let v = self.graphql(&path_query(linked.len()), Value::Object(vars))?;
+            note(&v);
             for (found, path) in parse_paths(&v, linked.len()).into_iter().zip(&linked) {
                 // A path missing at `head` is left out.
                 let Some((oid, text)) = found else { continue };
@@ -428,6 +437,7 @@ impl GitHub {
                 vars.insert(format!("p{i}"), json!(path));
             }
             let v = self.graphql(&history_query(paths.len()), Value::Object(vars))?;
+            note(&v);
             let commits = parse_history(&v, paths.len());
             for (f, last) in parity.files.iter_mut().zip(commits) {
                 if let Some((date, oid)) = last {
@@ -437,7 +447,7 @@ impl GitHub {
             }
         }
         parity.commit = head.map(str::to_string);
-        Ok(parity)
+        Ok((parity, budget))
     }
 
     /// The text of blob `oid` from the REST API's raw media type.
@@ -1062,7 +1072,7 @@ pub fn main_query(now: DateTime<Utc>, release_at: Option<DateTime<Utc>>) -> Stri
 }
 
 /// A query for the text of `n` blobs of one repository, aliased `b0`, `b1`…
-/// and named by the variables `$b0`, `$b1`…
+/// and named by the variables `$b0`, `$b1`…, with the points left.
 pub fn blob_query(n: usize) -> String {
     let vars: String = (0..n).map(|i| format!(", $b{i}: GitObjectID!")).collect();
     let blobs: String = (0..n)
@@ -1073,7 +1083,7 @@ pub fn blob_query(n: usize) -> String {
         })
         .collect();
     format!(
-        "query($owner: String!, $name: String!{vars}) {{\n  repository(owner: $owner, name: $name) {{\n{blobs}  }}\n}}\n"
+        "query($owner: String!, $name: String!{vars}) {{\n  repository(owner: $owner, name: $name) {{\n{blobs}  }}\n  rateLimit {{ remaining resetAt }}\n}}\n"
     )
 }
 
@@ -1100,7 +1110,8 @@ fn at_commit(head: Option<&str>, path: &str) -> String {
 }
 
 /// A query for the blobs at `n` paths of one repository, aliased `e0`,
-/// `e1`… and named by the variables `$e0`, `$e1`… (`<commit>:<path>`).
+/// `e1`… and named by the variables `$e0`, `$e1`… (`<commit>:<path>`), with
+/// the points left.
 pub fn path_query(n: usize) -> String {
     let vars: String = (0..n).map(|i| format!(", $e{i}: String!")).collect();
     let fields: String = (0..n)
@@ -1109,7 +1120,7 @@ pub fn path_query(n: usize) -> String {
         })
         .collect();
     format!(
-        "query($owner: String!, $name: String!{vars}) {{\n  repository(owner: $owner, name: $name) {{\n{fields}  }}\n}}\n"
+        "query($owner: String!, $name: String!{vars}) {{\n  repository(owner: $owner, name: $name) {{\n{fields}  }}\n  rateLimit {{ remaining resetAt }}\n}}\n"
     )
 }
 
@@ -1133,7 +1144,8 @@ pub fn parse_paths(data: &Value, n: usize) -> Vec<Option<(String, Option<String>
 }
 
 /// A query for the last commit to each of `n` paths up to the commit `$rev`
-/// names, the paths named by the variables `$p0`, `$p1`…
+/// names, the paths named by the variables `$p0`, `$p1`…, with the points
+/// left.
 pub fn history_query(n: usize) -> String {
     let vars: String = (0..n).map(|i| format!(", $p{i}: String!")).collect();
     let fields: String = (0..n)
@@ -1144,7 +1156,7 @@ pub fn history_query(n: usize) -> String {
         })
         .collect();
     format!(
-        "query($owner: String!, $name: String!, $rev: String!{vars}) {{\n  repository(owner: $owner, name: $name) {{\n    rev: object(expression: $rev) {{ ... on Commit {{\n{fields}    }} }}\n  }}\n}}\n"
+        "query($owner: String!, $name: String!, $rev: String!{vars}) {{\n  repository(owner: $owner, name: $name) {{\n    rev: object(expression: $rev) {{ ... on Commit {{\n{fields}    }} }}\n  }}\n  rateLimit {{ remaining resetAt }}\n}}\n"
     )
 }
 
@@ -1644,6 +1656,7 @@ mod tests {
         assert!(q.contains(
             "e1: object(expression: $e1) { ... on Blob { oid text isTruncated isBinary } }"
         ));
+        assert!(q.contains("rateLimit { remaining resetAt }"));
         assert_eq!(at_commit(Some("h1"), "docs/menus.md"), "h1:docs/menus.md");
         assert_eq!(at_commit(None, "docs/menus.md"), "HEAD:docs/menus.md");
         let data = json!({"repository": {
@@ -1664,6 +1677,7 @@ mod tests {
         let q = history_query(2);
         assert!(q.contains("$rev: String!, $p0: String!, $p1: String!"));
         assert!(q.contains("h1: history(path: $p1, first: 1) { nodes { committedDate oid } }"));
+        assert!(q.contains("rateLimit { remaining resetAt }"));
         let data = json!({"repository": {"rev": {
             "h0": {"nodes": [{"committedDate": "2026-10-17T10:00:00Z", "oid": "c1"}]},
             "h1": {"nodes": []}
@@ -1685,6 +1699,7 @@ mod tests {
         ));
         assert!(q.contains("b1: object(oid: $b1) { ... on Blob { text isTruncated isBinary } }"));
         assert!(!q.contains("b2:"));
+        assert!(q.contains("rateLimit { remaining resetAt }"));
         let data = json!({"repository": {
             "b0": {"text": "# Roadmap", "isTruncated": false, "isBinary": false},
             "b1": {"text": "cut off", "isTruncated": true, "isBinary": false},
@@ -1706,7 +1721,8 @@ mod tests {
     fn a_repo_without_parity_documents_is_read_without_a_request() {
         // Any request would fail: GitHub rejects this token.
         let gh = GitHub::new("not-a-token".into()).unwrap();
-        let p = gh.parity("o/lib", Some("h1"), &BTreeMap::new()).unwrap();
+        let (p, budget) = gh.parity("o/lib", Some("h1"), &BTreeMap::new()).unwrap();
+        assert_eq!(budget.graphql_remaining, None, "no request, no count");
         assert_eq!(
             p.na.as_deref(),
             Some("No ROADMAP.md or docs/target-app-parity.md at HEAD")
