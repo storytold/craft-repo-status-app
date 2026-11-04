@@ -167,6 +167,20 @@ pub struct LedgerSync {
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Budget {
     pub graphql_remaining: Option<u64>,
+    pub graphql_reset_at: Option<DateTime<Utc>>,
+}
+
+impl Budget {
+    /// Writes the points count to the budget shared with the PR poller.
+    /// A budget without a count leaves the shared one as it is.
+    pub fn share(&self, shared: &SharedCache, now: DateTime<Utc>) {
+        if self.graphql_remaining.is_none() {
+            return;
+        }
+        if let Err(e) = shared.note_budget(self.graphql_remaining, self.graphql_reset_at, now) {
+            eprintln!("could not save the shared budget: {e}");
+        }
+    }
 }
 
 impl GitHub {
@@ -320,14 +334,9 @@ impl GitHub {
         *raw = fresh;
         let budget = Budget {
             graphql_remaining: main["rateLimit"]["remaining"].as_u64(),
+            graphql_reset_at: time(&main["rateLimit"]["resetAt"]),
         };
-        if let Err(e) = shared.note_budget(
-            budget.graphql_remaining,
-            time(&main["rateLimit"]["resetAt"]),
-            now,
-        ) {
-            eprintln!("could not save the shared budget: {e}");
-        }
+        budget.share(shared, now);
         let stats = build_stats(
             &main,
             &releases,
@@ -374,6 +383,7 @@ impl GitHub {
         let mut note = |v: &Value| {
             if let Some(left) = v["rateLimit"]["remaining"].as_u64() {
                 budget.graphql_remaining = Some(left);
+                budget.graphql_reset_at = time(&v["rateLimit"]["resetAt"]);
             }
         };
         let (owner, name) = repo
