@@ -478,8 +478,27 @@ test('the Apps table leaves out repos with no parity documents, and says so when
   const lib = report({ na: none, roadmap_oid: null, parity_doc: false, breadth: { state: 'absent', why: none }, ready: { state: 'absent', why: none } });
   h.emit('craft:snapshot', { ...snapshot([repo('lib', {}, { parity: lib })]), parity_warn_days: 14 });
   assert.deepEqual(parityRows(h), [undefined]);
-  assert.equal(h.doc.querySelector('#parity-rows td.empty')!.textContent, 'No repository has parity documents.');
+  assert.equal(h.doc.querySelector('#parity-rows td.empty')!.textContent, 'No app repository has parity documents.');
   assert.equal(h.doc.querySelector('#parity-table tfoot td')!.textContent, '0 of 0 apps');
+});
+
+test('the Apps table leaves out library, assets, CI and tooling repos even when they have parity documents', async () => {
+  const snap = paritySnapshot();
+  const alpha = snap.repos.find((e) => e.repo === 'o/alpha')!.parity;
+  snap.repos.push(
+    repo('kit', {}, { category: 'library', parity: alpha }),
+    repo('fonts', {}, { category: 'assets', parity: alpha }),
+    repo('actions', {}, { category: 'ci', parity: alpha }),
+    repo('skills', {}, { category: 'tooling', parity: alpha }),
+    repo('added', {}, { category: 'other', parity: alpha }),
+  );
+  const h = await setup({ snap, storage: { view: 'parity', paritySort: { key: 'app', dir: 'asc' } } });
+  assert.deepEqual(parityRows(h), ['added', 'alpha', 'gamma', 'gone'], 'a repo added by hand keeps its row');
+  assert.equal(h.doc.querySelector('#parity-table tfoot td')!.textContent, '3 of 4 apps');
+  assert.match(h.doc.querySelector('#parity-table tfoot')!.textContent!, /\(n=2\)/, 'the means count alpha and added only');
+  h.doc.querySelector<HTMLElement>('#parity-rows tr[data-repo="o/gamma"]')!.click();
+  press(h, 'ArrowDown');
+  assert.equal(h.doc.getElementById('parity-detail')!.querySelector('h2')!.textContent, 'gone', 'the arrows skip the library');
 });
 
 test('the detail pane keeps an expanded section through a snapshot, and explains apps without numbers', async () => {

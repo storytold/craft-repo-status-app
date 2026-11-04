@@ -938,8 +938,14 @@ export function audienceFigure(p: Parity, a: Audience): Figure {
 /** Whether the repo has parity documents (and has been read). */
 export const hasParity = (e: RepoEntry): boolean => !!e.parity && !e.parity.na && !e.inaccessible;
 
-/** Whether the repo belongs in the Apps table: false only when its documents were read and it has no parity documents. */
-export const isParityApp = (e: RepoEntry): boolean => !e.parity?.na;
+/** Repo categories that are never apps. */
+export const NON_APP_CATEGORIES: readonly RepoCategory[] = ['library', 'assets', 'ci', 'tooling'];
+
+/**
+ * Whether the repo belongs in the Apps table: false for a library, assets, CI or tooling repo,
+ * and for a repo whose documents were read and hold no parity documents.
+ */
+export const isParityApp = (e: RepoEntry): boolean => !NON_APP_CATEGORIES.includes(e.category ?? 'other') && !e.parity?.na;
 
 /** A gap that blocks alpha or beta outright and is still open. */
 export const isBlocker = (g: Gap): boolean => !g.closed && (g.alpha === 'yes' || g.beta === 'yes');

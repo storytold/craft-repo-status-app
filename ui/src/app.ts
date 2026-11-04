@@ -628,7 +628,7 @@ export function start(api: Api, prRoute?: Route): () => void {
       'aria-selected': String(e.repo === state.paritySel),
       onclick: () => selectApp(e.repo),
     }, PARITY_COLUMNS.map((c, i) => el('td', { class: classes(parityGroupStart(i) && 'group-start', c.key.startsWith('heat_') && 'heat-td') }, appCell(e, c.key, snap, now))))));
-    const means = heatMeans(snap.repos);
+    const means = heatMeans(apps);
     const foot = el('tr', {}, PARITY_COLUMNS.map((c, i) => {
       let text = '';
       let title = '';
@@ -638,7 +638,7 @@ export function start(api: Api, prRoute?: Route): () => void {
       return el('td', { class: parityGroupStart(i) ? 'group-start' : '', title }, text);
     }));
     if (!rows.length) {
-      const why = snap.repos.length ? 'No repository has parity documents.' : 'No repositories configured.';
+      const why = snap.repos.length ? 'No app repository has parity documents.' : 'No repositories configured.';
       body.append(el('tr', {}, el('td', { colspan: PARITY_COLUMNS.length, class: 'empty' }, why)));
     }
     const table = parityApps();
