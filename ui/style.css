@@ -182,7 +182,6 @@ tfoot td { color: var(--muted); font-weight: 600; border-bottom: 0; position: st
 .parity-table tbody tr.selected td { background-color: var(--row-hover); box-shadow: inset 0 1px 0 var(--accent), inset 0 -1px 0 var(--accent); }
 .parity-table tbody tr.na-row td { opacity: .55; }
 .parity-table td.heat-td { padding: 2px 3px; }
-.na { margin-left: 6px; font-size: 9px; font-weight: 700; letter-spacing: .05em; text-transform: uppercase; color: var(--muted); border: 1px solid currentColor; border-radius: 6px; padding: 0 4px; }
 .stage { font-size: 10px; font-weight: 600; padding: 0 6px; border-radius: 8px; background: var(--surface); color: var(--muted); white-space: nowrap; }
 .stage.alpha, .stage.early-alpha { color: var(--accent); background: color-mix(in srgb, var(--accent) 12%, transparent); }
 .stage.beta, .stage.stable { color: var(--good); background: color-mix(in srgb, var(--good) 14%, transparent); }

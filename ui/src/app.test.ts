@@ -401,7 +401,7 @@ test('the Parity tab lists each app’s numbers, opens with ⌘3, sorts, and rem
   assert.equal(h.doc.getElementById('parity-view')!.hidden, false);
   assert.equal(h.doc.getElementById('repos-view')!.hidden, true);
   assert.equal(stored(h, 'view'), 'parity');
-  assert.deepEqual(parityRows(h), ['gamma', 'alpha', 'beta', 'gone'], 'by Ready, highest first; apps without numbers last');
+  assert.deepEqual(parityRows(h), ['gamma', 'alpha', 'gone'], 'by Ready, highest first; apps without numbers last; beta has no parity documents');
   assert.equal(parityCell(h, 'alpha', 'Ready').textContent, '55%');
   assert.ok(parityCell(h, 'alpha', 'Ready').querySelector('.ready-bar .tick'), 'the tick marks Breadth');
   assert.equal(parityCell(h, 'alpha', 'Breadth').textContent, '80%');
@@ -412,13 +412,12 @@ test('the Parity tab lists each app’s numbers, opens with ⌘3, sorts, and rem
   assert.ok(parityCell(h, 'alpha', 'Reviewed').querySelector('.old'), 'older than parity_warn_days');
   assert.ok(!parityCell(h, 'gamma', 'Reviewed').querySelector('.old'));
   assert.match(parityCell(h, 'alpha', 'Changed').querySelector<HTMLElement>('span')!.title, /^Last commit to a parity document: /);
-  assert.equal(parityCell(h, 'beta', 'App').querySelector('.na')!.textContent, 'n/a');
   assert.equal(parityCell(h, 'gone', 'Ready').textContent, '—');
-  assert.equal(h.doc.querySelector('#parity-table tfoot td')!.textContent, '2 of 4 apps');
+  assert.equal(h.doc.querySelector('#parity-table tfoot td')!.textContent, '2 of 3 apps', 'beta is not counted');
 
   const header = [...h.doc.querySelectorAll<HTMLElement>('#parity-table thead tr.cols th')].find((th) => th.textContent === 'App')!;
   header.click();
-  assert.deepEqual(parityRows(h), ['alpha', 'gamma', 'beta', 'gone']);
+  assert.deepEqual(parityRows(h), ['alpha', 'gamma', 'gone']);
   assert.deepEqual(stored(h, 'paritySort'), { key: 'app', dir: 'asc' });
   parityCell(h, 'alpha', 'Breadth').querySelector<HTMLElement>('.link')!.click();
   assert.equal(h.calls.at(-1)?.args?.url, 'https://github.com/o/alpha/blob/c1/ROADMAP.md?plain=1#L12');
@@ -469,6 +468,20 @@ test('a click on an app opens its detail pane; the arrows move it and Esc closes
   assert.ok(h.calls.some((c) => c.cmd === 'hide_window'));
 });
 
+test('the Apps table leaves out repos with no parity documents, and says so when that is every repo', async () => {
+  const h = await setup({ snap: paritySnapshot(), storage: { view: 'parity', paritySort: { key: 'app', dir: 'asc' } } });
+  h.doc.querySelector<HTMLElement>('#parity-rows tr[data-repo="o/gamma"]')!.click();
+  press(h, 'ArrowDown');
+  assert.equal(h.doc.getElementById('parity-detail')!.querySelector('h2')!.textContent, 'gone', 'the arrows skip beta');
+
+  const none = 'No ROADMAP.md or docs/target-app-parity.md at HEAD';
+  const lib = report({ na: none, roadmap_oid: null, parity_doc: false, breadth: { state: 'absent', why: none }, ready: { state: 'absent', why: none } });
+  h.emit('craft:snapshot', { ...snapshot([repo('lib', {}, { parity: lib })]), parity_warn_days: 14 });
+  assert.deepEqual(parityRows(h), [undefined]);
+  assert.equal(h.doc.querySelector('#parity-rows td.empty')!.textContent, 'No repository has parity documents.');
+  assert.equal(h.doc.querySelector('#parity-table tfoot td')!.textContent, '0 of 0 apps');
+});
+
 test('the detail pane keeps an expanded section through a snapshot, and explains apps without numbers', async () => {
   const h = await setup({ snap: paritySnapshot(), storage: { view: 'parity' } });
   h.doc.querySelector<HTMLElement>('#parity-rows tr[data-repo="o/alpha"]')!.click();
@@ -479,8 +492,6 @@ test('the detail pane keeps an expanded section through a snapshot, and explains
   h.emit('craft:snapshot', paritySnapshot());
   assert.ok(area().hasAttribute('open'), 'a new snapshot draws the pane again with the section open');
 
-  h.doc.querySelector<HTMLElement>('#parity-rows tr[data-repo="o/beta"]')!.click();
-  assert.equal(pane.querySelector('p.muted')!.textContent, 'No ROADMAP.md or docs/target-app-parity.md at HEAD');
   h.doc.querySelector<HTMLElement>('#parity-rows tr[data-repo="o/gone"]')!.click();
   assert.equal(pane.querySelector('p.muted')!.textContent, 'Not accessible (private, or not found).');
 });
@@ -524,15 +535,13 @@ test('the Apps cells and the detail pane title each number with where it was rea
     },
     to_beta: { state: 'ok', v: hrs(300, 400), src: src(6) },
   });
-  const none = 'No ROADMAP.md or docs/target-app-parity.md at HEAD';
   const h = await setup({ snap: snapshot([
     repo('alpha', {}, { parity: alpha }),
-    repo('beta', {}, { parity: report({ na: none }) }),
     repo('delta', null, { fetched_at: null }),
     repo('gone', null, { inaccessible: true }),
   ]), storage: { view: 'parity' } });
   const appTitle = (name: string) => parityCell(h, name, 'App').querySelector<HTMLElement>('.repo')!.title;
-  assert.deepEqual(['alpha', 'beta', 'delta', 'gone'].map(appTitle), ['Read at c1', none, 'Not read yet', 'Not accessible']);
+  assert.deepEqual(['alpha', 'delta', 'gone'].map(appTitle), ['Read at c1', 'Not read yet', 'Not accessible']);
   assert.equal(parityCell(h, 'alpha', 'Stage').querySelector<HTMLElement>('.stage')!.title, 'next: beta, 12 points, 40–60 h\nnext: full\nFrom Stage row');
   const betaGaps = parityCell(h, 'alpha', 'Beta gaps');
   assert.equal(betaGaps.textContent, '0');
@@ -817,12 +826,12 @@ test('the toggles hide repos on the Parity tab and its badge too', async () => {
   const h = await setup({ snap: paritySnapshot() });
   const toggle = h.doc.querySelector<HTMLElement>('[data-kind="third_party"]')!;
   press(h, '3', true);
-  assert.deepEqual(parityRows(h), ['gamma', 'alpha', 'beta', 'gone']);
+  assert.deepEqual(parityRows(h), ['gamma', 'alpha', 'gone']);
   toggle.click();
   assert.equal(h.doc.querySelector('#parity-rows tr[data-repo]'), null, 'every o/ repo is third party');
   assert.equal(h.doc.getElementById('parity-count')!.textContent, '');
   toggle.click();
-  assert.deepEqual(parityRows(h), ['gamma', 'alpha', 'beta', 'gone']);
+  assert.deepEqual(parityRows(h), ['gamma', 'alpha', 'gone']);
   assert.equal(h.doc.getElementById('parity-count')!.textContent, '3');
 });
 

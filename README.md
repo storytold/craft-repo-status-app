@@ -87,7 +87,9 @@ sort by a column again.
   from the same two documents plus `docs/gaps.md`, the machine checklists
   (`docs/parity-checklist.md`, `docs/scorecard.md`, `parity/*.toml` and the
   documents the Feature breadth rows link to) and every `docs/*-parity.md`.
-  The **Apps** view has a row per app: its stage; Ready, for the full target,
+  The **Apps** view leaves out repos that have neither `ROADMAP.md` nor
+  `docs/target-app-parity.md`, and its count does not include them.
+  It has a row per app: its stage; Ready, for the full target,
   mainstream users or essentials (picked in the header), with its range and a
   tick at Breadth; the hours to beta and to full parity; the dimension that
   loses the most weighted points; the open gaps that block beta, with their

@@ -6,7 +6,7 @@ import {
   PARITY_FIGURES, figurePct, formatPct, parityTip, parityUrl,
   AUDIENCES, BASIS_BADGE, GAP_KINDS, NO_GAP_FILTER, PARITY_COLUMNS, PARITY_WARN_DAYS, allGaps, areaStrip, areasByDrag,
   audienceFigure, betaUnknownWhy, blocksLabel, cellValue, changedAt, checklistSummary, daysSince, dimScore, dimsByDrag, docUrl,
-  figureSrc, gapKinds, gapTotal, hasParity, heatMeans, heatOf, hoursText, kindSums, nextGapSort, parityBadge,
+  figureSrc, gapKinds, gapTotal, hasParity, heatMeans, heatOf, hoursText, isParityApp, kindSums, nextGapSort, parityBadge,
   parityNextSort, parityOrder, partText, reviewAgeDays, scoreText, sourceUrl, stageOf, sumText, whyMissing,
   ALL_TIME, COLUMNS, RECENT, WINDOWS, MANUAL, windowById, value, orderedEntries, nextSort, dropIndex,
   freshness, ago, formatRate, formatRatio, totals, tokenStatus, isRefreshing, isThirdParty,
@@ -510,11 +510,9 @@ export function start(api: Api, prRoute?: Route): () => void {
   const parityGroup = (key: string): string => PARITY_GROUP[key] ?? (key.startsWith('heat_') ? 'Dimensions' : '');
   const parityGroupStart = (i: number): boolean => i > 0 && parityGroup(PARITY_COLUMNS[i - 1]!.key) !== parityGroup(PARITY_COLUMNS[i]!.key);
 
-  /** The App column's cell: the app's icon and name, titled with why it has no numbers or the commit read. */
+  /** The App column's cell: the app's icon and name, titled with the commit read or why it has no numbers. */
   function appNameCell(e: RepoEntry): HTMLElement {
-    const p = e.parity;
-    const tip = p?.na ?? appReadTip(e, p);
-    return el('span', { class: 'repo', title: tip }, appIcon(e), shortName(e.repo), p?.na ? el('span', { class: 'na' }, 'n/a') : null);
+    return el('span', { class: 'repo', title: appReadTip(e, e.parity) }, appIcon(e), shortName(e.repo));
   }
 
   /** The Stage column's chip, titled with the next steps and where the stage was read. */
@@ -572,7 +570,6 @@ export function start(api: Api, prRoute?: Route): () => void {
     if (key === 'app') return appNameCell(e);
     if (!p || e.inaccessible) return el('span', { class: 'muted', title: e.inaccessible ? 'Not accessible' : 'Not read yet' }, '—');
     if (key === 'stage') return stageCell(e, p);
-    if (p.na) return el('span', { class: 'muted', title: p.na }, '');
     switch (key) {
       case 'ready': return readyBar(e, p);
       case 'breadth': return figureCell(e.repo, p, p.breadth);
@@ -622,7 +619,8 @@ export function start(api: Api, prRoute?: Route): () => void {
 
   function renderParityApps(snap: Snapshot): void {
     const now = Date.now();
-    const rows = parityOrder(snap.repos, state.paritySort, state.audience);
+    const apps = snap.repos.filter(isParityApp);
+    const rows = parityOrder(apps, state.paritySort, state.audience);
     if (!state.paritySel || !rows.some((e) => e.repo === state.paritySel)) state.paritySel = rows.find(hasParity)?.repo ?? null;
     const body = el('tbody', { id: 'parity-rows' }, rows.map((e) => el('tr', {
       dataset: { repo: e.repo },
@@ -634,12 +632,15 @@ export function start(api: Api, prRoute?: Route): () => void {
     const foot = el('tr', {}, PARITY_COLUMNS.map((c, i) => {
       let text = '';
       let title = '';
-      if (i === 0) text = `${snap.repos.filter(hasParity).length} of ${snap.repos.length} apps`;
+      if (i === 0) text = `${apps.filter(hasParity).length} of ${apps.length} apps`;
       const m = c.key.startsWith('heat_') ? means[c.key.slice(5)] : undefined;
       if (m && m.mean !== null) { text = `${formatPct(m.mean)} (n=${m.n})`; title = `Mean across ${m.n} apps`; }
       return el('td', { class: parityGroupStart(i) ? 'group-start' : '', title }, text);
     }));
-    if (!rows.length) body.append(el('tr', {}, el('td', { colspan: PARITY_COLUMNS.length, class: 'empty' }, 'No repositories configured.')));
+    if (!rows.length) {
+      const why = snap.repos.length ? 'No repository has parity documents.' : 'No repositories configured.';
+      body.append(el('tr', {}, el('td', { colspan: PARITY_COLUMNS.length, class: 'empty' }, why)));
+    }
     const table = parityApps();
     table.tBodies[0]!.replaceWith(body);
     table.tFoot!.replaceChildren(foot);
@@ -992,7 +993,7 @@ export function start(api: Api, prRoute?: Route): () => void {
   function moveSelection(step: number): void {
     const snap = state.snap;
     if (!snap) return;
-    const rows = parityOrder(shownRepos(snap), state.paritySort, state.audience).map((e) => e.repo);
+    const rows = parityOrder(shownRepos(snap).filter(isParityApp), state.paritySort, state.audience).map((e) => e.repo);
     if (!rows.length) return;
     const i = state.paritySel ? rows.indexOf(state.paritySel) : -1;
     state.paritySel = rows[Math.max(0, Math.min(rows.length - 1, i + step))]!;

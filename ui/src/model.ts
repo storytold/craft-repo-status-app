@@ -938,6 +938,9 @@ export function audienceFigure(p: Parity, a: Audience): Figure {
 /** Whether the repo has parity documents (and has been read). */
 export const hasParity = (e: RepoEntry): boolean => !!e.parity && !e.parity.na && !e.inaccessible;
 
+/** Whether the repo belongs in the Apps table: false only when its documents were read and it has no parity documents. */
+export const isParityApp = (e: RepoEntry): boolean => !e.parity?.na;
+
 /** A gap that blocks alpha or beta outright and is still open. */
 export const isBlocker = (g: Gap): boolean => !g.closed && (g.alpha === 'yes' || g.beta === 'yes');
 
@@ -1014,7 +1017,7 @@ export const PARITY_COLUMNS: readonly ParityColumn[] = [
 
 export const PARITY_COLUMN: Readonly<Record<string, ParityColumn>> = Object.fromEntries(PARITY_COLUMNS.map((c) => [c.key, c]));
 
-/** The Apps rows in order: repos without parity documents last, then by the sort, missing values last. */
+/** The Apps rows in order: repos without parity numbers last, then by the sort, missing values last. */
 export function parityOrder(entries: readonly RepoEntry[], sort: Sort, audience: Audience): RepoEntry[] {
   const col = PARITY_COLUMN[sort.key] ?? PARITY_COLUMN.ready!;
   const sign = sort.dir === 'asc' ? 1 : -1;
