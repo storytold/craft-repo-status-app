@@ -455,7 +455,7 @@ export function startPrs(api: Api, initial: Route = { view: 'apps' }): PrTab {
       state.queue = await api.invoke<PrRow[]>('get_pr_queue');
       if (route === state.route && state.active) renderPrPage('queue');
     } else if (route.view === 'repo') {
-      state.repoView = await api.invoke<RepoView | null>('get_pr_repo', { repo: route.repo });
+      state.repoView = await api.invoke<RepoView | null>('get_pr_repo', { repo: repoName(route.repo) });
       if (route === state.route && state.active) renderRepo(route.repo);
     } else {
       const pr = await api.invoke<PrFull | null>('get_pr', { repo: route.repo, number: route.number });
@@ -904,6 +904,9 @@ export function startPrs(api: Api, initial: Route = { view: 'apps' }): PrTab {
   const reviewedRepo = (repo: string): boolean =>
     state.overview?.repos.some((r) => sameRepo(r.repo, repo)) ?? false;
 
+  /** The reviewed repository's name as the host spells it, or `repo` unchanged when none matches. */
+  const repoName = (repo: string): string => state.overview?.repos.find((r) => sameRepo(r.repo, repo))?.repo ?? repo;
+
   function renderRepoIssues(repo: string): void {
     const rows = repoIssues(repo);
     const controls: Node[] = reviewedRepo(repo)
@@ -1088,7 +1091,8 @@ export function startPrs(api: Api, initial: Route = { view: 'apps' }): PrTab {
     if (r.view === 'issues') void api.invoke('refresh_now');
     else if (r.view === 'repo') {
       // A third party's page only has what the status poller fetches.
-      void api.invoke(reviewedRepo(r.repo) && state.repoPane === 'prs' ? 'refresh_pr_repo' : 'refresh_repo', { repo: r.repo });
+      if (reviewedRepo(r.repo) && state.repoPane === 'prs') void api.invoke('refresh_pr_repo', { repo: repoName(r.repo) });
+      else void api.invoke('refresh_repo', { repo: r.repo });
     } else if (r.view === 'pr') void api.invoke('refresh_pr', { repo: r.repo, number: r.number });
     else void api.invoke('refresh_prs');
   };

@@ -579,9 +579,13 @@ test('an uncached reviewed repository keeps its PR pane and can request the firs
   assert.deepEqual(h.calls.at(-1), { cmd: 'refresh_pr_repo', args: { repo: 'o/gamma' } });
 });
 
-test('a repo\'s page lists its issues when the route names it in other letter case', async () => {
+test('a repo\'s page lists its PRs and issues when the route names it in other letter case', async () => {
   const h = await setup(undefined, { view: 'repo', repo: 'O/Alpha' });
   await tick();
+  assert.deepEqual(prRows(h), [1, 2]);
+  assert.deepEqual(h.calls.find((c) => c.cmd === 'get_pr_repo')?.args, { repo: 'o/alpha' });
+  (h.$('#refresh') as HTMLElement).click();
+  assert.deepEqual(h.calls.at(-1), { cmd: 'refresh_pr_repo', args: { repo: 'o/alpha' } });
   assert.match(h.$('[data-pane="issues"]')!.textContent!, /Issues.*3/);
   (h.$('[data-pane="issues"]') as HTMLElement).click();
   assert.deepEqual(issueNumbers(h), [50, 51, 52]);
