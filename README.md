@@ -256,7 +256,8 @@ above the 150 where the Downloads tab's polling pauses itself.
   about 30 a minute); PR and issue counts per window come from walking the
   recent PRs and issues.
 - When repos fall due, the app first reads a few values for all of them in
-  one GraphQL request: the commit at the head of the default branch, the
+  one GraphQL request per 50 repos: the commit at the head of the default
+  branch, the
   issue and PR counts, when the most recently updated issue and PR were
   updated, and the 20 newest releases by creation date, of which it compares
   the newest one and the most recently published one. When a repo's values
