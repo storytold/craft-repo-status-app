@@ -258,8 +258,9 @@ above the 150 where the Downloads tab's polling pauses itself.
 - When repos fall due, the app first reads a few values for all of them in
   one GraphQL request: the commit at the head of the default branch, the
   issue and PR counts, when the most recently updated issue and PR were
-  updated, and the newest release. When a repo's values match the ones read
-  before its last fetch, the app does not fetch it. It computes the repo's
+  updated, and the 20 newest releases by creation date, of which it compares
+  the newest one and the most recently published one. When a repo's values
+  match the ones read before its last fetch, the app does not fetch it. It computes the repo's
   numbers again from that fetch at the time of the check: the activity
   windows move to that time, and issues are ranked by their age then. The
   Fetched column still shows the age of the last full fetch; its tooltip adds
@@ -267,9 +268,10 @@ above the 150 where the Downloads tab's polling pauses itself.
   repo anyway when the six-hourly fetch from scratch is due, when its last
   fetch failed, when the commits kept in `raw/` do not match the commit
   counts GitHub reported for each window, and when you refresh its row from
-  the Fetched column. Reactions, download counts and edits to older releases
-  do not change these values, so those numbers can be up to six hours plus
-  one `poll_minutes` interval old.
+  the Fetched column. Reactions, download counts, edits to older releases and
+  the publication of a draft older than the 20 newest releases do not change
+  these values, so those numbers can be up to six hours plus one
+  `poll_minutes` interval old.
 - Each repo's icon is `assets/app-icon/hicolor/64x64/apps/*.png` on its default
   branch. It is downloaded once and again only when the file changes; it's
   kept in the cache. Repos without one (libraries) get a lettered tile.
