@@ -368,6 +368,12 @@ impl GitHub {
             .enumerate()
             .map(|(i, r)| {
                 let node = nodes.get(i).filter(|n| !n.is_null());
+                if let Some((total, read)) = node.and_then(closing_issues_cut) {
+                    eprintln!(
+                        "{}#{}: {total} closing issue references, only {read} read",
+                        r.repo, r.number
+                    );
+                }
                 (r.clone(), node.map(|n| parse_detail(n, now)))
             })
             .collect();
@@ -570,6 +576,15 @@ impl DetailResult {
     }
 }
 
+/// The total and the number read of a PR node's closing issue references, when GitHub returned
+/// fewer than it has.
+fn closing_issues_cut(n: &Value) -> Option<(u64, usize)> {
+    let refs = &n["closingIssuesReferences"];
+    let total = refs["totalCount"].as_u64()?;
+    let read = refs["nodes"].as_array().map_or(0, Vec::len);
+    (usize::try_from(total).map_or(true, |t| t > read)).then_some((total, read))
+}
+
 pub fn parse_detail(n: &Value, now: Time) -> DetailResult {
     let updated_at = time(&n["updatedAt"]);
     let head_oid = text(&n["headRefOid"]);
@@ -696,12 +711,14 @@ pub fn parse_detail(n: &Value, now: Time) -> DetailResult {
         linked_issues: n["closingIssuesReferences"]["nodes"]
             .as_array()
             .map(|is| {
+                // A null node, or one without a repository, is left out.
                 is.iter()
                     .map(|i| LinkedIssue {
                         repository: text(&i["repository"]["nameWithOwner"]),
                         number: i["number"].as_u64().unwrap_or(0),
                         title: text(&i["title"]),
                     })
+                    .filter(|i| !i.repository.is_empty())
                     .collect()
             })
             .unwrap_or_default(),
@@ -777,7 +794,7 @@ query($ids: [ID!]!) {
   nodes(ids: $ids) {
     ... on PullRequest {
       updatedAt headRefOid body mergeable mergeStateStatus reviewDecision
-      closingIssuesReferences(first: 5) { nodes { number title repository { nameWithOwner } } }
+      closingIssuesReferences(first: 100) { totalCount nodes { number title repository { nameWithOwner } } }
       latestOpinionatedReviews(first: 10) { nodes { state commit { oid } author { login } } }
       files(first: 100) { totalCount nodes { path additions deletions changeType } }
       reviewThreads(first: 40) {
@@ -907,6 +924,24 @@ mod tests {
         let states: Vec<&str> = d.checks.iter().map(|c| c.state.as_str()).collect();
         assert_eq!(states, ["SUCCESS", "SUCCESS", "IN_PROGRESS", "FAILURE"]);
         assert_eq!(r.ci_rollup.as_deref(), Some("SUCCESS"));
+    }
+
+    #[test]
+    fn closing_issue_nodes_without_a_repository_are_left_out_and_a_cut_list_is_noticed() {
+        let n = json!({"closingIssuesReferences": {"totalCount": 3, "nodes": [
+            null,
+            {"number": 8, "title": "No repository", "repository": null},
+            {"number": 7, "title": "Bug", "repository": {"nameWithOwner": "other/repo"}}
+        ]}});
+        let issues = parse_detail(&n, now()).detail.linked_issues;
+        assert_eq!(issues.len(), 1);
+        assert_eq!(
+            (issues[0].repository.as_str(), issues[0].number),
+            ("other/repo", 7)
+        );
+        assert_eq!(closing_issues_cut(&n), None);
+        let cut = json!({"closingIssuesReferences": {"totalCount": 101, "nodes": [{"number": 7}]}});
+        assert_eq!(closing_issues_cut(&cut), Some((101, 1)));
     }
 
     #[test]

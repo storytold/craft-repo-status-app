@@ -156,8 +156,9 @@ fn pairs_sharing<'a>(
     pairs
 }
 
-/// Links PRs naming the same issue; returns which issue each linked PR came in by.
-fn link_by_issue(repo: &str, prs: &[&Pr], links: &mut Links) -> HashMap<u64, String> {
+/// Links PRs naming the same issue; returns, for each PR, the issues it names that another PR
+/// also names.
+fn link_by_issue(repo: &str, prs: &[&Pr], links: &mut Links) -> HashMap<u64, Vec<String>> {
     let mut by_issue: BTreeMap<(String, u64), Vec<u64>> = BTreeMap::new();
     for p in prs {
         let mut issues = issues_in_title(&p.title, repo);
@@ -175,7 +176,7 @@ fn link_by_issue(repo: &str, prs: &[&Pr], links: &mut Links) -> HashMap<u64, Str
             by_issue.entry(i).or_default().push(p.number);
         }
     }
-    let mut issue_of: HashMap<u64, String> = HashMap::new();
+    let mut issues_of: HashMap<u64, Vec<String>> = HashMap::new();
     for ((issue_repo, number), members) in by_issue.iter().filter(|(_, m)| m.len() >= 2) {
         let issue = if issue_repo.eq_ignore_ascii_case(repo) {
             format!("#{number}")
@@ -183,13 +184,53 @@ fn link_by_issue(repo: &str, prs: &[&Pr], links: &mut Links) -> HashMap<u64, Str
             format!("{issue_repo}#{number}")
         };
         for pair in members.windows(2) {
-            if links.join(pair[0], pair[1]) {
-                issue_of.entry(pair[0]).or_insert_with(|| issue.clone());
-                issue_of.entry(pair[1]).or_insert_with(|| issue.clone());
+            links.join(pair[0], pair[1]);
+        }
+        for n in members {
+            issues_of.entry(*n).or_default().push(issue.clone());
+        }
+    }
+    issues_of
+}
+
+/// The title and note of a group linked by an issue: "Same issue" when every member names one
+/// issue, otherwise the issues two or more members share, with the PRs naming each. `None` when
+/// no two members name the same issue.
+fn issue_label(numbers: &[u64], issues_of: &HashMap<u64, Vec<String>>) -> Option<(String, String)> {
+    let named = |n: &u64| issues_of.get(n).map_or(&[][..], Vec::as_slice);
+    let first = numbers.first()?;
+    if let Some(issue) = named(first)
+        .iter()
+        .find(|i| numbers.iter().all(|n| named(n).contains(i)))
+    {
+        return Some((
+            format!("Same issue: {issue}"),
+            format!("Each names or closes {issue}"),
+        ));
+    }
+    let mut shared: Vec<(&String, Vec<u64>)> = vec![];
+    for n in numbers {
+        for issue in named(n) {
+            match shared.iter_mut().find(|(i, _)| *i == issue) {
+                Some((_, prs)) => prs.push(*n),
+                None => shared.push((issue, vec![*n])),
             }
         }
     }
-    issue_of
+    shared.retain(|(_, prs)| prs.len() >= 2);
+    if shared.is_empty() {
+        return None;
+    }
+    let issues: Vec<&str> = shared.iter().map(|(i, _)| i.as_str()).collect();
+    let note = shared
+        .iter()
+        .map(|(issue, prs)| {
+            let prs: Vec<String> = prs.iter().map(|n| format!("#{n}")).collect();
+            format!("PRs {} name or close {issue}", prs.join(", "))
+        })
+        .collect::<Vec<_>>()
+        .join("; ");
+    Some((format!("Linked issues: {}", issues.join(", ")), note))
 }
 
 /// Links PRs changing enough of the same files, noting why.
@@ -261,7 +302,7 @@ fn link_by_title(prs: &[&Pr], links: &mut Links, why: &mut HashMap<(u64, u64), S
 pub fn local_groups(repo: &str, prs: &[&Pr]) -> Vec<Group> {
     let mut links = Links::new(prs.iter().map(|p| p.number));
     let mut why: HashMap<(u64, u64), String> = HashMap::new();
-    let issue_of = link_by_issue(repo, prs, &mut links);
+    let issues_of = link_by_issue(repo, prs, &mut links);
     link_by_files(prs, &mut links, &mut why);
     link_by_title(prs, &mut links, &mut why);
 
@@ -277,20 +318,21 @@ pub fn local_groups(repo: &str, prs: &[&Pr]) -> Vec<Group> {
         .enumerate()
         .map(|(i, mut numbers)| {
             numbers.sort_unstable();
-            let issue = numbers.iter().find_map(|n| issue_of.get(n));
-            let note = match issue {
-                Some(issue) => format!("Each names or closes {issue}"),
-                None => why
-                    .iter()
-                    .filter(|((a, b), _)| numbers.contains(a) && numbers.contains(b))
-                    .min_by_key(|(k, _)| **k)
-                    .map(|(_, v)| v.clone())
-                    .unwrap_or_default(),
-            };
-            let (relation, title) = match issue {
-                Some(issue) => ("issue", format!("Same issue: {issue}")),
-                None if note.starts_with("Nearly") => ("title", "Similar titles".to_string()),
-                None => ("files", "Touch the same files".to_string()),
+            let (relation, title, note) = match issue_label(&numbers, &issues_of) {
+                Some((title, note)) => ("issue", title, note),
+                None => {
+                    let note = why
+                        .iter()
+                        .filter(|((a, b), _)| numbers.contains(a) && numbers.contains(b))
+                        .min_by_key(|(k, _)| **k)
+                        .map(|(_, v)| v.clone())
+                        .unwrap_or_default();
+                    if note.starts_with("Nearly") {
+                        ("title", "Similar titles".to_string(), note)
+                    } else {
+                        ("files", "Touch the same files".to_string(), note)
+                    }
+                }
             };
             Group {
                 id: format!("l{i}"),
@@ -433,6 +475,10 @@ mod tests {
             [("o/r".into(), 42), ("o/r".into(), 43), ("o/r".into(), 44)]
         );
         assert_eq!(
+            issues_in_title("Fix #42 / #43", "o/r"),
+            [("o/r".into(), 42), ("o/r".into(), 43)]
+        );
+        assert_eq!(
             issues_in_title("Fix OTHER/repo#42/#43", "o/r"),
             [("other/repo".into(), 42), ("o/r".into(), 43)]
         );
@@ -494,6 +540,32 @@ mod tests {
             pr(2, "Fix the picker for the layers panel now (#7)", &[]),
         ]);
         assert_eq!(g[0].note, "Each names or closes #7");
+    }
+
+    #[test]
+    fn a_group_names_one_issue_only_when_every_member_names_it() {
+        let g = groups(&[
+            pr(1, "Alpha #7", &[]),
+            pr(2, "Beta #7 #8", &[]),
+            pr(3, "Gamma #8", &[]),
+        ]);
+        assert_eq!(g[0].numbers, [1, 2, 3]);
+        assert_eq!(g[0].relation, "issue");
+        assert_eq!(g[0].title, "Linked issues: #7, #8");
+        assert_eq!(
+            g[0].note,
+            "PRs #1, #2 name or close #7; PRs #2, #3 name or close #8"
+        );
+        let g = groups(&[
+            pr(1, "Alpha other/repo#7", &["a/x.rs"]),
+            pr(2, "Beta other/repo#7", &[]),
+            pr(3, "Gamma", &["a/x.rs"]),
+        ]);
+        assert_eq!(g[0].numbers, [1, 2, 3]);
+        assert_eq!(g[0].title, "Linked issues: other/repo#7");
+        assert_eq!(g[0].note, "PRs #1, #2 name or close other/repo#7");
+        let g = groups(&[pr(1, "Alpha #7 #8", &[]), pr(2, "Beta #8 #7", &[])]);
+        assert_eq!(g[0].title, "Same issue: #7");
     }
 
     #[test]
