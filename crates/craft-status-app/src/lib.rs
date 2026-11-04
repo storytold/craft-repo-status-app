@@ -332,14 +332,6 @@ fn points_left(fetched: Option<u64>, parity: &ParityFetch) -> Option<u64> {
     }
 }
 
-/// Writes the points count a parity request left to the budget shared with
-/// the PR poller. Call it while the shared lease is held.
-fn share_parity_budget(shared: &SharedCache, parity: &ParityFetch, now: DateTime<Utc>) {
-    if let Some(Ok((_, budget))) = parity {
-        budget.share(shared, now);
-    }
-}
-
 /// A fetch's outcome after its parity request. When GitHub rate-limited that
 /// request (`limited` holds the retry time), a fetch that otherwise succeeded
 /// returns `RateLimited`; an error is returned unchanged.
@@ -412,12 +404,20 @@ fn fetch_into_snapshot(app: &AppHandle, cfg: &Config, repo: &str) -> Result<(), 
                 let head = stats.head_oid.as_deref();
                 parity_step(&stats.parity_oids, head, held, budget.graphql_remaining)
             };
-            (step == ParityStep::Read)
-                .then(|| gh.parity(repo, stats.head_oid.as_deref(), &stats.parity_oids))
+            // The parity requests write their points counts to the shared
+            // budget while the lease is held.
+            (step == ParityStep::Read).then(|| {
+                gh.parity(
+                    repo,
+                    stats.head_oid.as_deref(),
+                    &stats.parity_oids,
+                    shared,
+                    now,
+                )
+            })
         }
         Err(_) => None,
     };
-    share_parity_budget(shared, &parity, now);
     drop(lease);
     let parity_limited = parity_rate_limit(&parity);
 
@@ -1329,37 +1329,5 @@ mod tests {
             points_left(Some(4_000), &Some(Err(GhError::NotFound))),
             Some(4_000)
         );
-    }
-
-    #[test]
-    fn the_parity_request_writes_its_points_count_to_the_shared_budget() {
-        let dir = std::env::temp_dir().join(format!("craft-parity-budget-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        let shared = SharedCache::at(dir.clone());
-        let now = Utc::now();
-        let reset = now + CDuration::minutes(30);
-        shared.note_budget(Some(4_000), Some(reset), now).unwrap();
-        let read = |left| {
-            Some(Ok((
-                craft_core::Parity::default(),
-                Budget {
-                    graphql_remaining: left,
-                    graphql_reset_at: Some(reset),
-                },
-            )))
-        };
-        share_parity_budget(&shared, &read(None), now);
-        assert_eq!(
-            shared.budget().remaining,
-            Some(4_000),
-            "a read without a request leaves the count"
-        );
-        share_parity_budget(&shared, &Some(Err(GhError::NotFound)), now);
-        assert_eq!(shared.budget().remaining, Some(4_000));
-        share_parity_budget(&shared, &read(Some(3_990)), now);
-        let b = shared.budget();
-        assert_eq!(b.remaining, Some(3_990));
-        assert_eq!(b.reset_at, Some(reset));
-        let _ = std::fs::remove_dir_all(&dir);
     }
 }

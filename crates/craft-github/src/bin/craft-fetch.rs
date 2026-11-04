@@ -126,7 +126,7 @@ fn main() {
                     }
                 }
                 if parity {
-                    match gh.parity(repo, s.head_oid.as_deref(), &s.parity_oids) {
+                    match gh.parity(repo, s.head_oid.as_deref(), &s.parity_oids, &shared, now) {
                         Ok((p, left)) => {
                             println!("    breadth  {}", figure(&p.breadth));
                             println!("    ready    {}", figure(&p.ready));

@@ -373,19 +373,18 @@ impl GitHub {
     /// `files` take one more request, by path at `head`, and the last commit
     /// to each document read takes one more. The [`Budget`] holds the GraphQL
     /// points left after the last of these requests, and none without one.
+    /// Each request's count is also written to `shared` as it arrives, so a
+    /// later request that fails does not leave the shared count too high.
     pub fn parity(
         &self,
         repo: &str,
         head: Option<&str>,
         files: &BTreeMap<String, String>,
+        shared: &SharedCache,
+        now: DateTime<Utc>,
     ) -> Result<(Parity, Budget)> {
         let mut budget = Budget::default();
-        let mut note = |v: &Value| {
-            if let Some(left) = v["rateLimit"]["remaining"].as_u64() {
-                budget.graphql_remaining = Some(left);
-                budget.graphql_reset_at = time(&v["rateLimit"]["resetAt"]);
-            }
-        };
+        let mut note = |v: &Value| note_parity_budget(v, &mut budget, shared, now);
         let (owner, name) = repo
             .split_once('/')
             .ok_or_else(|| Error::GraphQl(format!("bad repo {repo:?}")))?;
@@ -784,6 +783,18 @@ pub fn parse_authors(conn: &Value) -> Vec<(String, CommitAuthor)> {
                 .collect()
         })
         .unwrap_or_default()
+}
+
+/// Takes the points count from a GraphQL response's `rateLimit` into
+/// `budget` and writes it to `shared`. A response without one changes
+/// neither.
+fn note_parity_budget(v: &Value, budget: &mut Budget, shared: &SharedCache, now: DateTime<Utc>) {
+    let Some(left) = v["rateLimit"]["remaining"].as_u64() else {
+        return;
+    };
+    budget.graphql_remaining = Some(left);
+    budget.graphql_reset_at = time(&v["rateLimit"]["resetAt"]);
+    budget.share(shared, now);
 }
 
 fn time(v: &Value) -> Option<DateTime<Utc>> {
@@ -1731,13 +1742,44 @@ mod tests {
     fn a_repo_without_parity_documents_is_read_without_a_request() {
         // Any request would fail: GitHub rejects this token.
         let gh = GitHub::new("not-a-token".into()).unwrap();
-        let (p, budget) = gh.parity("o/lib", Some("h1"), &BTreeMap::new()).unwrap();
+        let shared = SharedCache::at(std::env::temp_dir().join("craft-parity-no-request"));
+        let (p, budget) = gh
+            .parity("o/lib", Some("h1"), &BTreeMap::new(), &shared, Utc::now())
+            .unwrap();
         assert_eq!(budget.graphql_remaining, None, "no request, no count");
         assert_eq!(
             p.na.as_deref(),
             Some("No ROADMAP.md or docs/target-app-parity.md at HEAD")
         );
         assert_eq!(p.commit.as_deref(), Some("h1"));
+    }
+
+    #[test]
+    fn each_parity_response_writes_its_points_count_to_the_shared_budget() {
+        let dir =
+            std::env::temp_dir().join(format!("craft-note-rate-limit-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let shared = SharedCache::at(dir.clone());
+        let now = Utc::now();
+        shared.note_budget(Some(4_000), None, now).unwrap();
+        let mut budget = Budget::default();
+        note_parity_budget(&json!({"repository": {}}), &mut budget, &shared, now);
+        assert_eq!(budget.graphql_remaining, None, "no rateLimit, no count");
+        assert_eq!(shared.budget().remaining, Some(4_000));
+        let reset = "2026-11-04T22:00:00Z";
+        let v = json!({"rateLimit": {"remaining": 3_990, "resetAt": reset}});
+        note_parity_budget(&v, &mut budget, &shared, now);
+        let reset = reset.parse::<DateTime<Utc>>().unwrap();
+        assert_eq!(budget.graphql_remaining, Some(3_990));
+        assert_eq!(budget.graphql_reset_at, Some(reset));
+        let b = shared.budget();
+        assert_eq!(
+            b.remaining,
+            Some(3_990),
+            "written before a later request can fail"
+        );
+        assert_eq!(b.reset_at, Some(reset));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
