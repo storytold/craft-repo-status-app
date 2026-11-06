@@ -734,6 +734,8 @@ export function startPrs(api: Api, initial: Route = { view: 'apps' }): PrTab {
   function renderPrPage(from: 'repo' | 'queue'): void {
     const rows = from === 'queue' ? queueRows() : state.repoView?.prs ?? [];
     const groups = from === 'repo' ? state.repoView?.groups ?? [] : [];
+    const active = document.activeElement as HTMLElement | null;
+    const control = active && main.contains(active) && active.closest('.controls') && !active.matches('input[type="search"]') ? active : null;
     let bar = main.querySelector<HTMLElement>('.controls');
     let slot = main.querySelector<HTMLElement>('#pr-slot');
     if (!bar || !slot) {
@@ -803,7 +805,10 @@ export function startPrs(api: Api, initial: Route = { view: 'apps' }): PrTab {
     }, '?');
     const panes = from === 'repo' && state.route.view === 'repo' ? paneSwitch(state.route.repo) : [];
     bar.replaceChildren(...panes, ...chips, ...extras, input, help);
-    if (search) search.focus();
+    // A bar control that had the keyboard focus, such as a pane button or a filter chip, keeps it in the new bar.
+    const same = control ? [...bar.querySelectorAll<HTMLElement>('input, button')].find((n) => sameControl(n, control)) : undefined;
+    if (same) same.focus({ preventScroll: true });
+    else if (search) search.focus();
     renderTable(slot, rows, from, groups);
   }
 

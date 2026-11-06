@@ -592,6 +592,25 @@ test('a focused pane button on a repo\'s issues keeps the focus when the list is
   assert.equal(h.doc.activeElement, h.$('[data-pane="issues"]'), 'the Issues button kept the focus');
 });
 
+test('a focused control in the PRs bar keeps the focus when the bar is rebuilt', async () => {
+  const h = await setup();
+  (h.$('tr[data-repo="o/alpha"]') as HTMLElement).click();
+  await tick();
+  (h.$('[data-pane="issues"]') as HTMLElement).click();
+  const prs = h.$('[data-pane="prs"]') as HTMLElement;
+  prs.focus();
+  prs.click();
+  assert.deepEqual(prRows(h), [1, 2], 'back on the PRs');
+  assert.notEqual(h.$('[data-pane="prs"]'), prs, 'the bar was rebuilt');
+  assert.equal(h.doc.activeElement, h.$('[data-pane="prs"]'), 'the PRs button kept the focus');
+
+  const chip = h.$('[data-filter="all"]') as HTMLElement;
+  chip.focus();
+  chip.click();
+  assert.notEqual(h.$('[data-filter="all"]'), chip, 'the chips were rebuilt');
+  assert.equal(h.doc.activeElement, h.$('[data-filter="all"]'), 'the chip kept the focus');
+});
+
 test('an issue\'s PR opens here, and Esc comes back to the list', async () => {
   const h = await setup();
   (h.$('[data-pr-view="issues"]') as HTMLElement).click();
