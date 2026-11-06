@@ -511,6 +511,106 @@ test('Fix first groups every repo\'s issues by what they need next, third partie
   assert.deepEqual(h.calls.at(-1), { cmd: 'open_url', args: { url: 'https://github.com/o/alpha/issues/50' } }, 'a row opens on GitHub');
 });
 
+test('Fix first issues can be reached with Tab and opened with Enter', async () => {
+  const h = await setup();
+  (h.$('[data-pr-view="issues"]') as HTMLElement).click();
+  await tick();
+  const item = h.$('.urgent-item[data-issue="51"]') as HTMLElement;
+  assert.equal(item.tabIndex, 0);
+  assert.equal(item.getAttribute('role'), 'link');
+  const press = (target: HTMLElement, key: string) =>
+    target.dispatchEvent(new h.win.KeyboardEvent('keydown', { key, bubbles: true }) as unknown as Event);
+  press(item, 'a');
+  assert.equal(h.calls.some((c) => c.cmd === 'open_url'), false, 'other keys do nothing');
+  press(item.querySelector('.text') as HTMLElement, 'Enter');
+  assert.equal(h.calls.some((c) => c.cmd === 'open_url'), false, 'Enter inside a nested control is left to it');
+  press(item, 'Enter');
+  assert.equal(h.calls.filter((c) => c.cmd === 'open_url').length, 1);
+});
+
+test('a focused Fix first issue keeps the focus when the list is rebuilt', async () => {
+  const h = await setup();
+  (h.$('[data-pr-view="issues"]') as HTMLElement).click();
+  await tick();
+  let itemTop = 10;
+  h.$('#prs-view')!.getBoundingClientRect = () => ({ top: 0, bottom: 100 }) as DOMRect;
+  const proto = h.win.HTMLLIElement.prototype as unknown as HTMLElement;
+  proto.getBoundingClientRect = () => ({ top: itemTop, bottom: itemTop + 10 }) as DOMRect;
+  let scrolled = 0;
+  proto.scrollIntoView = () => { scrolled += 1; };
+  const item = h.$('.urgent-item[data-issue="50"]') as HTMLElement;
+  item.focus();
+  (h.$('#critical-only') as HTMLInputElement).click();
+  const now = h.$('.urgent-item[data-issue="50"]') as HTMLElement;
+  const rebuilt = now !== item;
+  const kept = h.doc.activeElement === now;
+  itemTop = 500;
+  (h.$('#critical-only') as HTMLInputElement).click();
+  assert.ok(rebuilt, 'the list was rebuilt');
+  assert.ok(kept);
+  assert.equal(h.doc.activeElement, h.$('.urgent-item[data-issue="50"]'));
+  assert.equal(scrolled, 1, 'scrolled back into view only while it was in view');
+});
+
+test('when the focused Fix first issue leaves the list, the focus stays in it', async () => {
+  const h = await setup();
+  (h.$('[data-pr-view="issues"]') as HTMLElement).click();
+  await tick();
+  (h.$('.urgent-item[data-issue="51"]') as HTMLElement).focus();
+  (h.$('#critical-only') as HTMLInputElement).click();
+  const hidden = h.$('.urgent-item[data-issue="51"]') === null;
+  const focused = h.doc.activeElement as HTMLElement | null;
+  (h.$('#critical-only') as HTMLInputElement).click();
+  assert.ok(hidden, 'not critical, so hidden');
+  assert.ok(focused?.classList.contains('urgent-item'), 'another issue has the focus');
+});
+
+test('a focused control in the issues bar keeps the focus when the list is rebuilt', async () => {
+  const h = await setup();
+  (h.$('[data-pr-view="issues"]') as HTMLElement).click();
+  await tick();
+  const box = h.$('#critical-only') as HTMLInputElement;
+  box.focus();
+  box.click();
+  const now = h.$('#critical-only') as HTMLInputElement;
+  const rebuilt = now !== box;
+  const kept = h.doc.activeElement === now;
+  now.click();
+  assert.ok(rebuilt, 'the bar was rebuilt');
+  assert.ok(kept, 'Critical only kept the focus');
+});
+
+test('a focused pane button on a repo\'s issues keeps the focus when the list is rebuilt', async () => {
+  const h = await setup();
+  (h.$('tr[data-repo="o/alpha"]') as HTMLElement).click();
+  await tick();
+  (h.$('[data-pane="issues"]') as HTMLElement).click();
+  const pane = h.$('[data-pane="issues"]') as HTMLElement;
+  pane.focus();
+  pane.click();
+  assert.notEqual(h.$('[data-pane="issues"]'), pane, 'the bar was rebuilt');
+  assert.equal(h.doc.activeElement, h.$('[data-pane="issues"]'), 'the Issues button kept the focus');
+});
+
+test('a focused control in the PRs bar keeps the focus when the bar is rebuilt', async () => {
+  const h = await setup();
+  (h.$('tr[data-repo="o/alpha"]') as HTMLElement).click();
+  await tick();
+  (h.$('[data-pane="issues"]') as HTMLElement).click();
+  const prs = h.$('[data-pane="prs"]') as HTMLElement;
+  prs.focus();
+  prs.click();
+  assert.deepEqual(prRows(h), [1, 2], 'back on the PRs');
+  assert.notEqual(h.$('[data-pane="prs"]'), prs, 'the bar was rebuilt');
+  assert.equal(h.doc.activeElement, h.$('[data-pane="prs"]'), 'the PRs button kept the focus');
+
+  const chip = h.$('[data-filter="all"]') as HTMLElement;
+  chip.focus();
+  chip.click();
+  assert.notEqual(h.$('[data-filter="all"]'), chip, 'the chips were rebuilt');
+  assert.equal(h.doc.activeElement, h.$('[data-filter="all"]'), 'the chip kept the focus');
+});
+
 test('an issue\'s PR opens here, and Esc comes back to the list', async () => {
   const h = await setup();
   (h.$('[data-pr-view="issues"]') as HTMLElement).click();
