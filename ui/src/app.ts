@@ -49,6 +49,23 @@ function refreshIcon(): SVGSVGElement {
   return svg;
 }
 
+const FOCUSABLE = 'a[href], button, [tabindex="0"]';
+
+/** Names a focusable element across rebuilds: its row, its column and its place in the cell. */
+function focusKey(n: Element): string {
+  const cell = n.closest('td');
+  const row = n.closest('tr');
+  if (!cell || !row) return '';
+  return `${row.dataset.repo} ${cell.cellIndex} ${[...cell.querySelectorAll(FOCUSABLE)].indexOf(n)}`;
+}
+
+/** Whether any of `n` shows inside the scrolling `main` that holds it. */
+function inView(n: Element): boolean {
+  const box = n.closest('main')?.getBoundingClientRect();
+  const r = n.getBoundingClientRect();
+  return !!box && r.bottom > box.top && r.top < box.bottom && r.right > box.left && r.left < box.right;
+}
+
 /**
  * Starts the UI in the current document. Call once; returns a function that stops
  * its clocks. `prRoute` opens the PR tab at that view.
@@ -71,12 +88,13 @@ export function start(api: Api, prRoute?: Route): () => void {
   }
 
   // A real anchor, so Tab reaches it and Enter opens it; the host opens the URL and the webview stays put.
-  // A right click shows no webview menu, so its Open Link item cannot load the page in the app window.
-  const link = (text: string, url: string, cls = ''): HTMLElement =>
+  // A middle click opens it through the host too. A right click shows no webview menu, so its Open Link
+  // item cannot load the page in the app window. `label` names a link whose text is only a number.
+  const link = (text: string, url: string, cls = '', label?: string): HTMLElement =>
     el('a', {
-      class: `link ${cls}`, href: url, draggable: 'false',
+      class: `link ${cls}`, href: url, draggable: 'false', 'aria-label': label,
       onclick: (e: Event) => openUrl(url, e),
-      onauxclick: (e: Event) => e.preventDefault(),
+      onauxclick: (e: Event) => ((e as MouseEvent).button === 1 ? openUrl(url, e) : e.preventDefault()),
       oncontextmenu: (e: Event) => e.preventDefault(),
     }, text);
 
@@ -117,8 +135,8 @@ export function start(api: Api, prRoute?: Route): () => void {
         if (v === null) return el('span', { class: 'muted', title: 'Only known for All time: choose it in the dropdown above' }, '—');
         return document.createTextNode(num(v));
       case 'critical_issues': return el('span', { class: v ? 'crit' : 'zero' }, num(v));
-      case 'open_prs': return link(num(v), gh(entry.repo, '/pulls'));
-      case 'open_issues': return link(num(v), gh(entry.repo, '/issues'));
+      case 'open_prs': return link(num(v), gh(entry.repo, '/pulls'), '', `${num(v)} open pull requests in ${entry.repo}`);
+      case 'open_issues': return link(num(v), gh(entry.repo, '/issues'), '', `${num(v)} open issues in ${entry.repo}`);
       case 'recent_commits': case 'recent_prs': case 'recent_merged': case 'recent_issues': case 'recent_people':
         if (v === null) {
           const why = state.window === 'release' && !s.latest_build ? 'No release yet' : 'Not fetched yet for this window';
@@ -140,7 +158,7 @@ export function start(api: Api, prRoute?: Route): () => void {
         }[lag.basis];
         const from = lag.basis === 'by_date' ? lag.from_sha : s.latest_build;
         const text = `${lag.basis === 'exact' ? '' : '~'}${num(v)}`;
-        return el('span', { title: tip }, from ? link(text, gh(entry.repo, `/compare/${encodeURIComponent(from)}...HEAD`), v ? '' : 'zero') : text);
+        return el('span', { title: tip }, from ? link(text, gh(entry.repo, `/compare/${encodeURIComponent(from)}...HEAD`), v ? '' : 'zero', tip) : text);
       }
       case 'latest_build_rate':
         if (v === null) return el('span', { class: 'muted' }, '—');
@@ -264,23 +282,6 @@ export function start(api: Api, prRoute?: Route): () => void {
     const total = (c: Column): string => (noTotal(c) ? '' : num(Math.round(t[c.key] ?? 0)));
     $('tfoot').replaceChildren(el('tr', {}, COLUMNS.map((c, i) =>
       el('td', { class: groupStart(i) }, i === 0 ? `${shown.length} repos` : total(c)))));
-  }
-
-  const FOCUSABLE = 'a[href], button, [tabindex="0"]';
-
-  /** Names a focusable element across rebuilds: its row, its column and its place in the cell. */
-  function focusKey(n: Element): string {
-    const cell = n.closest('td');
-    const row = n.closest('tr');
-    if (!cell || !row) return '';
-    return `${row.dataset.repo} ${cell.cellIndex} ${[...cell.querySelectorAll(FOCUSABLE)].indexOf(n)}`;
-  }
-
-  /** Whether any of `n` shows inside the scrolling `main` that holds it. */
-  function inView(n: Element): boolean {
-    const box = n.closest('main')?.getBoundingClientRect();
-    const r = n.getBoundingClientRect();
-    return !!box && r.bottom > box.top && r.top < box.bottom && r.right > box.left && r.left < box.right;
   }
 
   /** Notes the focused element in `list`. The returned function, called after `list` is rebuilt,
