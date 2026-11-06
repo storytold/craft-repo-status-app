@@ -125,18 +125,22 @@ fn open_url(url: String) -> Result<(), String> {
     open_external(&url)
 }
 
-/// A `https://github.com/` URL made only of the characters RFC 3986 allows,
-/// with each `%` starting a percent-encoded byte.
+/// A `https://github.com/` URL whose path, query and fragment use only the
+/// characters RFC 3986 allows there, with at most one `#` and each `%`
+/// starting a percent-encoded byte.
 fn is_github_link(url: &str) -> bool {
     let Some(rest) = url.strip_prefix("https://github.com/") else {
         return false;
     };
     let bytes = rest.as_bytes();
+    if bytes.iter().filter(|&&c| c == b'#').count() > 1 {
+        return false;
+    }
     bytes.iter().enumerate().all(|(i, &c)| match c {
         b'%' => bytes
             .get(i + 1..i + 3)
             .is_some_and(|hex| hex.iter().all(u8::is_ascii_hexdigit)),
-        b'-' | b'.' | b'_' | b'~' | b':' | b'/' | b'?' | b'#' | b'[' | b']' | b'@' => true,
+        b'-' | b'.' | b'_' | b'~' | b':' | b'/' | b'?' | b'#' | b'@' => true,
         b'!' | b'$' | b'&' | b'\'' | b'(' | b')' | b'*' | b'+' | b',' | b';' | b'=' => true,
         _ => c.is_ascii_alphanumeric(),
     })
@@ -158,11 +162,17 @@ mod link_tests {
         assert!(is_github_link(
             "https://github.com/o/app/compare/v1.0...HEAD"
         ));
+        assert!(is_github_link(
+            "https://github.com/o/app/pulls?q=is%3Aopen&page=2#top?x"
+        ));
         assert!(!is_github_link("https://example.com/o/app"));
         assert!(!is_github_link("https://github.com.example.com/o"));
+        assert!(!is_github_link("https://github.com.evil.example/o"));
         assert!(!is_github_link("http://github.com/o/app"));
+        assert!(!is_github_link("https://github.com/o/[app]"));
         for bad in [
             "|", "^", "<", ">", "\"", "`", "\\", "{", "}", " ", "\t", "\n", "%", "%2", "%zz", "é",
+            "[", "]", "#",
         ] {
             let url = format!("https://github.com/o/app#a{bad}z");
             assert!(!is_github_link(&url), "{url:?}");
