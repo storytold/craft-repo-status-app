@@ -56,7 +56,8 @@ pub fn atomic_write(path: &std::path::Path, text: &str) -> Result<()> {
 }
 
 /// As [`atomic_write`], for a file that holds a secret or can get one: on Unix
-/// the file is readable and writable by its owner only.
+/// the file is readable and writable by its owner only. On Windows the file
+/// takes the ACL of its folder.
 pub fn atomic_write_private(path: &std::path::Path, text: &str) -> Result<()> {
     write_replacing(path, text, true)
 }
