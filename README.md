@@ -317,7 +317,8 @@ so copy any changes you made there into that section (minus `[window]`, `[tray]`
 The Settings view edits the file. Open it with the gear button, `⌘,`, the
 footer's Settings link or the tray's Settings… item. Save checks the values
 again and writes them into the file atomically, keeping its comments, its
-formatting and any keys the app does not know. It writes only the values you
+formatting and any keys the app does not know. Save does not write a file whose
+`[pr_review]` section does not load. It writes only the values you
 changed, so edits made to the file while the view was open stay unless you
 changed the same value. A value the app clamps, such as an interval out of
 range, also stays as the file has it, unless your changes would make the app

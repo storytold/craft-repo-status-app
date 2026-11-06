@@ -247,7 +247,9 @@ fn pinned_after_save(view: &Config, base: &Config, live: bool) -> bool {
 
 /// The config `save_settings` writes: `config`'s changes from `base` applied
 /// to the file's values (see [`Config::rebase`]), with the file's token when
-/// `keep_token`, and refused when its shortcut does not parse.
+/// `keep_token`, and refused when its shortcut does not parse or the file's
+/// `[pr_review]` section does not load, since the reload after a save reads
+/// both sections and keeps the old settings when either one fails.
 fn prepare_save(
     config: Config,
     base: &Config,
@@ -255,7 +257,10 @@ fn prepare_save(
     path: &Path,
 ) -> Result<Config, String> {
     let current = if path.exists() {
-        Config::load_from(path).map_err(|e| e.to_string())?
+        let current = Config::load_from(path).map_err(|e| e.to_string())?;
+        let text = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
+        pr_core::Config::parse(&text).map_err(|e| e.to_string())?;
+        current
     } else {
         Config::default()
     };
@@ -1390,6 +1395,10 @@ mod tests {
         // A file that does not load must not lose its token to a save.
         std::fs::write(&path, "github_token = \"secret\"\npoll_minutes = \"x\"\n").unwrap();
         assert!(prepare_save(with("", ""), &base, true, &path).is_err());
+        // A save would write the file and then fail to apply it.
+        std::fs::write(&path, "[pr_review]\npoll_minutes = \"x\"\n").unwrap();
+        let err = prepare_save(with("", ""), &base, true, &path).unwrap_err();
+        assert!(err.contains("poll_minutes"), "{err}");
         std::fs::remove_dir_all(&dir).ok();
     }
 
