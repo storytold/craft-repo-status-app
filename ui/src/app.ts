@@ -599,9 +599,11 @@ export function start(api: Api, prRoute?: Route): () => void {
     saving = true;
     checkSettings();
     setSettingsStatus('Saving…');
+    let saved = false;
     try {
       // The host writes into the file only the values that differ from `base`.
       await api.invoke('save_settings', { config, base: s.loaded.config, keepToken: !token && !clear });
+      saved = true;
       const relaunch = relaunchChanges(s.loaded.config, s.draft);
       const loaded = await api.invoke<Settings>('get_settings');
       if (settings !== s) return;
@@ -609,7 +611,7 @@ export function start(api: Api, prRoute?: Route): () => void {
       buildSettings();
       setSettingsStatus(relaunch.length ? `Saved. Relaunch Craft Status to apply: ${relaunch.join(', ')}.` : 'Saved.', 'ok');
     } catch (e) {
-      if (settings === s) setSettingsStatus(`Not saved: ${e}`, 'error');
+      if (settings === s) setSettingsStatus(saved ? `Saved, but the file could not be read back: ${e}` : `Not saved: ${e}`, 'error');
     } finally {
       saving = false;
       checkSettings();

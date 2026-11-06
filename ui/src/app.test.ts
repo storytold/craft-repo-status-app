@@ -681,6 +681,26 @@ test('a refused save shows the host’s reason and keeps the edits', async () =>
   assert.equal(saveButton(h).disabled, false, 'Save can be tried again');
 });
 
+test('a save whose file cannot be read back says it was saved', async () => {
+  const file = { settings: settingsOf() };
+  const host = fileHost(file);
+  let saved = false;
+  const h = await setup({
+    host: (cmd, args) => {
+      if (cmd === 'get_settings' && saved) return Promise.reject('config: invalid type');
+      if (cmd === 'save_settings') saved = true;
+      return host(cmd, args);
+    },
+  });
+  await openSettings(h);
+  type(h, field(h, 'poll_minutes'), '40');
+  saveButton(h).click();
+  await tick();
+  await tick();
+  assert.equal(file.settings.config.poll_minutes, 40);
+  assert.equal(settingsStatus(h), 'Saved, but the file could not be read back: config: invalid type');
+});
+
 test('a config file that does not load says so and still offers the raw file', async () => {
   const h = await setup({ host: (cmd) => (cmd === 'get_settings' ? Promise.reject('config: invalid type') : undefined) });
   await openSettings(h);
