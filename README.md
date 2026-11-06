@@ -303,7 +303,7 @@ The app behaves like the Todo app:
 
 ## Configuration: `~/.craft_status_config.toml`
 
-The app creates this file from
+The app creates this file, with mode 0600, from
 [`craft_status_config.template.toml`](craft_status_config.template.toml) the
 first time it launches. It re-reads the file before each poll, so edits to the
 repo list or the intervals take effect without a restart. `[table_headings]` sets each

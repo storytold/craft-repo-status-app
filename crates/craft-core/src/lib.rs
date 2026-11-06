@@ -55,8 +55,8 @@ pub fn atomic_write(path: &std::path::Path, text: &str) -> Result<()> {
     write_replacing(path, text, false)
 }
 
-/// As [`atomic_write`], for text that holds a secret: on Unix the file is
-/// readable and writable by its owner only.
+/// As [`atomic_write`], for a file that holds a secret or can get one: on Unix
+/// the file is readable and writable by its owner only.
 pub fn atomic_write_private(path: &std::path::Path, text: &str) -> Result<()> {
     write_replacing(path, text, true)
 }

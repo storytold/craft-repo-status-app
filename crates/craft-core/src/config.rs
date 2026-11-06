@@ -235,13 +235,17 @@ impl Config {
         Self::parse(&text)
     }
 
-    /// Load the config, writing the template first if there is none.
+    /// Load the config, writing the template first if there is none. On Unix
+    /// the new file is readable and writable by its owner only.
     pub fn load_or_create() -> Result<Config> {
-        let path = Self::path()?;
+        Self::load_or_create_at(&Self::path()?)
+    }
+
+    fn load_or_create_at(path: &Path) -> Result<Config> {
         if !path.exists() {
-            atomic_write(&path, TEMPLATE)?;
+            atomic_write_private(path, TEMPLATE)?;
         }
-        Self::load_from(&path)
+        Self::load_from(path)
     }
 
     pub fn poll_secs(&self) -> i64 {
@@ -316,15 +320,16 @@ impl Config {
     /// `owner/name`, except those the file already lists in another form.
     /// A value the file holds in a form that reads as this config's, such
     /// as an interval that [`Config::parse`] clamps or a repo listed twice,
-    /// stays as the file has it.
+    /// stays as the file has it. On Unix a new file, or one that gets a token,
+    /// is readable and writable by its owner only.
     pub fn save_to(&self, path: &Path) -> Result<()> {
         let problems = self.problems();
         if !problems.is_empty() {
             return Err(Error::Invalid(problems));
         }
-        let text = match std::fs::read_to_string(path) {
-            Ok(text) => text,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => TEMPLATE.to_string(),
+        let (text, new_file) = match std::fs::read_to_string(path) {
+            Ok(text) => (text, false),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => (TEMPLATE.to_string(), true),
             Err(source) => {
                 return Err(Error::Io {
                     path: path.display().to_string(),
@@ -394,7 +399,7 @@ impl Config {
                 "the edited file does not read back as the values saved".into(),
             ]));
         }
-        if saved.github_token.is_empty() {
+        if saved.github_token.is_empty() && !new_file {
             atomic_write(path, &out)
         } else {
             atomic_write_private(path, &out)
@@ -975,6 +980,34 @@ mod tests {
         };
         tokened.save_to(&path).unwrap();
         assert_eq!(mode(), 0o600);
+        std::fs::remove_dir_all(path.parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn load_creates_a_missing_file_from_the_template() {
+        let path = temp_config("load-missing", "");
+        std::fs::remove_file(&path).unwrap();
+        assert_eq!(Config::load_or_create_at(&path).unwrap(), Config::default());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), TEMPLATE);
+        std::fs::remove_dir_all(path.parent().unwrap()).ok();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_new_config_file_is_private() {
+        use std::os::unix::fs::PermissionsExt;
+        let path = temp_config("new-private", "");
+        let mode = || std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        std::fs::remove_file(&path).unwrap();
+        Config::load_or_create_at(&path).unwrap();
+        assert_eq!(mode(), 0o600, "created by a load");
+        // A load leaves the permissions of a file that exists.
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        Config::load_or_create_at(&path).unwrap();
+        assert_eq!(mode(), 0o644);
+        std::fs::remove_file(&path).unwrap();
+        Config::default().save_to(&path).unwrap();
+        assert_eq!(mode(), 0o600, "created by a save with no token");
         std::fs::remove_dir_all(path.parent().unwrap()).ok();
     }
 
