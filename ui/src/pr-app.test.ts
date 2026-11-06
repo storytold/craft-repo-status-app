@@ -565,6 +565,33 @@ test('when the focused Fix first issue leaves the list, the focus stays in it', 
   assert.ok(focused?.classList.contains('urgent-item'), 'another issue has the focus');
 });
 
+test('a focused control in the issues bar keeps the focus when the list is rebuilt', async () => {
+  const h = await setup();
+  (h.$('[data-pr-view="issues"]') as HTMLElement).click();
+  await tick();
+  const box = h.$('#critical-only') as HTMLInputElement;
+  box.focus();
+  box.click();
+  const now = h.$('#critical-only') as HTMLInputElement;
+  const rebuilt = now !== box;
+  const kept = h.doc.activeElement === now;
+  now.click();
+  assert.ok(rebuilt, 'the bar was rebuilt');
+  assert.ok(kept, 'Critical only kept the focus');
+});
+
+test('a focused pane button on a repo\'s issues keeps the focus when the list is rebuilt', async () => {
+  const h = await setup();
+  (h.$('tr[data-repo="o/alpha"]') as HTMLElement).click();
+  await tick();
+  (h.$('[data-pane="issues"]') as HTMLElement).click();
+  const pane = h.$('[data-pane="issues"]') as HTMLElement;
+  pane.focus();
+  pane.click();
+  assert.notEqual(h.$('[data-pane="issues"]'), pane, 'the bar was rebuilt');
+  assert.equal(h.doc.activeElement, h.$('[data-pane="issues"]'), 'the Issues button kept the focus');
+});
+
 test('an issue\'s PR opens here, and Esc comes back to the list', async () => {
   const h = await setup();
   (h.$('[data-pr-view="issues"]') as HTMLElement).click();

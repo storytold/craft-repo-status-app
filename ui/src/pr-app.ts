@@ -870,11 +870,18 @@ export function startPrs(api: Api, initial: Route = { view: 'apps' }): PrTab {
     const focused = active && main.contains(active) && active.classList.contains('urgent-item') ? active : null;
     const wasInView = focused !== null && inView(focused);
     const index = focused ? [...main.querySelectorAll('.urgent-item')].indexOf(focused) : -1;
+    const control = active && !focused && active.closest('.controls') && main.contains(active) ? active : null;
     const shown = issueRowsShown(rows);
     const sections = issueSections(shown, showRepo, from);
     main.replaceChildren(el('div', { class: 'controls' }, controls),
       ...(sections.length ? sections : [el('div', { class: 'empty' }, none)]));
     main.scrollTop = scroll;
+    // A control in the bar that had the keyboard focus, such as Critical only, keeps it in the new bar.
+    if (control) {
+      const same = [...main.querySelectorAll<HTMLElement>('.controls input, .controls button')].find((n) => sameControl(n, control));
+      same?.focus({ preventScroll: true });
+      return;
+    }
     // The issue that had the keyboard focus keeps it when the list is rebuilt, and stays in view if it was.
     // When it is gone, the issue now at its place, or the last one, or the first control takes the focus.
     if (!focused) return;
@@ -884,6 +891,14 @@ export function startPrs(api: Api, initial: Route = { view: 'apps' }): PrTab {
     if (!next) return;
     next.focus({ preventScroll: true });
     if (wasInView) next.scrollIntoView?.({ block: 'nearest' });
+  }
+
+  /** Whether `a` and `b` are the same filter-bar control, matched by id or by its pane or filter key. */
+  function sameControl(a: HTMLElement, b: HTMLElement): boolean {
+    if (a.tagName !== b.tagName) return false;
+    if (a.id || b.id) return a.id === b.id;
+    const key = (n: HTMLElement): string | undefined => n.dataset.pane ?? n.dataset.filter;
+    return key(a) !== undefined && key(a) === key(b);
   }
 
   /** Whether any of `n` shows inside `main`'s visible area. */
