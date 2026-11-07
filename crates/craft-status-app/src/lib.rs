@@ -500,7 +500,8 @@ fn unprobed(candidates: Vec<String>, pending: &[(String, Probe)]) -> Vec<String>
 /// Measures again, at `probed_at` (when the probe was sent), each of
 /// `checks` (a repo, its raw cache, its shared PR ledger and its probe) whose
 /// probe shows that nothing changed since its last fetch. Such a repo keeps
-/// its `fetched_at`, and its `checked_at` becomes `probed_at`. Returns the
+/// its `fetched_at`, or takes the time of the raw cache's last fetch when
+/// that is later, and its `checked_at` becomes `probed_at`. Returns the
 /// repos measured again, and the probes of the others.
 fn restat_unchanged(
     snap: &mut Snapshot,
@@ -516,6 +517,11 @@ fn restat_unchanged(
         match (stats, snap.repos.iter_mut().find(|e| e.repo == repo)) {
             (Some(stats), Some(entry)) => {
                 entry.stats = Some(stats);
+                // The stats come from `raw`'s last fetch, which can be newer
+                // than the snapshot's.
+                if let Some(last) = &raw.last {
+                    entry.fetched_at = entry.fetched_at.max(Some(last.at));
+                }
                 entry.checked_at = Some(probed_at);
                 restated.push(repo);
             }
@@ -1382,6 +1388,28 @@ mod tests {
         let checks = vec![("o/r0".into(), raw, ledger, None)];
         let (restated, left) = restat_unchanged(&mut snap, checks, now);
         assert!(restated.is_empty() && left.is_empty());
+    }
+
+    #[test]
+    fn a_skipped_repo_shows_the_fetch_its_stats_come_from() {
+        let now = Utc::now();
+        // The snapshot shows a fetch 40 minutes ago, but the raw cache holds
+        // a fetch 10 minutes ago, as when the snapshot's save failed.
+        let mut snap = snap_with(&[40], now);
+        let newer = now - CDuration::minutes(10);
+        let raw = raw_fetched(newer, &probe("a"));
+        let checks = vec![("o/r0".into(), raw, walked_ledger(newer), Some(probe("a")))];
+        let (restated, _) = restat_unchanged(&mut snap, checks, now);
+        assert_eq!(restated, ["o/r0"]);
+        assert_eq!(snap.repos[0].fetched_at, Some(newer));
+        // An older raw cache leaves the snapshot's later fetch time.
+        let mut snap = snap_with(&[5], now);
+        let older = now - CDuration::minutes(30);
+        let raw = raw_fetched(older, &probe("a"));
+        let checks = vec![("o/r0".into(), raw, walked_ledger(older), Some(probe("a")))];
+        let (restated, _) = restat_unchanged(&mut snap, checks, now);
+        assert_eq!(restated, ["o/r0"]);
+        assert_eq!(snap.repos[0].fetched_at, Some(now - CDuration::minutes(5)));
     }
 
     #[test]

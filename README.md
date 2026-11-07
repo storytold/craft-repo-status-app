@@ -268,10 +268,10 @@ above the 150 where the Downloads tab's polling pauses itself.
   the time of the last check that found nothing changed. The app fetches the
   repo anyway when the six-hourly fetch from scratch is due, when its last
   fetch failed, when the commits kept in `raw/` do not match the commit
-  counts GitHub reported for each window, and when you refresh its row from
-  the Fetched column. Reactions, download counts, edits to older releases and
-  the publication of a draft older than the 20 newest releases do not change
-  these values, so those numbers can be up to six hours plus one
+  counts GitHub reported for each window, when its last fetch found a draft
+  older than the 20 newest releases, and when you refresh its row from the
+  Fetched column. Reactions, download counts and edits to older releases do
+  not change these values, so those numbers can be up to six hours plus one
   `poll_minutes` interval old.
 - Each repo's icon is `assets/app-icon/hicolor/64x64/apps/*.png` on its default
   branch. It is downloaded once and again only when the file changes; it's

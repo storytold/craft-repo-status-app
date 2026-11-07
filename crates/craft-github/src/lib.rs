@@ -56,6 +56,8 @@ const FULL_REFRESH_HOURS: i64 = 6;
 const MAX_PAGES: usize = 30;
 /// Repositories per [`probe_query`] request.
 const PROBE_CHUNK: usize = 50;
+/// Releases, newest by creation date first, each [`probe_query`] alias reads.
+const PROBE_RELEASES: usize = 20;
 /// Pages of 100 a walk of the shared PR ledger may take. They're cheap (a point
 /// each), it's kept from then on, and it has to get through every PR touched in
 /// the window.
@@ -337,8 +339,9 @@ impl GitHub {
         let authors: Vec<CommitAuthor> = fresh.commits.values().cloned().collect();
         let sync = self.sync_ledger(repo, since, now, shared)?;
         // A probe kept with this fetch lets `restat` read the shared ledger
-        // later, which is older than this fetch's when the save failed.
-        let probe = probe.filter(|_| !sync.unsaved);
+        // later, which is older than this fetch's when the save failed. A
+        // probe that saw another branch head than this fetch is not kept.
+        let probe = probe.filter(|p| !sync.unsaved && probe_saw_head(p, &main));
         let ledger = sync.ledger;
         let events = Events {
             prs_opened: ledger.opened_since(since),
@@ -942,7 +945,8 @@ fn activity_start(now: DateTime<Utc>, release_at: Option<DateTime<Utc>>) -> Date
 /// the fetch from scratch every [`FULL_REFRESH_HOURS`] is not due, and the
 /// commits `raw` holds match the fetch's per-window counts (see
 /// [`commits_match_counts`]) and include the branch head (see
-/// [`holds_head`]). The probe does not see reaction and download counts, so
+/// [`holds_head`]), and no draft lies outside the releases the probe reads
+/// (see [`draft_outside_probe`]). The probe does not see reaction and download counts, so
 /// a repo measured again keeps the counts of its last fetch until the next
 /// one, which can be [`FULL_REFRESH_HOURS`] plus one poll interval later.
 pub fn can_skip(raw: &RawActivity, probe: Option<&Probe>, now: DateTime<Utc>) -> bool {
@@ -956,6 +960,30 @@ pub fn can_skip(raw: &RawActivity, probe: Option<&Probe>, now: DateTime<Utc>) ->
     !raw.fetch_from(activity_start(now, release_at), now).1
         && commits_match_counts(&last.main, &raw.commits, last.at)
         && holds_head(last, &raw.commits, activity_start(last.at, release_at))
+        && !draft_outside_probe(&last.releases)
+}
+
+/// Whether `probe` saw the default branch head that `main`, the answer to
+/// [`main_query`] fetched after it, reads. The branch can move between the
+/// two requests.
+fn probe_saw_head(probe: &Probe, main: &Value) -> bool {
+    let head = main["repository"]["defaultBranchRef"]["target"]["oid"].as_str();
+    probe.head_oid.as_deref() == head
+}
+
+/// Whether `releases` holds a draft that the probe does not read: one with
+/// at least [`PROBE_RELEASES`] other releases created at the same time or
+/// later. Publishing such a draft changes no [`Probe`] field.
+fn draft_outside_probe(releases: &[Release]) -> bool {
+    releases.iter().enumerate().any(|(i, r)| {
+        r.draft
+            && releases
+                .iter()
+                .enumerate()
+                .filter(|(j, o)| *j != i && o.created_at >= r.created_at)
+                .count()
+                >= PROBE_RELEASES
+    })
 }
 
 /// Whether `commits` holds the default branch's head that the probe before
@@ -1202,6 +1230,7 @@ pub fn probe_query(n: usize) -> String {
     PROBE_QUERY
         .replace("{VARS}", &vars.join(", "))
         .replace("{REPOS}", &repos)
+        .replace("{RELEASES}", &PROBE_RELEASES.to_string())
 }
 
 /// One [`Probe`] per alias of [`probe_query`]`(n)`; `None` for an alias
@@ -1310,6 +1339,7 @@ query($owner: String!, $name: String!) {
       name
       target {
         ... on Commit {
+          oid
           all: history(first: 1) { totalCount nodes { committedDate } }
           {HISTORY}
         }
@@ -1338,7 +1368,7 @@ fragment P on Repository {
   lastIssue: issues(first: 1, orderBy: {field: UPDATED_AT, direction: DESC}) { nodes { updatedAt } }
   pullRequests { totalCount }
   lastPr: pullRequests(first: 1, orderBy: {field: UPDATED_AT, direction: DESC}) { nodes { updatedAt } }
-  releases(first: 20, orderBy: {field: CREATED_AT, direction: DESC}) {
+  releases(first: {RELEASES}, orderBy: {field: CREATED_AT, direction: DESC}) {
     totalCount
     nodes { tagName publishedAt updatedAt isDraft }
   }
@@ -1785,7 +1815,12 @@ mod tests {
             let alias = format!("r{i}: repository(owner: $o{i}, name: $n{i}) {{ ...P }}");
             assert!(q.contains(&alias), "{q}");
         }
-        assert!(!q.contains("r3:") && !q.contains("{VARS}") && !q.contains("{REPOS}"));
+        assert!(
+            !q.contains("r3:")
+                && !q.contains("{VARS}")
+                && !q.contains("{REPOS}")
+                && !q.contains("{RELEASES}")
+        );
         assert!(q.contains("defaultBranchRef { target { oid } }"));
         assert!(q.contains("issues(first: 1, orderBy: {field: UPDATED_AT, direction: DESC})"));
         assert!(q.contains("pullRequests(first: 1, orderBy: {field: UPDATED_AT, direction: DESC})"));
@@ -1867,6 +1902,63 @@ mod tests {
             after[0].as_ref().and_then(|p| p.build_tag.as_deref()),
             Some("v1.1.0")
         );
+    }
+
+    #[test]
+    fn a_probe_is_kept_only_with_the_head_the_fetch_read() {
+        let probe = Probe {
+            head_oid: Some("h1".into()),
+            ..Default::default()
+        };
+        let main =
+            |oid: Value| json!({"repository": {"defaultBranchRef": {"target": {"oid": oid}}}});
+        assert!(main_query(Utc::now(), None).contains("... on Commit {\n          oid\n"));
+        assert!(probe_saw_head(&probe, &main(json!("h1"))));
+        // The branch moved between the probe and the fetch.
+        assert!(!probe_saw_head(&probe, &main(json!("h2"))));
+        // An empty repository has no head in either answer.
+        let empty = json!({"repository": {"defaultBranchRef": null}});
+        assert!(probe_saw_head(&Probe::default(), &empty));
+        assert!(!probe_saw_head(&probe, &empty));
+    }
+
+    #[test]
+    fn skip_needs_every_draft_inside_the_probe() {
+        let t = |s: &str| s.parse::<DateTime<Utc>>().unwrap();
+        let now = t("2026-10-08T04:00:00Z");
+        let release = |day: u32, draft: bool| Release {
+            tag: format!("v{day}"),
+            draft,
+            created_at: Some(t("2026-10-07T00:00:00Z") + chrono::Duration::hours(day.into())),
+            ..Default::default()
+        };
+        let probe = Probe::default();
+        let with = |releases: Vec<Release>| RawActivity {
+            covers_from: Some(t("2026-10-01T03:25:00Z")),
+            fetched_at: Some(t("2026-10-08T03:25:00Z")),
+            full_at: Some(t("2026-10-08T01:00:00Z")),
+            last: Some(LastFetch {
+                at: t("2026-10-08T03:25:00Z"),
+                probe: Some(probe.clone()),
+                main: Value::Null,
+                releases,
+                since_build: None,
+                contributors: vec![],
+            }),
+            ..Default::default()
+        };
+        // The draft is the 20th newest: the probe reads it.
+        let inside: Vec<Release> = (1..=PROBE_RELEASES as u32)
+            .map(|d| release(d, d == 1))
+            .collect();
+        assert!(can_skip(&with(inside.clone()), Some(&probe), now));
+        // One more release puts the draft 21st, where the probe does not read it.
+        let mut outside = inside;
+        outside.push(release(PROBE_RELEASES as u32 + 1, false));
+        assert!(!can_skip(&with(outside.clone()), Some(&probe), now));
+        // Without a draft, the same releases can be skipped.
+        outside[0].draft = false;
+        assert!(can_skip(&with(outside), Some(&probe), now));
     }
 
     #[test]
