@@ -161,9 +161,9 @@ make snapshot   # fetch once, print a table, write ui/dev-snapshot.json
 make preview    # serve ui/ in a browser against that snapshot (no Tauri needed)
 ```
 
-On Linux, `make install`, `make bundle` and `make uninstall` don't apply (they
-are macOS-specific): use `make run`, or `cargo tauri build` in
-`crates/craft-status-app` for an AppImage, .deb or .rpm. The app sets
+On Linux, `make install` puts the binary in `~/.local/bin`, adds a `.desktop`
+entry (menu + `~/.config/autostart`) and launches it; `make uninstall` removes
+them. `make bundle` is macOS-only; `make build` gives an AppImage, .deb or .rpm. The app sets
 `WEBKIT_DMABUF_RENDERER_FORCE_SHM=1` at startup, because WebKitGTK's GPU
 buffers crash or half-paint the transparent window on some Wayland setups
 (seen on NVIDIA).

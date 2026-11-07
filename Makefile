@@ -5,6 +5,11 @@ BUNDLE     := target/release/bundle/macos/$(APP_NAME).app
 INSTALLED  := /Applications/$(APP_NAME).app
 AGENT_ID   := ai.storyteller.craft-status
 AGENT      := $(HOME)/Library/LaunchAgents/$(AGENT_ID).plist
+# Linux install paths (XDG)
+BIN        := $(HOME)/.local/bin/craft-status-app
+ICON       := $(HOME)/.local/share/icons/hicolor/128x128/apps/$(AGENT_ID).png
+DESKTOP    := $(HOME)/.local/share/applications/$(AGENT_ID).desktop
+AUTOSTART  := $(HOME)/.config/autostart/$(AGENT_ID).desktop
 
 .PHONY: dev run build bundle install uninstall test check ui snapshot preview icons clean
 
@@ -20,6 +25,7 @@ build: node_modules ## release build + every installer for this OS
 bundle: node_modules ## release .app only (macOS)
 	cd $(APP_DIR) && cargo tauri build --bundles app
 
+ifeq ($(shell uname -s),Darwin)
 install: bundle ## copy to /Applications, start at login, launch now (macOS)
 	-pkill -x craft-status-app; sleep 1
 	rm -rf "$(INSTALLED)" && cp -R "$(BUNDLE)" "$(INSTALLED)"
@@ -36,6 +42,25 @@ install: bundle ## copy to /Applications, start at login, launch now (macOS)
 uninstall:      ## quit, remove the app and the login item (keeps config + cache)
 	-pkill -x craft-status-app
 	rm -rf "$(INSTALLED)" "$(AGENT)"
+
+else
+# Linux truncates process names to 15 chars, hence craft-status-ap.
+install: node_modules ## build, install to ~/.local, start at login, launch now (Linux)
+	cd $(APP_DIR) && cargo tauri build --no-bundle
+	-pkill -x craft-status-ap; sleep 1
+	install -Dm755 target/release/craft-status-app "$(BIN)"
+	install -Dm644 $(APP_DIR)/icons/128x128.png "$(ICON)"
+	mkdir -p "$(dir $(DESKTOP))" "$(dir $(AUTOSTART))"
+	printf '%s\n' '[Desktop Entry]' 'Type=Application' 'Name=$(APP_NAME)' \
+	  'Comment=Status of the storytold craft repositories' \
+	  'Exec=$(BIN)' 'Icon=$(AGENT_ID)' 'Categories=Development;' 'Terminal=false' > "$(DESKTOP)"
+	cp "$(DESKTOP)" "$(AUTOSTART)"
+	setsid -f "$(BIN)" >/dev/null 2>&1
+
+uninstall:      ## quit, remove the app and the login item (keeps config + cache)
+	-pkill -x craft-status-ap
+	rm -f "$(BIN)" "$(ICON)" "$(DESKTOP)" "$(AUTOSTART)"
+endif
 
 test: node_modules ## Rust + UI tests
 	cargo test --workspace
