@@ -385,6 +385,14 @@ test('refresh targets what is on screen', async () => {
   await tick();
   (h.$('#refresh') as HTMLElement).click();
   assert.deepEqual(h.calls.at(-1), { cmd: 'refresh_pr_repo', args: { repo: 'o/alpha' } });
+  (h.$('[data-pane="issues"]') as HTMLElement).click();
+  (h.$('#refresh') as HTMLElement).click();
+  assert.deepEqual(h.calls.at(-1), { cmd: 'refresh_repo', args: { repo: 'o/alpha' } });
+  h.key('r', { ctrlKey: true });
+  assert.deepEqual(h.calls.at(-1), { cmd: 'refresh_repo', args: { repo: 'o/alpha' } });
+  (h.$('[data-pane="prs"]') as HTMLElement).click();
+  (h.$('#refresh') as HTMLElement).click();
+  assert.deepEqual(h.calls.at(-1), { cmd: 'refresh_pr_repo', args: { repo: 'o/alpha' } });
   (h.$('tr[data-number="1"]') as HTMLElement).click();
   await tick();
   (h.$('#refresh') as HTMLElement).click();
@@ -554,6 +562,35 @@ test('a repo\'s page switches between its PRs and its issues, and keeps the pane
   assert.deepEqual(issueNumbers(h), [50, 51, 52], 'still on the issues');
   (h.$('[data-pane="prs"]') as HTMLElement).click();
   assert.deepEqual(prRows(h), [1, 2]);
+});
+
+test('an uncached reviewed repository keeps its PR pane and can request the first listing', async () => {
+  const h = await setup(undefined, { view: 'repo', repo: 'o/gamma' });
+  assert.ok(h.$('[data-pane="prs"]'));
+  assert.equal(h.$('[data-pane="prs"]')!.getAttribute('aria-pressed'), 'true');
+  assert.doesNotMatch(h.$('#prs-view')!.textContent!, /Third-party repo/);
+  (h.$('#refresh') as HTMLElement).click();
+  assert.deepEqual(h.calls.at(-1), { cmd: 'refresh_pr_repo', args: { repo: 'o/gamma' } });
+  (h.$('[data-pane="issues"]') as HTMLElement).click();
+  (h.$('#refresh') as HTMLElement).click();
+  assert.deepEqual(h.calls.at(-1), { cmd: 'refresh_repo', args: { repo: 'o/gamma' } });
+  (h.$('[data-pane="prs"]') as HTMLElement).click();
+  (h.$('#refresh') as HTMLElement).click();
+  assert.deepEqual(h.calls.at(-1), { cmd: 'refresh_pr_repo', args: { repo: 'o/gamma' } });
+});
+
+test('a repo\'s page lists its PRs and issues when the route names it in other letter case', async () => {
+  const h = await setup(undefined, { view: 'repo', repo: 'O/Alpha' });
+  await tick();
+  assert.deepEqual(prRows(h), [1, 2]);
+  assert.deepEqual(h.calls.find((c) => c.cmd === 'get_pr_repo')?.args, { repo: 'o/alpha' });
+  (h.$('#refresh') as HTMLElement).click();
+  assert.deepEqual(h.calls.at(-1), { cmd: 'refresh_pr_repo', args: { repo: 'o/alpha' } });
+  assert.match(h.$('[data-pane="issues"]')!.textContent!, /Issues.*3/);
+  (h.$('[data-pane="issues"]') as HTMLElement).click();
+  assert.deepEqual(issueNumbers(h), [50, 51, 52]);
+  (h.$('#refresh') as HTMLElement).click();
+  assert.deepEqual(h.calls.at(-1), { cmd: 'refresh_repo', args: { repo: 'o/alpha' } });
 });
 
 test('a third party\'s page has its issues only, and never asks for its PRs', async () => {
