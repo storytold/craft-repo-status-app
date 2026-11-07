@@ -589,6 +589,8 @@ test('a repo\'s page lists its PRs and issues when the route names it in other l
   assert.match(h.$('[data-pane="issues"]')!.textContent!, /Issues.*3/);
   (h.$('[data-pane="issues"]') as HTMLElement).click();
   assert.deepEqual(issueNumbers(h), [50, 51, 52]);
+  (h.$('#refresh') as HTMLElement).click();
+  assert.deepEqual(h.calls.at(-1), { cmd: 'refresh_repo', args: { repo: 'o/alpha' } });
 });
 
 test('a third party\'s page has its issues only, and never asks for its PRs', async () => {
