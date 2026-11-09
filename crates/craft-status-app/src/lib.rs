@@ -310,7 +310,7 @@ fn fetch_into_snapshot(app: &AppHandle, cfg: &Config, repo: &str) -> Result<(), 
     // Read before the raw cache is saved, which keeps the runs' ETags.
     let main_ci = match &result {
         Ok((_, budget)) if optional_requests_allowed(budget.graphql_remaining) => {
-            Some(read_main_ci(&gh, repo, &mut raw, now))
+            Some(read_main_ci(&gh, repo, &mut raw, Utc::now()))
         }
         _ => None,
     };
@@ -343,7 +343,7 @@ fn fetch_into_snapshot(app: &AppHandle, cfg: &Config, repo: &str) -> Result<(), 
         let Some(entry) = snap.repos.iter_mut().find(|e| e.repo == repo) else {
             return Ok(());
         };
-        entry.last_attempt_at = Some(now);
+        note_poll_attempt(entry, now);
         match result {
             Ok((stats, budget)) => {
                 match icon {
@@ -441,12 +441,21 @@ fn read_main_ci(
     gh.main_ci(repo, &branch, &mut raw.http.runs, now).map(Some)
 }
 
+/// Records a poll of `entry` at `now` and drops the held workflows whose
+/// newest run is older than the Main CI cutoff, whether or not the poll works.
+fn note_poll_attempt(entry: &mut RepoEntry, now: DateTime<Utc>) {
+    entry.last_attempt_at = Some(now);
+    if let Some(ci) = entry.main_ci.as_mut() {
+        craft_github::ci::drop_expired(ci, now);
+    }
+}
+
 /// Stores the outcome of [`read_main_ci`] (`None` when it did not run) in
 /// `entry`. A held result for a branch other than `default_branch` is
-/// dropped first, and so is the held error when the default branch changed
-/// from a known `branch_before`. A failed or skipped read keeps the held result,
-/// without the workflows whose newest run is older than the read's cutoff,
-/// next to the last error.
+/// dropped first, and so is the held error when `default_branch` differs from
+/// `branch_before`, including an unknown one. A failed or skipped read keeps
+/// the held result, without the workflows whose newest run is older than the
+/// read's cutoff, next to the last error.
 fn store_main_ci(
     entry: &mut RepoEntry,
     read: Option<Result<Option<MainCi>, GhError>>,
@@ -462,7 +471,7 @@ fn store_main_ci(
         entry.main_ci = None;
         entry.main_ci_error = None;
     }
-    if branch_before.is_some() && branch_before != default_branch {
+    if branch_before != default_branch {
         entry.main_ci_error = None;
     }
     match read {
@@ -1209,6 +1218,36 @@ mod tests {
     }
 
     #[test]
+    fn a_poll_that_fails_still_drops_expired_main_ci_results() {
+        let now = "2026-10-18T04:20:00Z".parse::<DateTime<Utc>>().unwrap();
+        let ran = |id: u64, days: i64| MainWorkflow {
+            workflow_id: id,
+            runs: vec![MainRun {
+                at: Some(now - CDuration::days(days)),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let mut entry = RepoEntry {
+            repo: "o/r".into(),
+            main_ci: Some(MainCi {
+                workflows: vec![ran(1, 29), ran(2, 31)],
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        note_poll_attempt(&mut entry, now);
+        assert_eq!(entry.last_attempt_at, Some(now));
+        let kept = entry.main_ci.as_ref().map(|c| {
+            c.workflows
+                .iter()
+                .map(|w| w.workflow_id)
+                .collect::<Vec<_>>()
+        });
+        assert_eq!(kept, Some(vec![1]));
+    }
+
+    #[test]
     fn main_ci_keeps_its_result_and_error_for_the_default_branch_only() {
         let on = |branch: &str| MainCi {
             branch: branch.into(),
@@ -1264,6 +1303,12 @@ mod tests {
             "a repo without a default branch keeps no result"
         );
         assert!(entry.main_ci_error.is_some());
+        store_main_ci(&mut entry, forbidden(), main, main, now);
+        store_main_ci(&mut entry, None, None, trunk, now);
+        assert_eq!(
+            entry.main_ci_error, None,
+            "an error is dropped when the raw cache's branch is unknown and differs"
+        );
 
         let ran = |id: u64, days: i64| MainWorkflow {
             workflow_id: id,
