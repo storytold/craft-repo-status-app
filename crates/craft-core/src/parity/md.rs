@@ -218,114 +218,123 @@ impl Doc {
     fn find_tables(&mut self) {
         let mut i = 0;
         while i < self.lines.len() {
-            let head = &self.lines[i];
-            if !head.text.trim_start().starts_with('|') {
+            if !self.lines[i].text.trim_start().starts_with('|') {
                 i += 1;
-                continue;
+            } else if self.lines.get(i + 1).is_some_and(|l| is_separator(&l.text)) {
+                i = self.read_table(i);
+            } else {
+                i = self
+                    .resume_table(i)
+                    .unwrap_or_else(|| self.skip_lone_row(i));
             }
-            if !self.lines.get(i + 1).is_some_and(|l| is_separator(&l.text)) {
-                // Rows right after a table, cut off from it by one stray
-                // line, with the table's number of cells: the table goes on.
-                let width = cells(&head.text).len();
-                let resumes = self.tables.last().filter(|t| {
-                    t.end + 1 == i
-                        && t.header.len() == width
-                        && !self.lines[t.end].text.trim().is_empty()
-                });
-                if resumes.is_some() {
-                    let start = i;
-                    let mut j = i;
-                    let mut rows = Vec::new();
-                    while let Some(line) = self.lines.get(j) {
-                        if !line.text.trim_start().starts_with('|') {
-                            break;
-                        }
-                        if !is_separator(&line.text) {
-                            let raw = cells(&line.text);
-                            rows.push(Row {
-                                line: line.no,
-                                malformed: raw.len() < width,
-                                cells: raw.iter().map(|c| MdCell::new(c)).collect(),
-                            });
-                        }
-                        j += 1;
-                    }
-                    if let Some(t) = self.tables.last_mut() {
-                        t.rows.extend(rows);
-                        t.end = j;
-                    }
-                    self.notes.push(Note::info(
-                        format!(
-                            "table interrupted by line {}; the rows after it are read as the same table",
-                            self.lines[start - 1].no
-                        ),
-                        Src::new(&self.path, self.lines[start].no),
-                    ));
-                    i = j;
-                    continue;
-                }
-                // A header line with no separator under it: not a table.
-                let prev_is_row = i > 0 && self.lines[i - 1].text.trim_start().starts_with('|');
-                if !prev_is_row && !head.excluded && !is_separator(&head.text) {
-                    self.notes.push(Note::info(
-                        "table header without a separator line; not read as a table",
-                        Src::new(&self.path, head.no),
-                    ));
-                }
-                let mut j = i + 1;
-                while self
-                    .lines
-                    .get(j)
-                    .is_some_and(|l| l.text.trim_start().starts_with('|'))
-                {
-                    j += 1;
-                }
-                i = j;
-                continue;
-            }
-            let header = cells(&head.text);
-            let hnorm: Vec<String> = header.iter().map(|h| header_norm(h)).collect();
-            let dated_ok = hnorm
-                .first()
-                .is_some_and(|h| ["date", "revision", "version"].contains(&h.as_str()));
-            let mut rows = Vec::new();
-            let mut j = i + 2;
-            while let Some(line) = self.lines.get(j) {
-                if !line.text.trim_start().starts_with('|') {
-                    break;
-                }
-                if !is_separator(&line.text) {
-                    let raw = cells(&line.text);
-                    let first = raw.first().map(|c| plain(c)).unwrap_or_default();
-                    if !dated_ok && DATE.is_match(first.trim()) {
-                        if !self.lines[i].excluded {
-                            self.notes.push(Note::warn(
-                                "revision row inside table; left out of the data",
-                                Src::new(&self.path, line.no),
-                            ));
-                        }
-                    } else {
-                        rows.push(Row {
-                            line: line.no,
-                            malformed: raw.len() < header.len(),
-                            cells: raw.iter().map(|c| MdCell::new(c)).collect(),
-                        });
-                    }
-                }
-                j += 1;
-            }
-            self.tables.push(Table {
-                line: self.lines[i].no,
-                header,
-                hnorm,
-                rows,
-                section: self.lines[i].section,
-                excluded: self.lines[i].excluded,
-                at: i,
-                end: j,
-            });
-            i = j;
         }
+    }
+
+    /// Reads the rows at line `i` into the table before it when they follow
+    /// that table after one stray line and have its number of cells. It
+    /// returns the line after them, or `None` when they do not continue it.
+    fn resume_table(&mut self, i: usize) -> Option<usize> {
+        let width = cells(&self.lines[i].text).len();
+        let resumes = self.tables.last().filter(|t| {
+            t.end + 1 == i && t.header.len() == width && !self.lines[t.end].text.trim().is_empty()
+        });
+        resumes?;
+        let mut j = i;
+        let mut rows = Vec::new();
+        while let Some(line) = self.lines.get(j) {
+            if !line.text.trim_start().starts_with('|') {
+                break;
+            }
+            if !is_separator(&line.text) {
+                let raw = cells(&line.text);
+                rows.push(Row {
+                    line: line.no,
+                    malformed: raw.len() < width,
+                    cells: raw.iter().map(|c| MdCell::new(c)).collect(),
+                });
+            }
+            j += 1;
+        }
+        if let Some(t) = self.tables.last_mut() {
+            t.rows.extend(rows);
+            t.end = j;
+        }
+        self.notes.push(Note::info(
+            format!(
+                "table interrupted by line {}; the rows after it are read as the same table",
+                self.lines[i - 1].no
+            ),
+            Src::new(&self.path, self.lines[i].no),
+        ));
+        Some(j)
+    }
+
+    /// Skips the row at line `i`, which has no separator under it and so is
+    /// not a table, with a note on its first line. Returns the line after it.
+    fn skip_lone_row(&mut self, i: usize) -> usize {
+        let head = &self.lines[i];
+        let prev_is_row = i > 0 && self.lines[i - 1].text.trim_start().starts_with('|');
+        if !prev_is_row && !head.excluded && !is_separator(&head.text) {
+            self.notes.push(Note::info(
+                "table header without a separator line; not read as a table",
+                Src::new(&self.path, head.no),
+            ));
+        }
+        let mut j = i + 1;
+        while self
+            .lines
+            .get(j)
+            .is_some_and(|l| l.text.trim_start().starts_with('|'))
+        {
+            j += 1;
+        }
+        j
+    }
+
+    /// Reads the table whose header is line `i`. Returns the line after it.
+    fn read_table(&mut self, i: usize) -> usize {
+        let header = cells(&self.lines[i].text);
+        let hnorm: Vec<String> = header.iter().map(|h| header_norm(h)).collect();
+        let dated_ok = hnorm
+            .first()
+            .is_some_and(|h| ["date", "revision", "version"].contains(&h.as_str()));
+        let mut rows = Vec::new();
+        let mut j = i + 2;
+        while let Some(line) = self.lines.get(j) {
+            if !line.text.trim_start().starts_with('|') {
+                break;
+            }
+            if !is_separator(&line.text) {
+                let raw = cells(&line.text);
+                let first = raw.first().map(|c| plain(c)).unwrap_or_default();
+                if !dated_ok && DATE.is_match(first.trim()) {
+                    if !self.lines[i].excluded {
+                        self.notes.push(Note::warn(
+                            "revision row inside table; left out of the data",
+                            Src::new(&self.path, line.no),
+                        ));
+                    }
+                } else {
+                    rows.push(Row {
+                        line: line.no,
+                        malformed: raw.len() < header.len(),
+                        cells: raw.iter().map(|c| MdCell::new(c)).collect(),
+                    });
+                }
+            }
+            j += 1;
+        }
+        self.tables.push(Table {
+            line: self.lines[i].no,
+            header,
+            hnorm,
+            rows,
+            section: self.lines[i].section,
+            excluded: self.lines[i].excluded,
+            at: i,
+            end: j,
+        });
+        j
     }
 
     pub fn src(&self, line: u32) -> Src {
@@ -674,7 +683,7 @@ pub fn contains_word(s: &str, word: &str) -> bool {
     s.match_indices(word).any(|(i, _)| {
         let before = s[..i].chars().next_back();
         let after = s[i + word.len()..].chars().next();
-        !before.is_some_and(|c| c.is_alphanumeric()) && !after.is_some_and(|c| c.is_alphanumeric())
+        !before.is_some_and(char::is_alphanumeric) && !after.is_some_and(char::is_alphanumeric)
     })
 }
 

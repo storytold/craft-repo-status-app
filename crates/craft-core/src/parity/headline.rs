@@ -411,22 +411,26 @@ pub fn headline(out: &mut Parity, rm: Option<&Doc>, tap: Option<&Doc>) {
         }
     }
     if !out.to_alpha.is_ok() {
-        let stage_row = rows.iter().find(|r| r.base == "stage");
-        if let Some(r) = stage_row {
-            let text = plain(r.value);
-            if let Some(c) = STAGE_HOURS
-                .captures(&text)
-                .filter(|_| text.contains("to alpha"))
-            {
-                if let Ok(h) = value::hours(&c[0], "", "") {
-                    out.to_alpha =
-                        Cell::ok(h, Src::new(path, r.line)).from("the headline Stage row");
-                }
-            }
-        }
+        to_alpha_from_stage_row(out, &rows, path);
     }
     to_alpha_from_stage(out);
     audience_hours_note(out, rm);
+}
+
+/// To alpha from the hours in the headline's Stage row.
+fn to_alpha_from_stage_row(out: &mut Parity, rows: &[Row<'_>], path: &str) {
+    let Some(r) = rows.iter().find(|r| r.base == "stage") else {
+        return;
+    };
+    let text = plain(r.value);
+    if let Some(c) = STAGE_HOURS
+        .captures(&text)
+        .filter(|_| text.contains("to alpha"))
+    {
+        if let Ok(h) = value::hours(&c[0], "", "") {
+            out.to_alpha = Cell::ok(h, Src::new(path, r.line)).from("the headline Stage row");
+        }
+    }
 }
 
 /// To alpha from the stage line's alpha step, when the headline has none.

@@ -4,7 +4,7 @@
 //! `--parity` also downloads each repo's parity documents and prints the
 //! numbers read from them, which the snapshot then carries too.
 
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use craft_core::{Cache, Config, Figure, LagBasis, RepoEntry, SharedCache, Snapshot, ALL_TIME};
 use craft_github::{resolve_token, Error, GitHub, RawActivity};
 
@@ -73,81 +73,7 @@ fn main() {
         "total dl", "urg", "crit"
     );
     for repo in &repos {
-        let mut entry = RepoEntry::new(repo);
-        entry.last_attempt_at = Some(now);
-        // Shares the app's raw cache, so either warms it for the other.
-        let raw_dir = Cache::default_location()
-            .ok()
-            .map(|c| c.dir().to_path_buf());
-        let mut raw = raw_dir
-            .as_deref()
-            .map(|d| RawActivity::load(d, repo))
-            .unwrap_or_default();
-        let _lease = shared.lease(LEASE_PATIENCE);
-        match gh.fetch_repo(repo, now, &mut raw, &shared) {
-            Ok((s, budget)) => {
-                if let Some(dir) = &raw_dir {
-                    if let Err(e) = raw.save(dir, repo) {
-                        eprintln!("{repo}: could not save raw cache: {e}");
-                    }
-                }
-                // The table shows the 4-hour window; the snapshot carries them all.
-                let r4 = s.recent.get("4h").copied().unwrap_or_default();
-                let all = s.recent.get(ALL_TIME).copied().unwrap_or_default();
-                let since = s
-                    .since_build
-                    .as_ref()
-                    .map_or("-".into(), |l| match l.basis {
-                        LagBasis::Exact => l.commits.to_string(),
-                        _ => format!("~{}", l.commits),
-                    });
-                println!(
-                    "{:<12} {:>5} {:>6} {:>4} {:>4} {:>4} {:>4} {:>7} {:>5} {:>7} {:>7} {:<12} {:>5} {:>7} {:>8} {:>6} {:>4}",
-                    entry.name(), s.open_prs, s.open_issues, r4.commits, r4.prs_opened, r4.prs_merged, r4.issues_opened,
-                    all.commits, all.people, all.issues_opened, all.prs_opened,
-                    s.latest_build.clone().unwrap_or_default(), since, s.latest_build_downloads,
-                    s.downloads_total, s.urgency, s.critical_issues
-                );
-                for u in s.urgent.iter().take(3) {
-                    println!(
-                        "    {:>4}  #{:<5} {}  [{}]",
-                        u.score,
-                        u.number,
-                        u.title,
-                        u.reasons.join(", ")
-                    );
-                }
-                snap.rate_limit_remaining = budget.graphql_remaining;
-                if let Some(oid) = &s.icon_oid {
-                    match gh.icon(repo, oid) {
-                        Ok(uri) => (entry.icon, entry.icon_oid) = (Some(uri), Some(oid.clone())),
-                        Err(e) => eprintln!("{repo}: icon: {e}"),
-                    }
-                }
-                if parity {
-                    match gh.parity(repo, s.head_oid.as_deref(), &s.parity_oids) {
-                        Ok(p) => {
-                            println!("    breadth  {}", figure(&p.breadth));
-                            println!("    ready    {}", figure(&p.ready));
-                            println!("    reviewed {}", p.last_reviewed.as_deref().unwrap_or("-"));
-                            entry.parity = Some(p);
-                        }
-                        Err(e) => eprintln!("{repo}: parity: {e}"),
-                    }
-                }
-                entry.stats = Some(s);
-                entry.fetched_at = Some(now);
-            }
-            Err(Error::NotFound) => {
-                println!("{:<12} (not accessible)", entry.name());
-                entry.fetched_at = Some(now);
-                entry.inaccessible = true;
-            }
-            Err(e) => {
-                println!("{:<12} ERROR {e}", entry.name());
-                entry.error = Some(e.to_string());
-            }
-        }
+        let entry = fetch_entry(&gh, &shared, repo, now, parity, &mut snap);
         snap.repos.push(entry);
     }
     snap.last_full_refresh_at = Some(Utc::now());
@@ -156,6 +82,94 @@ fn main() {
         std::fs::write(&p, serde_json::to_string_pretty(&snap).unwrap()).unwrap();
         eprintln!("wrote {p}");
     }
+}
+
+/// Fetches `repo`, prints its table row and returns its entry for the
+/// snapshot. `parity` also reads and prints its parity numbers.
+fn fetch_entry(
+    gh: &GitHub,
+    shared: &SharedCache,
+    repo: &str,
+    now: DateTime<Utc>,
+    parity: bool,
+    snap: &mut Snapshot,
+) -> RepoEntry {
+    let mut entry = RepoEntry::new(repo);
+    entry.last_attempt_at = Some(now);
+    // Shares the app's raw cache, so either warms it for the other.
+    let raw_dir = Cache::default_location()
+        .ok()
+        .map(|c| c.dir().to_path_buf());
+    let mut raw = raw_dir
+        .as_deref()
+        .map(|d| RawActivity::load(d, repo))
+        .unwrap_or_default();
+    let _lease = shared.lease(LEASE_PATIENCE);
+    match gh.fetch_repo(repo, now, &mut raw, shared) {
+        Ok((s, budget)) => {
+            if let Some(dir) = &raw_dir {
+                if let Err(e) = raw.save(dir, repo) {
+                    eprintln!("{repo}: could not save raw cache: {e}");
+                }
+            }
+            // The table shows the 4-hour window; the snapshot carries them all.
+            let r4 = s.recent.get("4h").copied().unwrap_or_default();
+            let all = s.recent.get(ALL_TIME).copied().unwrap_or_default();
+            let since = s
+                .since_build
+                .as_ref()
+                .map_or("-".into(), |l| match l.basis {
+                    LagBasis::Exact => l.commits.to_string(),
+                    _ => format!("~{}", l.commits),
+                });
+            println!(
+                "{:<12} {:>5} {:>6} {:>4} {:>4} {:>4} {:>4} {:>7} {:>5} {:>7} {:>7} {:<12} {:>5} {:>7} {:>8} {:>6} {:>4}",
+                entry.name(), s.open_prs, s.open_issues, r4.commits, r4.prs_opened, r4.prs_merged, r4.issues_opened,
+                all.commits, all.people, all.issues_opened, all.prs_opened,
+                s.latest_build.clone().unwrap_or_default(), since, s.latest_build_downloads,
+                s.downloads_total, s.urgency, s.critical_issues
+            );
+            for u in s.urgent.iter().take(3) {
+                println!(
+                    "    {:>4}  #{:<5} {}  [{}]",
+                    u.score,
+                    u.number,
+                    u.title,
+                    u.reasons.join(", ")
+                );
+            }
+            snap.rate_limit_remaining = budget.graphql_remaining;
+            if let Some(oid) = &s.icon_oid {
+                match gh.icon(repo, oid) {
+                    Ok(uri) => (entry.icon, entry.icon_oid) = (Some(uri), Some(oid.clone())),
+                    Err(e) => eprintln!("{repo}: icon: {e}"),
+                }
+            }
+            if parity {
+                match gh.parity(repo, s.head_oid.as_deref(), &s.parity_oids) {
+                    Ok(p) => {
+                        println!("    breadth  {}", figure(&p.breadth));
+                        println!("    ready    {}", figure(&p.ready));
+                        println!("    reviewed {}", p.last_reviewed.as_deref().unwrap_or("-"));
+                        entry.parity = Some(p);
+                    }
+                    Err(e) => eprintln!("{repo}: parity: {e}"),
+                }
+            }
+            entry.stats = Some(s);
+            entry.fetched_at = Some(now);
+        }
+        Err(Error::NotFound) => {
+            println!("{:<12} (not accessible)", entry.name());
+            entry.fetched_at = Some(now);
+            entry.inaccessible = true;
+        }
+        Err(e) => {
+            println!("{:<12} ERROR {e}", entry.name());
+            entry.error = Some(e.to_string());
+        }
+    }
+    entry
 }
 
 #[cfg(test)]
