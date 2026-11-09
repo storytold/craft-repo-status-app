@@ -132,12 +132,16 @@ export function start(api: Api, prRoute?: Route): () => void {
   function cell(entry: RepoEntry, col: Column, now: number): Node {
     const v = value(entry, col.key, state.window);
     const text = displayValue(entry, col.key, state.window, now);
-    const s = entry.stats;
     if (col.key === 'name') {
       return el('span', { class: 'repo', title: repoTip(entry) }, el('span', { class: 'dot' }), appIcon(entry), link(text, gh(entry.repo)), thirdPartyTag(entry.repo));
     }
     if (col.key === 'category') return el('span', { class: v ? 'category' : 'muted' }, text);
-    if (!s) return entry.inaccessible ? document.createTextNode(text) : el('span', { class: 'muted' }, text);
+    if (!entry.stats) return entry.inaccessible ? document.createTextNode(text) : el('span', { class: 'muted' }, text);
+    return statsCell(entry, entry.stats, col, v, text, now);
+  }
+
+  /** A column's cell for a repo that has stats; `text` is the cell's shown text. */
+  function statsCell(entry: RepoEntry, s: RepoStats, col: Column, v: Value, text: string, now: number): Node {
     switch (col.key) {
       case 'urgency': {
         const a = Math.min(1, Number(v) / 350) * 0.45;

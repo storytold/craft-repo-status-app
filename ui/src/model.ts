@@ -476,12 +476,16 @@ export const formatNum = (n: Value | undefined): string => Number(n ?? 0).toLoca
  */
 export function displayValue(entry: RepoEntry, key: string, window: string, now: number): string {
   const v = value(entry, key, window);
-  const s = entry.stats;
   const col = COLUMN[key];
   if (key === 'name') return String(v);
   if (col?.kind === 'age') return v ? ago(String(v), now) : '—';
   if (key === 'category') return v ? String(v) : '—';
-  if (!s) return entry.inaccessible ? '' : '—';
+  if (!entry.stats) return entry.inaccessible ? '' : '—';
+  return statsText(entry.stats, key, v, col, now);
+}
+
+/** {@link displayValue}'s text for a column that needs the repo's stats. */
+function statsText(s: RepoStats, key: string, v: Value, col: Column | undefined, now: number): string {
   switch (key) {
     case 'urgency': return String(Math.round(Number(v)));
     case 'latest_build_rate': return v === null ? '—' : formatRate(Number(v));
