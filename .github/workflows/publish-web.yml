@@ -72,7 +72,8 @@ jobs:
           if [ -f ui/dev-snapshot.json ]; then
             cp ui/dev-snapshot.json _site/
           else
-            echo "{}" > _site/dev-snapshot.json
+            # The UI reads snap.repos: an empty snapshot with every field it expects, not `{}`
+            echo '{"repos":[],"last_full_refresh_at":null,"refreshing":false,"next_refresh_at":null,"poll_secs":300,"stale_after_secs":300,"rate_limit_remaining":null,"error":null,"token":null}' > _site/dev-snapshot.json
           fi
           cp -R ui/build _site/build
 
