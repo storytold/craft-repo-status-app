@@ -1038,7 +1038,9 @@ export function startPrs(api: Api, initial: Route = { view: 'apps' }): PrTab {
   function closesCard(pr: PrFull, d: NonNullable<PrFull['detail']>): HTMLElement | null {
     if (!d.linked_issues.length) return null;
     return el('section', { class: 'card' }, el('h2', {}, 'Closes'),
-      el('ul', { class: 'rows' }, d.linked_issues.map((i) => el('li', {}, ghLink(`#${i.number} ${i.title}`, `https://github.com/${pr.repo}/issues/${i.number}`, 'name')))));
+      el('ul', { class: 'rows' }, d.linked_issues.map((i) => el('li', {}, i.repository
+        ? ghLink(`${i.repository}#${i.number} ${i.title}`, `https://github.com/${i.repository}/issues/${i.number}`, 'name')
+        : el('span', {}, `#${i.number} ${i.title}`)))));
   }
 
   function renderPr(): void {
