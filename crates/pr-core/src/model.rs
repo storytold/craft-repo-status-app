@@ -89,6 +89,7 @@ pub struct Comment {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 #[serde(default)]
 pub struct LinkedIssue {
+    pub repository: String,
     pub number: u64,
     pub title: String,
 }
@@ -366,4 +367,33 @@ pub struct Spend {
     pub cost: u64,
     pub remaining: Option<u64>,
     pub reset_at: Option<Time>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cached_linked_issues_refresh_without_hiding_current_checks() {
+        let mut pr = Pr {
+            id: "node".into(),
+            detail: Some(PrDetail {
+                checks: vec![Check {
+                    name: "tests".into(),
+                    state: "SUCCESS".into(),
+                    ..Default::default()
+                }],
+                linked_issues: serde_json::from_str(r#"[{"number":42,"title":"Old cache"}]"#)
+                    .unwrap(),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        assert!(pr.current_detail().is_some());
+        assert_eq!(crate::assess::ci_state(&pr), "success");
+        assert!(crate::schedule::detail_priority(&pr, chrono::Utc::now()).is_some());
+        pr.detail.as_mut().unwrap().linked_issues[0].repository = "o/r".into();
+        assert!(pr.current_detail().is_some());
+        assert!(crate::schedule::detail_priority(&pr, chrono::Utc::now()).is_none());
+    }
 }

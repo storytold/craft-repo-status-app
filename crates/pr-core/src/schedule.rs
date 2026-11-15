@@ -62,7 +62,11 @@ fn older_than(t: Option<Time>, secs: i64, now: Time) -> bool {
 /// How much a PR's detail is worth fetching next. Higher is sooner; `None` if
 /// it's current or recently failed.
 pub fn detail_priority(pr: &Pr, now: Time) -> Option<i32> {
-    if pr.current_detail().is_some() || pr.id.is_empty() {
+    if pr.id.is_empty()
+        || pr
+            .current_detail()
+            .is_some_and(|d| d.linked_issues.iter().all(|i| !i.repository.is_empty()))
+    {
         return None;
     }
     if pr
