@@ -385,6 +385,14 @@ test('refresh targets what is on screen', async () => {
   await tick();
   (h.$('#refresh') as HTMLElement).click();
   assert.deepEqual(h.calls.at(-1), { cmd: 'refresh_pr_repo', args: { repo: 'o/alpha' } });
+  (h.$('[data-pane="issues"]') as HTMLElement).click();
+  (h.$('#refresh') as HTMLElement).click();
+  assert.deepEqual(h.calls.at(-1), { cmd: 'refresh_repo', args: { repo: 'o/alpha' } });
+  h.key('r', { ctrlKey: true });
+  assert.deepEqual(h.calls.at(-1), { cmd: 'refresh_repo', args: { repo: 'o/alpha' } });
+  (h.$('[data-pane="prs"]') as HTMLElement).click();
+  (h.$('#refresh') as HTMLElement).click();
+  assert.deepEqual(h.calls.at(-1), { cmd: 'refresh_pr_repo', args: { repo: 'o/alpha' } });
   (h.$('tr[data-number="1"]') as HTMLElement).click();
   await tick();
   (h.$('#refresh') as HTMLElement).click();
