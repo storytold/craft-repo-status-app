@@ -27,6 +27,7 @@ use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
 
 use pr::PrReview;
 
+mod added;
 mod pr;
 mod shrink;
 
@@ -51,6 +52,8 @@ const BACKOFF_MAX: i64 = 60 * 60;
 /// Below this many GraphQL points left, pause for `LOW_BUDGET_PAUSE`.
 const BUDGET_FLOOR: u64 = 150;
 const LOW_BUDGET_PAUSE: i64 = 30 * 60;
+/// Below this many GraphQL points left, skip requests nobody asked for.
+const OPTIONAL_FLOOR: u64 = 1_500;
 /// How long to wait for the PR poller to finish talking to GitHub (it gives way
 /// between requests) before going ahead anyway: this poller is never starved.
 const LEASE_PATIENCE: Duration = Duration::from_secs(180);
@@ -530,8 +533,10 @@ fn spawn_poller(app: AppHandle, rx: mpsc::Receiver<Wake>) {
         .spawn(move || {
             let mut pacing = Pacing::default();
             let mut last_manual: Option<DateTime<Utc>> = None;
+            let mut found = added::Found::default();
             loop {
                 reload_config_if_changed(&app);
+                added::discover(&app, &mut pacing, &mut found);
                 step(&app, &mut pacing);
                 // Staleness changes with the clock alone.
                 update_tray(&app);
@@ -968,6 +973,8 @@ pub fn run() {
             hide_window,
             log,
             quit,
+            added::keep_repo,
+            added::hide_repo,
             pr::get_pr_overview,
             pr::get_pr_repo,
             pr::get_pr_queue,
