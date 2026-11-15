@@ -216,8 +216,9 @@ export function backlog(entry: RepoEntry): number | null {
   return typeof prs === 'number' && commits !== null ? prBacklog(prs, commits) : null;
 }
 
-/** A ratio with two significant decimals when small: 0.33, 2.5, 12. */
+/** Positive ratios below 0.01 use a threshold; other ratios use at most two decimal places. */
 export function formatRatio(v: number): string {
+  if (v > 0 && v < 0.01) return '<0.01';
   if (v >= 10) return String(Math.round(v));
   return String(Number(v.toFixed(v >= 1 ? 1 : 2)));
 }
@@ -475,9 +476,11 @@ export function totals(entries: readonly RepoEntry[], window: string = DEFAULT_W
   }
   // The table's backlog: every known row's open PRs over its unreleased commits.
   const known = entries.filter((e) => backlog(e) !== null);
-  out.pr_backlog = prBacklog(
-    known.reduce((sum, e) => sum + (e.stats?.open_prs ?? 0), 0),
-    known.reduce((sum, e) => sum + (unreleased(e) ?? 0), 0),
-  );
+  if (known.length) {
+    out.pr_backlog = prBacklog(
+      known.reduce((sum, e) => sum + (e.stats?.open_prs ?? 0), 0),
+      known.reduce((sum, e) => sum + (unreleased(e) ?? 0), 0),
+    );
+  }
   return out;
 }
