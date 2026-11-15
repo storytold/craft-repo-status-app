@@ -89,6 +89,7 @@ pub struct Comment {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 #[serde(default)]
 pub struct LinkedIssue {
+    pub repository: String,
     pub number: u64,
     pub title: String,
 }
@@ -197,9 +198,11 @@ pub struct Pr {
 impl Pr {
     /// The detail, if it describes the PR as last listed.
     pub fn current_detail(&self) -> Option<&PrDetail> {
-        self.detail
-            .as_ref()
-            .filter(|d| d.for_head == self.head_oid && d.for_updated_at >= self.updated_at)
+        self.detail.as_ref().filter(|d| {
+            d.for_head == self.head_oid
+                && d.for_updated_at >= self.updated_at
+                && d.linked_issues.iter().all(|i| !i.repository.is_empty())
+        })
     }
 
     pub fn analysis_is_current(&self) -> bool {
@@ -366,4 +369,26 @@ pub struct Spend {
     pub cost: u64,
     pub remaining: Option<u64>,
     pub reset_at: Option<Time>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cached_linked_issues_without_repository_need_refresh() {
+        let mut pr = Pr {
+            id: "node".into(),
+            detail: Some(PrDetail {
+                linked_issues: serde_json::from_str(r#"[{"number":42,"title":"Old cache"}]"#)
+                    .unwrap(),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        assert!(pr.current_detail().is_none());
+        assert!(crate::schedule::detail_priority(&pr, chrono::Utc::now()).is_some());
+        pr.detail.as_mut().unwrap().linked_issues[0].repository = "o/r".into();
+        assert!(pr.current_detail().is_some());
+    }
 }
