@@ -1,0 +1,27 @@
+name: Core model tests
+
+# A focused library gate, not a full desktop/frontend validation.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: core-tests-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  core-tests:
+    uses: storytold/craft-common-actions/.github/workflows/gate.yml@5b4eeb23235b9457c926c91d1228a32f7492eb2c
+    with:
+      command: cargo test -p craft-core --locked
+      craft-fonts-ref: ""
+      require-craft-fonts: false
+      targets: ""
+      tools: ""
+      free-disk-space: false
+      timeout-minutes: 30
