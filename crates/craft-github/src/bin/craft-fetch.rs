@@ -52,7 +52,7 @@ fn main() {
             .map(|d| RawActivity::load(d, repo))
             .unwrap_or_default();
         let _lease = shared.lease(LEASE_PATIENCE);
-        match gh.fetch_repo(repo, now, &mut raw, &shared) {
+        match gh.fetch_repo(repo, now, &mut raw, &shared, None) {
             Ok((s, budget)) => {
                 if let Some(dir) = &raw_dir {
                     if let Err(e) = raw.save(dir, repo) {
