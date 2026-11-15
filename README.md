@@ -326,6 +326,7 @@ Prerequisites:
 - Node.js 24+, then `npm ci` (the UI's TypeScript compiler and test DOM)
 - `cargo install tauri-cli --version "^2"`
 - Xcode CLT on macOS
+- On Linux: `webkit2gtk-4.1` and `libayatana-appindicator` (Arch package names)
 - `gh auth login`, or a token in the config
 - Claude Code, for the PR tab's Claude features
 
@@ -339,6 +340,13 @@ make snapshot   # fetch once, print a table, write ui/dev-snapshot.json
 make dump       # write the cached PR views to ui/dev-data.json, fetching nothing
 make preview    # serve ui/ in a browser against both (no Tauri needed)
 ```
+
+On Linux, `make install` puts the binary in `~/.local/bin`, adds a `.desktop`
+entry (menu + `~/.config/autostart`) and launches it; `make uninstall` removes
+them. `make bundle` is macOS-only; `make build` gives an AppImage, .deb or .rpm. The app sets
+`WEBKIT_DMABUF_RENDERER_FORCE_SHM=1` at startup, because WebKitGTK's GPU
+buffers crash or half-paint the transparent window on some Wayland setups
+(seen on NVIDIA).
 
 To start the app at login, `make install` adds
 `~/Library/LaunchAgents/ai.storyteller.craft-status.plist`. Don't run a separate Craft
