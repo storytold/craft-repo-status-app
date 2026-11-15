@@ -72,6 +72,11 @@ pub struct Config {
     pub repos: Vec<String>,
     pub poll_minutes: f64,
     pub stale_minutes: f64,
+    /// The Parity tab marks a repo's documents amber when the oldest Last
+    /// reviewed date is more than this many days old (1 to 365; any other
+    /// value is a config error).
+    #[serde(deserialize_with = "warn_days")]
+    pub parity_review_warn_days: u32,
     /// Optional, used only when `CRAFT_STATUS_GITHUB_TOKEN`, `GITHUB_TOKEN`
     /// and `GH_TOKEN` are unset; otherwise `gh auth token`.
     pub github_token: String,
@@ -136,6 +141,7 @@ impl Default for Config {
             repos: DEFAULT_REPOS.iter().map(|(r, _)| r.to_string()).collect(),
             poll_minutes: 30.0,
             stale_minutes: 60.0,
+            parity_review_warn_days: 14,
             github_token: String::new(),
             window: WindowConfig::default(),
             tray: TrayConfig::default(),
@@ -192,6 +198,18 @@ pub fn normalize_repo(s: &str) -> Option<String> {
                 .all(|c| c.is_ascii_alphanumeric() || "-_.".contains(c))
     };
     (ok(owner) && ok(name)).then(|| format!("{owner}/{name}"))
+}
+
+/// `parity_review_warn_days`, which must be 1 to 365.
+fn warn_days<'de, D: serde::Deserializer<'de>>(d: D) -> std::result::Result<u32, D::Error> {
+    let days = u32::deserialize(d)?;
+    if (1..=365).contains(&days) {
+        Ok(days)
+    } else {
+        Err(serde::de::Error::custom(format!(
+            "parity_review_warn_days must be 1 to 365, not {days}"
+        )))
+    }
 }
 
 impl Config {
@@ -318,6 +336,27 @@ mod tests {
     #[test]
     fn empty_file_is_defaults() {
         assert_eq!(Config::parse("").unwrap(), Config::default());
+    }
+
+    #[test]
+    fn the_parity_review_warning_must_be_between_a_day_and_a_year() {
+        let days = |text: &str| Config::parse(text).unwrap().parity_review_warn_days;
+        assert_eq!(days(""), 14, "an omitted value takes the default");
+        assert_eq!(days("parity_review_warn_days = 1"), 1);
+        assert_eq!(days("parity_review_warn_days = 30"), 30);
+        assert_eq!(days("parity_review_warn_days = 365"), 365);
+        for bad in ["0", "366", "1000", "-1", "\"14\""] {
+            let text = format!("parity_review_warn_days = {bad}");
+            match Config::parse(&text) {
+                Err(Error::Toml(e)) => {
+                    assert!(
+                        e.to_string().contains("parity_review_warn_days"),
+                        "{bad}: {e}"
+                    )
+                }
+                other => panic!("{bad}: expected a config error, got {other:?}"),
+            }
+        }
     }
 
     #[test]
