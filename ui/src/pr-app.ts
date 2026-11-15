@@ -455,7 +455,7 @@ export function startPrs(api: Api, initial: Route = { view: 'apps' }): PrTab {
       state.queue = await api.invoke<PrRow[]>('get_pr_queue');
       if (route === state.route && state.active) renderPrPage('queue');
     } else if (route.view === 'repo') {
-      state.repoView = await api.invoke<RepoView | null>('get_pr_repo', { repo: route.repo });
+      state.repoView = await api.invoke<RepoView | null>('get_pr_repo', { repo: repoName(route.repo) });
       if (route === state.route && state.active) renderRepo(route.repo);
     } else {
       const pr = await api.invoke<PrFull | null>('get_pr', { repo: route.repo, number: route.number });
@@ -886,9 +886,14 @@ export function startPrs(api: Api, initial: Route = { view: 'apps' }): PrTab {
     },
   }, label, el('span', { class: 'badge' }, compact(n)));
 
+  /** GitHub repository names match without regard to letter case. */
+  const sameRepo = (a: string, b: string): boolean => a.toLowerCase() === b.toLowerCase();
+
+  const repoIssues = (repo: string): IssueRow[] => (state.overview?.issues ?? []).filter((i) => sameRepo(i.repo, repo));
+
   /** Switches a reviewed repo's page between its PRs and its issues. */
   function paneSwitch(repo: string): Node[] {
-    const issues = (state.overview?.issues ?? []).filter((i) => i.repo === repo);
+    const issues = repoIssues(repo);
     return [
       paneButton('prs', 'PRs', state.repoView?.prs.length ?? 0, repo),
       paneButton('issues', 'Issues', issues.length, repo),
@@ -896,17 +901,23 @@ export function startPrs(api: Api, initial: Route = { view: 'apps' }): PrTab {
     ];
   }
 
+  const reviewedRepo = (repo: string): boolean =>
+    state.overview?.repos.some((r) => sameRepo(r.repo, repo)) ?? false;
+
+  /** The reviewed repository's name as the host spells it, or `repo` unchanged when none matches. */
+  const repoName = (repo: string): string => state.overview?.repos.find((r) => sameRepo(r.repo, repo))?.repo ?? repo;
+
   function renderRepoIssues(repo: string): void {
-    const rows = (state.overview?.issues ?? []).filter((i) => i.repo === repo);
-    const controls: Node[] = state.repoView
+    const rows = repoIssues(repo);
+    const controls: Node[] = reviewedRepo(repo)
       ? paneSwitch(repo)
-      : [el('span', { class: 'hint' }, 'Third-party repo: its issues are here, but its PRs aren\'t fetched or reviewed.')];
+      : [el('span', { class: 'hint' }, 'The app shows this repository\'s issues, but its PRs aren\'t fetched or reviewed.')];
     renderIssueList([...controls, criticalToggle(() => renderRepoIssues(repo))], rows, false, 'repo', 'No urgent issues.');
   }
 
-  /** A repo's page. A repo without a PR view (a third party's) has only its issues. */
+  /** Each reviewed repository has PR and Issues panes. */
   function renderRepo(repo: string): void {
-    if (state.repoView && state.repoPane === 'prs') renderPrPage('repo');
+    if (reviewedRepo(repo) && state.repoPane === 'prs') renderPrPage('repo');
     else renderRepoIssues(repo);
   }
 
@@ -1080,7 +1091,8 @@ export function startPrs(api: Api, initial: Route = { view: 'apps' }): PrTab {
     if (r.view === 'issues') void api.invoke('refresh_now');
     else if (r.view === 'repo') {
       // A third party's page only has what the status poller fetches.
-      void api.invoke(state.repoView ? 'refresh_pr_repo' : 'refresh_repo', { repo: r.repo });
+      if (reviewedRepo(r.repo) && state.repoPane === 'prs') void api.invoke('refresh_pr_repo', { repo: repoName(r.repo) });
+      else void api.invoke('refresh_repo', { repo: repoName(r.repo) });
     } else if (r.view === 'pr') void api.invoke('refresh_pr', { repo: r.repo, number: r.number });
     else void api.invoke('refresh_prs');
   };

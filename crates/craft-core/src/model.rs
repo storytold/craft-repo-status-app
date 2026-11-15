@@ -247,15 +247,23 @@ impl Snapshot {
     }
 
     /// Queue `repo` to be fetched on its own, ahead of the schedule. False if
-    /// it isn't configured, or is already queued or being fetched.
+    /// it isn't configured, or is already queued or being fetched. The name
+    /// matches in either letter case and is queued as the snapshot spells it.
     pub fn request(&mut self, repo: &str) -> bool {
-        let known = self.repos.iter().any(|e| e.repo == repo);
+        let Some(repo) = self
+            .repos
+            .iter()
+            .find(|e| e.repo.eq_ignore_ascii_case(repo))
+            .map(|e| e.repo.clone())
+        else {
+            return false;
+        };
         let pending =
-            self.fetching.as_deref() == Some(repo) || self.requested.iter().any(|r| r == repo);
-        if !known || pending {
+            self.fetching.as_deref() == Some(repo.as_str()) || self.requested.contains(&repo);
+        if pending {
             return false;
         }
-        self.requested.push(repo.to_string());
+        self.requested.push(repo);
         true
     }
 
@@ -428,6 +436,18 @@ mod tests {
             "o/c left the config"
         );
         assert_eq!(s.take_requested(), None);
+    }
+
+    #[test]
+    fn a_hand_refresh_matches_the_cached_spelling_in_either_letter_case() {
+        let mut s = Snapshot::default();
+        s.sync_repos(&["o/alpha".into()]);
+        s.sync_repos(&["O/Alpha".into()]);
+        assert!(s.request("O/Alpha"));
+        assert!(!s.request("o/ALPHA"), "already queued");
+        assert_eq!(s.take_requested().as_deref(), Some("o/alpha"));
+        s.fetching = Some("o/alpha".into());
+        assert!(!s.request("O/ALPHA"), "being fetched");
     }
 
     #[test]
