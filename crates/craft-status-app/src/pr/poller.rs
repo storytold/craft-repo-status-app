@@ -11,7 +11,7 @@ use craft_core::SharedCache;
 use pr_core::schedule::{budget_exhausted, detail_backlog, next_job, Job, SchedInput};
 use pr_core::store::refresh_groups;
 use pr_core::{
-    views, ClaudeConfig, Config, DetailRef, Pr, PrState, RepoData, Spend, StatusFacts, Time,
+    views, ClaudeConfig, Config, DetailRef, Pr, PrState, RepoData, Spend, StatusFacts, Store, Time,
 };
 use pr_github::{resolve_token, Error as GhError, GitHub};
 use serde::Serialize;
@@ -600,12 +600,21 @@ fn next_batch(
     batch_size: usize,
 ) -> Option<ClaudeJob> {
     let store = state.store.lock().unwrap();
+    batch_from_store(&store, cfg, repos, batch_size)
+}
+
+fn batch_from_store(
+    store: &Store,
+    cfg: &Config,
+    repos: &[String],
+    batch_size: usize,
+) -> Option<ClaudeJob> {
     // The best candidate's score, its repo, and that repo's (score, number)s.
     type Best = (i32, String, Vec<(i32, u64)>);
     let mut best: Option<Best> = None;
     for repo in repos {
         let Some(view) =
-            views::repo_view(&store, repo, repos, cfg, &pr_core::StatusFacts::default())
+            views::repo_view(store, repo, repos, cfg, &pr_core::StatusFacts::default())
         else {
             continue;
         };
@@ -613,6 +622,12 @@ fn next_batch(
             .prs
             .iter()
             .filter(|r| r.inspected && !r.analysed && r.state != PrState::Draft)
+            .filter(|r| {
+                store
+                    .pr(repo, r.number)
+                    .and_then(Pr::current_detail)
+                    .is_some_and(|d| d.linked_issues.iter().all(|i| !i.repository.is_empty()))
+            })
             .map(|r| (r.focus, r.number))
             .collect();
         cands.sort_by_key(|(f, _)| std::cmp::Reverse(*f));
@@ -913,6 +928,47 @@ pub fn spawn_claude(app: AppHandle, rx: mpsc::Receiver<()>) {
 mod tests {
     use super::*;
     use pr_core::{Analysis, ClaudeGroup};
+
+    #[test]
+    fn analysis_waits_for_legacy_issue_repositories() {
+        let missing = std::env::temp_dir().join(format!(
+            "craft-analysis-test-{}-{}",
+            std::process::id(),
+            Utc::now().timestamp_nanos_opt().unwrap()
+        ));
+        let mut store = Store::load(&missing);
+        store.repo_mut("o/r").prs.insert(
+            1,
+            Pr {
+                number: 1,
+                detail: Some(pr_core::PrDetail {
+                    linked_issues: vec![pr_core::LinkedIssue {
+                        number: 42,
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+        );
+        let cfg = Config::default();
+        let repos = ["o/r".to_string()];
+        assert!(batch_from_store(&store, &cfg, &repos, 5).is_none());
+        store
+            .repo_mut("o/r")
+            .prs
+            .get_mut(&1)
+            .unwrap()
+            .detail
+            .as_mut()
+            .unwrap()
+            .linked_issues[0]
+            .repository = "other/repo".into();
+        assert!(matches!(
+            batch_from_store(&store, &cfg, &repos, 5),
+            Some(ClaudeJob::Batch { numbers, .. }) if numbers == vec![1]
+        ));
+    }
 
     #[test]
     fn rate_limits_end_when_github_says() {
