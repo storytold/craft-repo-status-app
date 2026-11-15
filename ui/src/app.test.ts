@@ -238,6 +238,36 @@ test('clicking a row, or barely moving it, opens its repo on the PR tab', async 
   assert.equal(stored(h, 'order'), null, 'a click is not a reorder');
 });
 
+test('links are anchors the keyboard can reach, and opening one leaves the window where it is', async () => {
+  const h = await setup();
+  const link = h.row('gamma').querySelector<HTMLAnchorElement>('.repo .link')!;
+  assert.equal(link.tagName, 'A');
+  assert.equal(link.getAttribute('href'), 'https://github.com/o/gamma');
+  const click = new h.win.MouseEvent('click', { bubbles: true, cancelable: true }) as unknown as Event;
+  link.dispatchEvent(click);
+  assert.ok(click.defaultPrevented, 'the host opens the URL, not the webview');
+  const middle = new h.win.MouseEvent('auxclick', { bubbles: true, cancelable: true, button: 1 }) as unknown as Event;
+  link.dispatchEvent(middle);
+  assert.ok(middle.defaultPrevented, 'a middle click opens no second window');
+  const menu = new h.win.MouseEvent('contextmenu', { bubbles: true, cancelable: true, button: 2 }) as unknown as Event;
+  link.dispatchEvent(menu);
+  assert.ok(menu.defaultPrevented, 'a right click shows no menu whose Open Link would load the page in the window');
+  const enter = new h.win.KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }) as unknown as Event;
+  link.dispatchEvent(enter);
+  assert.ok(!enter.defaultPrevented, 'Enter keeps the link’s own activation');
+  assert.equal(h.view(), 'repos');
+  assert.deepEqual(h.calls.filter((c) => c.cmd === 'open_url').map((c) => c.args?.url),
+    ['https://github.com/o/gamma', 'https://github.com/o/gamma'], 'the click and the middle click both open it through the host');
+});
+
+test('links whose text is a count are named for their repo and destination', async () => {
+  const h = await setup();
+  const at = (key: string) => h.row('gamma').cells[COLUMNS.findIndex((c) => c.key === key)]!.querySelector('.link')!;
+  assert.equal(at('open_prs').textContent, '1');
+  assert.equal(at('open_prs').getAttribute('aria-label'), '1 open pull requests in o/gamma');
+  assert.equal(at('open_issues').getAttribute('aria-label'), '2 open issues in o/gamma');
+});
+
 test('links in a row open on GitHub without dragging or switching views', async () => {
   const h = await setup();
   const link = h.row('gamma').querySelector<HTMLElement>('.repo .link')!;
@@ -363,6 +393,54 @@ test('status pill, failures banner and budget', async () => {
   assert.equal(banner.hidden, true);
   h.emit('craft:snapshot', snapshot());
   assert.equal(h.doc.getElementById('fresh-pill')!.textContent, 'FRESH');
+});
+
+test('a re-render keeps the keyboard focus on the same link, or moves it to the nearest one left', async () => {
+  const h = await setup();
+  const focused = () => h.doc.activeElement as HTMLElement | null;
+  const link = h.row('gamma').querySelector<HTMLElement>('.repo .link')!;
+  link.focus();
+  h.emit('craft:snapshot', snapshot());
+  assert.notEqual(focused(), link, 'the row was rebuilt');
+  assert.equal(focused()?.getAttribute('href'), 'https://github.com/o/gamma');
+  h.emit('craft:snapshot', snapshot([repo('alpha', { urgency: 100 }), repo('beta', { urgency: 300 })]));
+  assert.equal(focused()?.closest('tr')?.dataset.repo, 'o/alpha');
+  assert.equal(focused()?.getAttribute('href'), 'https://github.com/o/alpha');
+});
+
+test('a re-render keeps the keyboard focus on a row’s refresh button, not the row’s first link', async () => {
+  const h = await setup();
+  const button = h.row('gamma').querySelector<HTMLButtonElement>('.row-refresh')!;
+  button.focus();
+  h.emit('craft:snapshot', snapshot());
+  const focused = h.doc.activeElement as HTMLElement | null;
+  assert.notEqual(focused, button, 'the row was rebuilt');
+  assert.ok(focused?.classList.contains('row-refresh'));
+  assert.equal(focused?.closest('tr')?.dataset.repo, 'o/gamma');
+});
+
+test('when the table has nothing left to focus, the focus moves to the refresh button', async () => {
+  const h = await setup();
+  h.row('gamma').querySelector<HTMLElement>('.repo .link')!.focus();
+  h.emit('craft:snapshot', snapshot([]));
+  assert.equal(h.doc.activeElement, h.doc.getElementById('refresh'));
+});
+
+test('a re-render keeps a focused link that was in view in view, and leaves one scrolled away alone', async () => {
+  const h = await setup();
+  const proto = h.win.HTMLAnchorElement.prototype as unknown as HTMLElement;
+  let linkTop = 10;
+  h.doc.getElementById('repos-view')!.getBoundingClientRect = () => ({ top: 0, bottom: 100, left: 0, right: 100 }) as DOMRect;
+  proto.getBoundingClientRect = () => ({ top: linkTop, bottom: linkTop + 10, left: 0, right: 10 }) as DOMRect;
+  const scrolled: [boolean, ScrollIntoViewOptions | undefined][] = [];
+  proto.scrollIntoView = function (this: Element, o?: ScrollIntoViewOptions) { scrolled.push([this === h.doc.activeElement, o]); };
+  h.row('gamma').querySelector<HTMLElement>('.repo .link')!.focus();
+  h.emit('craft:snapshot', snapshot());
+  assert.deepEqual(scrolled, [[true, { block: 'nearest', inline: 'nearest' }]]);
+  linkTop = 500;
+  h.emit('craft:snapshot', snapshot());
+  assert.equal(scrolled.length, 1, 'the user scrolled the focused link away');
+  assert.equal(h.doc.activeElement?.getAttribute('href'), 'https://github.com/o/gamma');
 });
 
 // ───────────────────────────── host ─────────────────────────────
