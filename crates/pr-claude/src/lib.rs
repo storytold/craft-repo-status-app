@@ -244,12 +244,16 @@ pub fn pr_block(pr: &Pr, diff: Option<(&str, bool)>) -> String {
         s += &format!("labels: {}\n", pr.labels.join(", "));
     }
     if let Some(d) = &pr.detail {
-        if !d.linked_issues.is_empty() {
-            let issues: Vec<String> = d
-                .linked_issues
-                .iter()
-                .map(|i| format!("{}#{} {}", i.repository, i.number, i.title))
-                .collect();
+        // Closing references count only from detail fetched for the current head.
+        let issues: Vec<String> = pr
+            .current_detail()
+            .map(|c| c.linked_issues.as_slice())
+            .unwrap_or_default()
+            .iter()
+            .filter(|i| !i.repository.is_empty())
+            .map(|i| format!("{}#{} {}", i.repository, i.number, i.title))
+            .collect();
+        if !issues.is_empty() {
             s += &format!("closes: {}\n", issues.join("; "));
         }
         if !d.body.is_empty() {
@@ -565,6 +569,7 @@ mod tests {
             changed_files: 1,
             association: "CONTRIBUTOR".into(),
             detail: Some(PrDetail {
+                for_head: "h".into(),
                 body: "Why".into(),
                 files_total: 1,
                 files: vec![pr_core::FileChange {
@@ -615,6 +620,26 @@ mod tests {
         assert!(!s.contains("Fixed"), "resolved findings stay out");
         assert!(pr_block(&p, Some(("+x", false))).contains("diff:\n+x"));
         assert!(pr_block(&p, Some(("+x", true))).contains("cut off"));
+    }
+
+    #[test]
+    fn closes_line_needs_current_detail_and_a_repository() {
+        let mut p = pr();
+        p.head_oid = "moved".into();
+        let s = pr_block(&p, None);
+        assert!(!s.contains("closes:"), "stale detail: {s}");
+        let mut p = pr();
+        p.detail.as_mut().unwrap().linked_issues.insert(
+            0,
+            LinkedIssue {
+                number: 42,
+                title: "Old".into(),
+                ..Default::default()
+            },
+        );
+        let s = pr_block(&p, None);
+        assert!(s.contains("closes: o/r#5 Tabs\n"), "{s}");
+        assert!(!s.contains("#42"), "no repository: {s}");
     }
 
     #[test]

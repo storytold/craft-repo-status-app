@@ -1131,7 +1131,14 @@ mod tests {
     #[test]
     fn fixes_from_other_reviewed_repositories_are_associated() {
         let (mut s, mut repos) = store();
-        let facts = with_issues(&mut s, &repos);
+        let mut facts = with_issues(&mut s, &repos);
+        facts.repos.insert(
+            "o/other".into(),
+            StatusRepo {
+                urgent: vec![urgent(701, &[])],
+                ..Default::default()
+            },
+        );
         let mut foreign = s.repo_mut(&repos[0]).prs[&1].clone();
         foreign.title = "Repair O/R#701".into();
         foreign.detail.as_mut().unwrap().linked_issues = vec![crate::model::LinkedIssue {
@@ -1144,6 +1151,11 @@ mod tests {
         repos.push("o/other".into());
         let cfg = Config::default();
         let rows = issues(&s, &repos, &cfg, &facts);
+        let same_number = rows
+            .iter()
+            .find(|r| r.repo == "o/other" && r.issue.number == 701)
+            .unwrap();
+        assert!(same_number.fixes.is_empty());
         let named = rows
             .iter()
             .find(|r| r.repo == "o/r" && r.issue.number == 701)

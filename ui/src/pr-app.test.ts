@@ -561,6 +561,7 @@ test('Escape from a foreign fixing PR returns to the original repository Issues 
   await tick();
   (h.$('[data-rel="2"]') as HTMLElement).click();
   await tick();
+  assert.deepEqual(h.calls.findLast((c) => c.cmd === 'get_pr'), { cmd: 'get_pr', args: { repo: 'o/gamma', number: 2 } });
   h.key('Escape');
   await tick();
   assert.deepEqual(h.calls.findLast((c) => c.cmd === 'get_pr_repo'), { cmd: 'get_pr_repo', args: { repo: 'o/alpha' } });
