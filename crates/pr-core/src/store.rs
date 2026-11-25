@@ -28,7 +28,11 @@ impl Store {
         let mut repos = BTreeMap::new();
         let files = std::fs::read_dir(dir.join("repos"));
         for entry in files.into_iter().flatten().flatten() {
-            let Some(data) = std::fs::read_to_string(entry.path())
+            let path = entry.path();
+            if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
+                continue;
+            }
+            let Some(data) = std::fs::read_to_string(path)
                 .ok()
                 .and_then(|t| serde_json::from_str::<RepoData>(&t).ok())
             else {
@@ -150,6 +154,11 @@ mod tests {
         });
         s.save("o/r").unwrap();
         std::fs::write(dir.join("repos/bad.json"), "{not json").unwrap();
+        std::fs::write(
+            dir.join("repos/o@pending.tmp42-0"),
+            r#"{"repo":"o/pending"}"#,
+        )
+        .unwrap();
         let back = Store::load(&dir);
         assert_eq!(back.repos.len(), 1);
         assert_eq!(back.pr("o/r", 1).unwrap().title, "One (#7)");
