@@ -674,6 +674,7 @@ fn run_batch(
     c: &ClaudeConfig,
     repo: &str,
     numbers: &[u64],
+    budget: f64,
 ) -> Result<f64, String> {
     let prs: Vec<Pr> = {
         let store = state.store.lock().unwrap();
@@ -685,7 +686,7 @@ fn run_batch(
     let refs: Vec<&Pr> = prs.iter().collect();
     let cwd = state.claude_dir.clone();
     let (results, cost) =
-        pr_claude::analyse_batch(c, &cwd, repo, &refs).map_err(|e| e.to_string())?;
+        pr_claude::analyse_batch(c, &cwd, repo, &refs, budget).map_err(|e| e.to_string())?;
     // A PR the reply left out is marked done for this head, so it can't be
     // retried, and paid for, forever.
     let mut out = results;
@@ -706,7 +707,7 @@ fn run_batch(
     Ok(cost)
 }
 
-fn run_group(state: &PrReview, c: &ClaudeConfig, repo: &str) -> Result<f64, String> {
+fn run_group(state: &PrReview, c: &ClaudeConfig, repo: &str, budget: f64) -> Result<f64, String> {
     let (prs, local) = {
         let store = state.store.lock().unwrap();
         let d = store.repos.get(repo).ok_or("repo is gone")?;
@@ -718,7 +719,7 @@ fn run_group(state: &PrReview, c: &ClaudeConfig, repo: &str) -> Result<f64, Stri
     let refs: Vec<&Pr> = prs.iter().collect();
     let cwd = state.claude_dir.clone();
     let (groups, cost) =
-        pr_claude::group_repo(c, &cwd, repo, &refs, &local).map_err(|e| e.to_string())?;
+        pr_claude::group_repo(c, &cwd, repo, &refs, &local, budget).map_err(|e| e.to_string())?;
     let mut store = state.store.lock().unwrap();
     let d = store.repo_mut(repo);
     d.claude_groups = groups;
@@ -754,7 +755,13 @@ fn run_request(
         apply_analyses(state, &req.repo, vec![(req.number, a)]);
         Ok(cost)
     } else {
-        run_batch(state, c, &req.repo, &[req.number])
+        run_batch(
+            state,
+            c,
+            &req.repo,
+            &[req.number],
+            pr_claude::CALL_BUDGET_USD,
+        )
     }
 }
 
@@ -798,11 +805,14 @@ fn run_claude(
     token: &str,
     request: Option<&ClaudeRequest>,
     job: Option<&ClaudeJob>,
+    remaining_budget: f64,
 ) -> Result<f64, String> {
     match (request, job) {
         (Some(r), _) => run_request(state, c, token, r),
-        (_, Some(ClaudeJob::Batch { repo, numbers })) => run_batch(state, c, repo, numbers),
-        (_, Some(ClaudeJob::Group { repo })) => run_group(state, c, repo),
+        (_, Some(ClaudeJob::Batch { repo, numbers })) => {
+            run_batch(state, c, repo, numbers, remaining_budget)
+        }
+        (_, Some(ClaudeJob::Group { repo })) => run_group(state, c, repo, remaining_budget),
         _ => Ok(0.0),
     }
 }
@@ -868,6 +878,7 @@ fn claude_turn(app: &AppHandle, turns: &mut ClaudeTurns) -> bool {
         &shared.github_token,
         request.as_ref(),
         job.as_ref(),
+        c.max_usd_per_day - turns.ledger.usd,
     );
     let done = Utc::now();
     let outcome = match result {
