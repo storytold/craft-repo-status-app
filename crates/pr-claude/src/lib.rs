@@ -42,6 +42,21 @@ pub enum Error {
     Failed(String),
     #[error("claude returned something unreadable: {0}")]
     Unreadable(String),
+    #[error("{source}")]
+    Billed { cost_usd: f64, source: Box<Error> },
+}
+
+impl Error {
+    fn with_cost(self, cost_usd: f64) -> Self {
+        if cost_usd > 0.0 {
+            Self::Billed {
+                cost_usd,
+                source: Box::new(self),
+            }
+        } else {
+            self
+        }
+    }
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -104,6 +119,7 @@ pub struct Reply {
 pub fn parse_reply(stdout: &str) -> Result<Reply> {
     let v: Value = serde_json::from_str(stdout.trim())
         .map_err(|e| Error::Unreadable(format!("{e}: {}", truncate(stdout, 200))))?;
+    let cost_usd = v["total_cost_usd"].as_f64().unwrap_or_default().max(0.0);
     if v["is_error"].as_bool() == Some(true)
         || v["subtype"].as_str().is_some_and(|s| s != "success")
     {
@@ -112,16 +128,13 @@ pub fn parse_reply(stdout: &str) -> Result<Reply> {
             .filter(|s| !s.is_empty())
             .or(v["subtype"].as_str())
             .unwrap_or("unknown error");
-        return Err(Error::Failed(truncate(why, 300)));
+        return Err(Error::Failed(truncate(why, 300)).with_cost(cost_usd));
     }
     let output = v["structured_output"].clone();
     if output.is_null() {
-        return Err(Error::Unreadable("no structured output".to_string()));
+        return Err(Error::Unreadable("no structured output".to_string()).with_cost(cost_usd));
     }
-    Ok(Reply {
-        output,
-        cost_usd: v["total_cost_usd"].as_f64().unwrap_or(0.0),
-    })
+    Ok(Reply { output, cost_usd })
 }
 
 /// Runs one call, in `cwd` (which should hold nothing Claude would pick up).
@@ -439,9 +452,9 @@ pub fn analyse_deep(
     );
     let reply = call(cfg, cwd, SYSTEM, &batch_schema(), &prompt, CALL_BUDGET_USD)?;
     let mut parsed = parse_batch(&reply.output, &[pr.number], &cfg.model, Utc::now());
-    let (_, mut a) = parsed
-        .pop()
-        .ok_or_else(|| Error::Unreadable("no assessment for the PR".to_string()))?;
+    let (_, mut a) = parsed.pop().ok_or_else(|| {
+        Error::Unreadable("no assessment for the PR".to_string()).with_cost(reply.cost_usd)
+    })?;
     a.for_head = pr.head_oid.clone();
     a.deep = true;
     a.diff_truncated = cut;
@@ -512,6 +525,22 @@ impl Ledger {
         self.runs.push(now);
     }
 
+    /// Account for a completed CLI call before handing the job its output or error.
+    pub fn account<T>(&mut self, result: Result<(T, f64)>) -> Result<T> {
+        match result {
+            Ok((value, cost)) => {
+                self.record(Utc::now(), cost);
+                Ok(value)
+            }
+            Err(e) => {
+                if let Error::Billed { cost_usd, .. } = &e {
+                    self.record(Utc::now(), *cost_usd);
+                }
+                Err(e)
+            }
+        }
+    }
+
     /// Whether another background call is within the limits.
     pub fn allows(&self, cfg: &ClaudeConfig) -> bool {
         self.usd < cfg.max_usd_per_day && (self.runs.len() as u32) < cfg.max_runs_per_hour
@@ -572,6 +601,20 @@ mod tests {
             parse_reply(r#"{"is_error":false,"subtype":"success"}"#),
             Err(Error::Unreadable(_))
         ));
+    }
+
+    #[test]
+    fn ledger_charges_billed_failures_and_preserves_the_error() {
+        let mut ledger = Ledger::default();
+        let reply = parse_reply(r#"{"subtype":"error_max_budget_usd","total_cost_usd":0.25}"#);
+        let err = ledger
+            .account(reply.map(|r| (r.output, r.cost_usd)))
+            .unwrap_err();
+        assert!(err.to_string().contains("error_max_budget_usd"));
+        assert_eq!(ledger.usd, 0.25);
+        assert_eq!(ledger.runs.len(), 1);
+        assert!(ledger.account::<()>(Err(Error::NoBinary)).is_err());
+        assert_eq!(ledger.runs.len(), 1);
     }
 
     fn pr() -> Pr {
