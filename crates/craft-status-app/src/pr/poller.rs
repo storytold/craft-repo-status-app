@@ -674,7 +674,9 @@ fn run_batch(
     c: &ClaudeConfig,
     repo: &str,
     numbers: &[u64],
-) -> Result<f64, String> {
+    budget: f64,
+    ledger: &mut pr_claude::Ledger,
+) -> Result<(), String> {
     let prs: Vec<Pr> = {
         let store = state.store.lock().unwrap();
         numbers
@@ -684,8 +686,9 @@ fn run_batch(
     };
     let refs: Vec<&Pr> = prs.iter().collect();
     let cwd = state.claude_dir.clone();
-    let (results, cost) =
-        pr_claude::analyse_batch(c, &cwd, repo, &refs).map_err(|e| e.to_string())?;
+    let results = ledger
+        .account(pr_claude::analyse_batch(c, &cwd, repo, &refs, budget))
+        .map_err(|e| e.to_string())?;
     // A PR the reply left out is marked done for this head, so it can't be
     // retried, and paid for, forever.
     let mut out = results;
@@ -703,10 +706,16 @@ fn run_batch(
         }
     }
     apply_analyses(state, repo, out);
-    Ok(cost)
+    Ok(())
 }
 
-fn run_group(state: &PrReview, c: &ClaudeConfig, repo: &str) -> Result<f64, String> {
+fn run_group(
+    state: &PrReview,
+    c: &ClaudeConfig,
+    repo: &str,
+    budget: f64,
+    ledger: &mut pr_claude::Ledger,
+) -> Result<(), String> {
     let (prs, local) = {
         let store = state.store.lock().unwrap();
         let d = store.repos.get(repo).ok_or("repo is gone")?;
@@ -717,8 +726,9 @@ fn run_group(state: &PrReview, c: &ClaudeConfig, repo: &str) -> Result<f64, Stri
     };
     let refs: Vec<&Pr> = prs.iter().collect();
     let cwd = state.claude_dir.clone();
-    let (groups, cost) =
-        pr_claude::group_repo(c, &cwd, repo, &refs, &local).map_err(|e| e.to_string())?;
+    let groups = ledger
+        .account(pr_claude::group_repo(c, &cwd, repo, &refs, &local, budget))
+        .map_err(|e| e.to_string())?;
     let mut store = state.store.lock().unwrap();
     let d = store.repo_mut(repo);
     d.claude_groups = groups;
@@ -727,7 +737,7 @@ fn run_group(state: &PrReview, c: &ClaudeConfig, repo: &str) -> Result<f64, Stri
     if let Err(e) = store.save(repo) {
         eprintln!("{repo}: could not save: {e}");
     }
-    Ok(cost)
+    Ok(())
 }
 
 fn run_request(
@@ -735,7 +745,8 @@ fn run_request(
     c: &ClaudeConfig,
     shared_token: &str,
     req: &ClaudeRequest,
-) -> Result<f64, String> {
+    ledger: &mut pr_claude::Ledger,
+) -> Result<(), String> {
     let pr = {
         let store = state.store.lock().unwrap();
         store
@@ -749,12 +760,20 @@ fn run_request(
             .and_then(|t| GitHub::new(t.value, shared_cache(state)))
             .map_err(|e| e.to_string())?;
         let (diff, cut) = gh.diff(&req.repo, req.number).map_err(|e| e.to_string())?;
-        let (a, cost) = pr_claude::analyse_deep(c, &cwd, &req.repo, &pr, &diff, cut)
+        let a = ledger
+            .account(pr_claude::analyse_deep(c, &cwd, &req.repo, &pr, &diff, cut))
             .map_err(|e| e.to_string())?;
         apply_analyses(state, &req.repo, vec![(req.number, a)]);
-        Ok(cost)
+        Ok(())
     } else {
-        run_batch(state, c, &req.repo, &[req.number])
+        run_batch(
+            state,
+            c,
+            &req.repo,
+            &[req.number],
+            pr_claude::CALL_BUDGET_USD,
+            ledger,
+        )
     }
 }
 
@@ -798,12 +817,16 @@ fn run_claude(
     token: &str,
     request: Option<&ClaudeRequest>,
     job: Option<&ClaudeJob>,
-) -> Result<f64, String> {
+    ledger: &mut pr_claude::Ledger,
+) -> Result<(), String> {
+    let remaining_budget = c.max_usd_per_day - ledger.usd;
     match (request, job) {
-        (Some(r), _) => run_request(state, c, token, r),
-        (_, Some(ClaudeJob::Batch { repo, numbers })) => run_batch(state, c, repo, numbers),
-        (_, Some(ClaudeJob::Group { repo })) => run_group(state, c, repo),
-        _ => Ok(0.0),
+        (Some(r), _) => run_request(state, c, token, r, ledger),
+        (_, Some(ClaudeJob::Batch { repo, numbers })) => {
+            run_batch(state, c, repo, numbers, remaining_budget, ledger)
+        }
+        (_, Some(ClaudeJob::Group { repo })) => run_group(state, c, repo, remaining_budget, ledger),
+        _ => Ok(()),
     }
 }
 
@@ -868,13 +891,11 @@ fn claude_turn(app: &AppHandle, turns: &mut ClaudeTurns) -> bool {
         &shared.github_token,
         request.as_ref(),
         job.as_ref(),
+        &mut turns.ledger,
     );
     let done = Utc::now();
     let outcome = match result {
-        Ok(cost) => {
-            turns.ledger.record(done, cost);
-            None
-        }
+        Ok(()) => None,
         Err(e) => {
             eprintln!("claude: {e}");
             turns.backoff_until = Some(done + chrono::Duration::seconds(CLAUDE_BACKOFF));

@@ -21,7 +21,7 @@ use serde_json::{json, Value};
 
 const CALL_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 /// No single call may cost more than this, whatever it's asked.
-const CALL_BUDGET_USD: &str = "2.00";
+pub const CALL_BUDGET_USD: f64 = 2.0;
 const BODY_CHARS: usize = 1500;
 const MAX_FILES: usize = 40;
 const MAX_FINDINGS: usize = 15;
@@ -42,6 +42,21 @@ pub enum Error {
     Failed(String),
     #[error("claude returned something unreadable: {0}")]
     Unreadable(String),
+    #[error("{source}")]
+    Billed { cost_usd: f64, source: Box<Error> },
+}
+
+impl Error {
+    fn with_cost(self, cost_usd: f64) -> Self {
+        if cost_usd > 0.0 {
+            Self::Billed {
+                cost_usd,
+                source: Box::new(self),
+            }
+        } else {
+            self
+        }
+    }
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -65,7 +80,7 @@ pub fn find_binary(configured: &str) -> Option<PathBuf> {
 }
 
 /// The CLI's flags. All of this is what keeps PR text from doing anything.
-pub fn cli_args(cfg: &ClaudeConfig, system: &str, schema: &Value) -> Vec<String> {
+pub fn cli_args(cfg: &ClaudeConfig, system: &str, schema: &Value, budget: f64) -> Vec<String> {
     let mut args: Vec<String> = [
         "-p",
         "--output-format",
@@ -77,11 +92,13 @@ pub fn cli_args(cfg: &ClaudeConfig, system: &str, schema: &Value) -> Vec<String>
         "",
         "--disable-slash-commands",
         "--no-session-persistence",
-        "--max-budget-usd",
-        CALL_BUDGET_USD,
     ]
     .map(String::from)
     .to_vec();
+    args.extend([
+        "--max-budget-usd".to_string(),
+        budget.min(CALL_BUDGET_USD).to_string(),
+    ]);
     args.extend(["--model".to_string(), cfg.model.clone()]);
     if !cfg.effort.is_empty() {
         args.extend(["--effort".to_string(), cfg.effort.clone()]);
@@ -102,6 +119,7 @@ pub struct Reply {
 pub fn parse_reply(stdout: &str) -> Result<Reply> {
     let v: Value = serde_json::from_str(stdout.trim())
         .map_err(|e| Error::Unreadable(format!("{e}: {}", truncate(stdout, 200))))?;
+    let cost_usd = v["total_cost_usd"].as_f64().unwrap_or_default().max(0.0);
     if v["is_error"].as_bool() == Some(true)
         || v["subtype"].as_str().is_some_and(|s| s != "success")
     {
@@ -110,16 +128,13 @@ pub fn parse_reply(stdout: &str) -> Result<Reply> {
             .filter(|s| !s.is_empty())
             .or(v["subtype"].as_str())
             .unwrap_or("unknown error");
-        return Err(Error::Failed(truncate(why, 300)));
+        return Err(Error::Failed(truncate(why, 300)).with_cost(cost_usd));
     }
     let output = v["structured_output"].clone();
     if output.is_null() {
-        return Err(Error::Unreadable("no structured output".to_string()));
+        return Err(Error::Unreadable("no structured output".to_string()).with_cost(cost_usd));
     }
-    Ok(Reply {
-        output,
-        cost_usd: v["total_cost_usd"].as_f64().unwrap_or(0.0),
-    })
+    Ok(Reply { output, cost_usd })
 }
 
 /// Runs one call, in `cwd` (which should hold nothing Claude would pick up).
@@ -129,12 +144,13 @@ pub fn call(
     system: &str,
     schema: &Value,
     prompt: &str,
+    budget: f64,
 ) -> Result<Reply> {
     use std::io::{Read, Write};
     let bin = find_binary(&cfg.binary).ok_or(Error::NoBinary)?;
     std::fs::create_dir_all(cwd).map_err(Error::Spawn)?;
     let mut child = Command::new(bin)
-        .args(cli_args(cfg, system, schema))
+        .args(cli_args(cfg, system, schema, budget))
         .current_dir(cwd)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -401,8 +417,16 @@ pub fn analyse_batch(
     cwd: &Path,
     repo: &str,
     prs: &[&Pr],
+    budget: f64,
 ) -> Result<(Vec<(u64, Analysis)>, f64)> {
-    let reply = call(cfg, cwd, SYSTEM, &batch_schema(), &batch_prompt(repo, prs))?;
+    let reply = call(
+        cfg,
+        cwd,
+        SYSTEM,
+        &batch_schema(),
+        &batch_prompt(repo, prs),
+        budget,
+    )?;
     let asked: Vec<u64> = prs.iter().map(|p| p.number).collect();
     let mut out = parse_batch(&reply.output, &asked, &cfg.model, Utc::now());
     for (n, a) in &mut out {
@@ -426,11 +450,11 @@ pub fn analyse_deep(
         "Assess this open pull request in {repo}. You have its diff, so be specific.\n\n{}",
         pr_block(pr, Some((diff, cut)))
     );
-    let reply = call(cfg, cwd, SYSTEM, &batch_schema(), &prompt)?;
+    let reply = call(cfg, cwd, SYSTEM, &batch_schema(), &prompt, CALL_BUDGET_USD)?;
     let mut parsed = parse_batch(&reply.output, &[pr.number], &cfg.model, Utc::now());
-    let (_, mut a) = parsed
-        .pop()
-        .ok_or_else(|| Error::Unreadable("no assessment for the PR".to_string()))?;
+    let (_, mut a) = parsed.pop().ok_or_else(|| {
+        Error::Unreadable("no assessment for the PR".to_string()).with_cost(reply.cost_usd)
+    })?;
     a.for_head = pr.head_oid.clone();
     a.deep = true;
     a.diff_truncated = cut;
@@ -444,6 +468,7 @@ pub fn group_repo(
     repo: &str,
     prs: &[&Pr],
     local: &[pr_core::Group],
+    budget: f64,
 ) -> Result<(Vec<ClaudeGroup>, f64)> {
     let reply = call(
         cfg,
@@ -451,6 +476,7 @@ pub fn group_repo(
         SYSTEM,
         &groups_schema(),
         &groups_prompt(repo, prs, local),
+        budget,
     )?;
     let offered: HashSet<u64> = prs.iter().map(|p| p.number).collect();
     Ok((parse_groups(&reply.output, &offered), reply.cost_usd))
@@ -499,6 +525,22 @@ impl Ledger {
         self.runs.push(now);
     }
 
+    /// Account for a completed CLI call before handing the job its output or error.
+    pub fn account<T>(&mut self, result: Result<(T, f64)>) -> Result<T> {
+        match result {
+            Ok((value, cost)) => {
+                self.record(Utc::now(), cost);
+                Ok(value)
+            }
+            Err(e) => {
+                if let Error::Billed { cost_usd, .. } = &e {
+                    self.record(Utc::now(), *cost_usd);
+                }
+                Err(e)
+            }
+        }
+    }
+
     /// Whether another background call is within the limits.
     pub fn allows(&self, cfg: &ClaudeConfig) -> bool {
         self.usd < cfg.max_usd_per_day && (self.runs.len() as u32) < cfg.max_runs_per_hour
@@ -516,9 +558,15 @@ mod tests {
 
     #[test]
     fn the_cli_gets_no_tools_settings_or_servers() {
-        let args = cli_args(&ClaudeConfig::default(), "sys", &json!({"type": "object"}));
+        let args = cli_args(
+            &ClaudeConfig::default(),
+            "sys",
+            &json!({"type": "object"}),
+            0.25,
+        );
         let has_pair = |k: &str, v: &str| args.windows(2).any(|w| w[0] == k && w[1] == v);
         assert!(has_pair("--tools", ""));
+        assert!(has_pair("--max-budget-usd", "0.25"));
         assert!(has_pair("--setting-sources", ""));
         assert!(has_pair("--model", "claude-opus-5-5"));
         assert!(has_pair("--effort", "low"));
@@ -553,6 +601,20 @@ mod tests {
             parse_reply(r#"{"is_error":false,"subtype":"success"}"#),
             Err(Error::Unreadable(_))
         ));
+    }
+
+    #[test]
+    fn ledger_charges_billed_failures_and_preserves_the_error() {
+        let mut ledger = Ledger::default();
+        let reply = parse_reply(r#"{"subtype":"error_max_budget_usd","total_cost_usd":0.25}"#);
+        let err = ledger
+            .account(reply.map(|r| (r.output, r.cost_usd)))
+            .unwrap_err();
+        assert!(err.to_string().contains("error_max_budget_usd"));
+        assert_eq!(ledger.usd, 0.25);
+        assert_eq!(ledger.runs.len(), 1);
+        assert!(ledger.account::<()>(Err(Error::NoBinary)).is_err());
+        assert_eq!(ledger.runs.len(), 1);
     }
 
     fn pr() -> Pr {
