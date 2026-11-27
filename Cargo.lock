@@ -435,6 +435,8 @@ version = "0.1.0"
 dependencies = [
  "chrono",
  "dirs",
+ "regex",
+ "ring",
  "serde",
  "serde_json",
  "thiserror 2.0.21",
@@ -451,6 +453,16 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror 2.0.21",
+]
+
+[[package]]
+name = "craft-mcp"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "craft-core",
+ "craft-github",
+ "serde_json",
 ]
 
 [[package]]

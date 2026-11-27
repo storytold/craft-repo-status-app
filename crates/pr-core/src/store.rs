@@ -111,7 +111,7 @@ impl Store {
 /// Recomputes `data.groups`. Call after anything that changes its PRs.
 pub fn refresh_groups(data: &mut RepoData) {
     let prs: Vec<&Pr> = data.prs.values().filter(|p| !p.is_draft).collect();
-    let local = local_groups(&prs);
+    let local = local_groups(&data.repo, &prs);
     let open: HashSet<u64> = data.prs.keys().copied().collect();
     data.groups = merged_groups(&data.claude_groups, local, &open);
 }
