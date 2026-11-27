@@ -726,12 +726,26 @@ mod tests {
         let a = call(&s, "my_prs", json!({}));
         assert_eq!(a["login"], Value::Null);
         assert!(a["note"].as_str().unwrap().contains("people.my_login"));
-        viewer::keep(&src.dir, "bo-example", t(18, 1)).unwrap();
+        let token = craft_github::resolve_token("not-a-real-token").unwrap();
+        viewer::keep_for_token(&src.dir, "bo-example", &token.value, t(18, 1)).unwrap();
         let a = call(&s, "my_prs", json!({}));
         assert_eq!(a["login"], "bo-example");
         assert_eq!(a["login_read_at"], json!(t(18, 1)));
         assert_eq!(a["rows"][0]["number"], 3);
         assert_eq!(a["count"], 1);
+        cleanup(&src);
+    }
+
+    #[test]
+    fn my_prs_does_not_use_another_tokens_cached_login() {
+        let src = fixture("mine-changed-token", None);
+        let s = server(&src);
+        viewer::keep_for_token(&src.dir, "bo-example", "an-earlier-token", t(18, 1)).unwrap();
+        let a = call(&s, "my_prs", json!({}));
+        assert_eq!(a["login"], Value::Null);
+        assert_eq!(a["rows"], json!([]));
+        viewer::keep(&src.dir, "bo-example", t(18, 1)).unwrap();
+        assert_eq!(call(&s, "my_prs", json!({}))["login"], Value::Null);
         cleanup(&src);
     }
 

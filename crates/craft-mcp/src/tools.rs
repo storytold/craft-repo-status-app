@@ -153,10 +153,18 @@ struct Data {
 impl Data {
     /// Reads the config and the snapshot, and with `people` the records,
     /// the kept roster and the kept login.
-    fn load(src: &Sources, now: Time, people: bool) -> Result<Data, String> {
+    fn load(src: &Sources, now: Time, people: bool, login: bool) -> Result<Data, String> {
         let mut cfg = match &src.config {
             Some(path) if path.exists() => read_config(path)?,
             _ => Config::default(),
+        };
+        let kept_viewer = login.then(|| viewer::load(&src.dir)).flatten();
+        let token_fingerprint = if kept_viewer.is_some() && cfg.people.my_login().is_none() {
+            craft_github::resolve_token(&cfg.github_token)
+                .ok()
+                .map(|token| viewer::fingerprint(&token.value))
+        } else {
+            None
         };
         cfg.github_token.clear();
         let loaded = Cache::at(src.dir.join("snapshot.json")).load();
@@ -184,7 +192,9 @@ impl Data {
             .iter()
             .map(|r| (r.clone(), PrCache::load(dir, r)))
             .collect();
-        data.viewer = viewer::load(dir);
+        data.viewer = kept_viewer.filter(|kept| {
+            token_fingerprint.is_some() && kept.token_fingerprint == token_fingerprint
+        });
         let written = caches.iter().any(|(_, c)| {
             !c.records.is_empty() || c.main_checks.is_some() || c.checked_at.is_some()
         });
@@ -400,7 +410,7 @@ fn snapshot_head(d: &Data, window: &str) -> Map<String, Value> {
 fn repos(args: &Map<String, Value>, src: &Sources, now: Time) -> Result<Value, String> {
     only(args, &["window"])?;
     let window = window(args, REPOS_WINDOW)?;
-    let d = Data::load(src, now, false)?;
+    let d = Data::load(src, now, false, false)?;
     let mut entries: Vec<&RepoEntry> = d.snap.repos.iter().collect();
     entries.sort_by(|a, b| {
         let ua = a.stats.as_ref().map(|s| s.urgency);
@@ -428,7 +438,7 @@ fn repos(args: &Map<String, Value>, src: &Sources, now: Time) -> Result<Value, S
 fn repo(args: &Map<String, Value>, src: &Sources, now: Time) -> Result<Value, String> {
     only(args, &["repo", "window"])?;
     let window = window(args, REPOS_WINDOW)?;
-    let d = Data::load(src, now, true)?;
+    let d = Data::load(src, now, true, false)?;
     let name = required_repo(args, &d)?;
     let Some(entry) = d
         .snap
@@ -553,7 +563,7 @@ fn my_prs(args: &Map<String, Value>, src: &Sources, now: Time) -> Result<Value, 
         Some(Value::Bool(b)) => *b,
         Some(_) => return Err("needs_me_only must be true or false".into()),
     };
-    let d = Data::load(src, now, true)?;
+    let d = Data::load(src, now, true, true)?;
     let Some((login, from)) = d.login() else {
         return Ok(json!({
             "now": now,
@@ -595,7 +605,7 @@ fn my_prs(args: &Map<String, Value>, src: &Sources, now: Time) -> Result<Value, 
 fn people(args: &Map<String, Value>, src: &Sources, now: Time) -> Result<Value, String> {
     only(args, &["window", "repo"])?;
     let window = window(args, PEOPLE_WINDOW)?;
-    let d = Data::load(src, now, true)?;
+    let d = Data::load(src, now, true, false)?;
     let repo = match opt_str(args, "repo")? {
         Some(r) => Some(d.repo(r)?),
         None => None,
@@ -627,7 +637,7 @@ fn pull_request(args: &Map<String, Value>, src: &Sources, now: Time) -> Result<V
         _ => None,
     }
     .ok_or("number must be a pull request number")?;
-    let d = Data::load(src, now, true)?;
+    let d = Data::load(src, now, true, true)?;
     let repo = required_repo(args, &d)?;
     let Some(rec) = d.record(&repo, number) else {
         return Err(format!(
