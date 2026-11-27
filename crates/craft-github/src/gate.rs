@@ -58,9 +58,14 @@ impl Gate {
     /// Waits for the background request in flight to finish, then holds
     /// background requests back until the session is dropped.
     pub fn poll_session(&self) -> PollSession<'_> {
+        self.poll_session_with_wait(|| {})
+    }
+
+    fn poll_session_with_wait(&self, mut waiting: impl FnMut()) -> PollSession<'_> {
         let mut st = self.state.lock().unwrap();
         st.polls += 1;
         while st.running > 0 {
+            waiting();
             st = self.wake.wait(st).unwrap();
         }
         PollSession { gate: self }
@@ -70,6 +75,10 @@ impl Gate {
     /// request is in flight, then lets one background request go. Fails
     /// with [`Error::Halted`] while a halt is kept or a pause lasts.
     pub fn background(&self) -> Result<Permit<'_>> {
+        self.background_with_wait(|| {})
+    }
+
+    fn background_with_wait(&self, mut waiting: impl FnMut()) -> Result<Permit<'_>> {
         let mut st = self.state.lock().unwrap();
         loop {
             if let Some(until) = &st.halt {
@@ -87,6 +96,7 @@ impl Gate {
                 st.running += 1;
                 return Ok(Permit { gate: self });
             }
+            waiting();
             st = self.wake.wait(st).unwrap();
         }
     }
@@ -150,7 +160,7 @@ impl Drop for Permit<'_> {
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicBool, Ordering};
-    use std::sync::Arc;
+    use std::sync::{mpsc, Arc};
     use std::time::Duration;
 
     #[test]
@@ -159,14 +169,17 @@ mod tests {
         let session = gate.poll_session();
         assert!(gate.poll_running());
         let sent = Arc::new(AtomicBool::new(false));
+        let (waiting, blocked) = mpsc::channel();
         let waiter = {
             let (gate, sent) = (gate.clone(), sent.clone());
             std::thread::spawn(move || {
-                let _permit = gate.background().unwrap();
+                let _permit = gate
+                    .background_with_wait(|| waiting.send(()).unwrap())
+                    .unwrap();
                 sent.store(true, Ordering::SeqCst);
             })
         };
-        std::thread::sleep(Duration::from_millis(100));
+        blocked.recv().unwrap();
         assert!(!sent.load(Ordering::SeqCst), "held back by the session");
         drop(session);
         waiter.join().unwrap();
@@ -179,14 +192,15 @@ mod tests {
         let gate = Arc::new(Gate::new());
         let permit = gate.background().unwrap();
         let started = Arc::new(AtomicBool::new(false));
+        let (waiting, blocked) = mpsc::channel();
         let poll = {
             let (gate, started) = (gate.clone(), started.clone());
             std::thread::spawn(move || {
-                let _session = gate.poll_session();
+                let _session = gate.poll_session_with_wait(|| waiting.send(()).unwrap());
                 started.store(true, Ordering::SeqCst);
             })
         };
-        std::thread::sleep(Duration::from_millis(100));
+        blocked.recv().unwrap();
         assert!(!started.load(Ordering::SeqCst), "the request is still out");
         assert!(
             gate.poll_running(),
