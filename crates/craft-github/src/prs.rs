@@ -4,8 +4,10 @@
 //! - The changed list: pull requests in every state, newest update first,
 //!   read down to a little before the newest update the previous call saw.
 //!   It is skipped when the repository's last fetch saw no pull request
-//!   updated since ([`Seen`]). A call reads at most [`MAX_CHANGED_PAGES`]
-//!   pages; the rest is read by the next call ([`Gap`]).
+//!   updated since ([`Seen`]) and no unread pages remain. The first fetch
+//!   reads at most one page and keeps its unread cursor for later calls.
+//!   Later calls read at most [`MAX_CHANGED_PAGES`] pages; the rest is read
+//!   by the next call ([`Gap`]).
 //! - The light sweep: a few fields of every open pull request, the author
 //!   and the title included, for a share of the repositories each call, so
 //!   that each one is swept every [`SWEEP_MINUTES`]. It finds open pull
@@ -517,7 +519,13 @@ impl<'a> Pass<'a> {
                 };
                 let more = conn["pageInfo"]["hasNextPage"].as_bool() == Some(true);
                 after = conn["pageInfo"]["endCursor"].as_str().map(str::to_string);
-                if first || reached || !more {
+                if first {
+                    if more {
+                        defer(cache, &after);
+                    }
+                    break;
+                }
+                if reached || !more {
                     break;
                 }
                 if pages >= MAX_CHANGED_PAGES {
@@ -527,7 +535,7 @@ impl<'a> Pass<'a> {
             }
             cache.high_water = newest;
         }
-        while pages < MAX_CHANGED_PAGES {
+        while !first && pages < MAX_CHANGED_PAGES {
             let Some(gap) = cache.gap.clone() else {
                 break;
             };
@@ -1893,6 +1901,37 @@ mod tests {
     }
 
     #[test]
+    fn a_first_load_keeps_unread_changes_when_no_later_updates_arrive() {
+        let now = t("2026-10-17T12:00:00Z");
+        let newest = seen_at("2026-10-17T11:00:00Z");
+        let mut cache = PrCache::default();
+        let (api, requests) = stub(vec![
+            page(
+                vec![node(7000, "OPEN", "2026-10-17T11:00:00Z")],
+                Some("first"),
+                4000,
+            ),
+            page(vec![node(6500, "OPEN", "2026-10-17T10:00:00Z")], None, 3990),
+        ]);
+        let gh = GitHub::with_api("t", api).unwrap();
+        pass(&gh, now)
+            .changed("o/r", &mut cache, Some(&newest))
+            .unwrap();
+        assert_eq!(gh.graphql_sent(), 1);
+        pass(&gh, now)
+            .changed("o/r", &mut cache, Some(&newest))
+            .unwrap();
+        assert!(
+            cache.records.contains_key(&6500),
+            "an unread open pull request was omitted"
+        );
+        assert_eq!(gh.graphql_sent(), 2);
+        assert!(cache.gap.is_none());
+        let _ = requests.recv().unwrap();
+        assert!(requests.recv().unwrap().contains("\"after\":\"first\""));
+    }
+
+    #[test]
     fn a_first_load_reads_one_page_and_a_long_list_is_finished_next_poll() {
         let now = t("2026-10-17T12:00:00Z");
         let mut cache = PrCache::default();
@@ -1905,11 +1944,30 @@ mod tests {
         pass(&gh, now)
             .changed("o/r", &mut cache, Some(&seen_at("2026-10-17T11:00:00Z")))
             .unwrap();
-        // The sweep and the backfill find the rest.
         assert_eq!(gh.graphql_sent(), 1);
         assert_eq!(cache.high_water, Some(t("2026-10-17T11:00:00Z")));
         let head = requests.recv_timeout(Duration::from_secs(10)).unwrap();
         assert!(head.contains("\"tl\":100"), "{head}");
+
+        let (api, _rest_requests) = stub(vec![page(
+            vec![node(4, "OPEN", "2026-10-17T10:00:00Z")],
+            None,
+            3990,
+        )]);
+        let gh = GitHub::with_api("t", api).unwrap();
+        pass(&gh, now)
+            .changed(
+                "o/r",
+                &mut cache,
+                Some(&Seen {
+                    pr_updated_at: Some(t("2026-10-17T11:00:00Z")),
+                    read_at: now,
+                }),
+            )
+            .unwrap();
+        assert!(cache.records.contains_key(&4));
+        assert!(cache.gap.is_none());
+        assert_eq!(cache.checked_at, Some(now));
 
         // A burst: more changes than the page limit.
         let pages: Vec<String> = (0..MAX_CHANGED_PAGES)
